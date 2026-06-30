@@ -1,0 +1,10 @@
+# Python dependencies
+aiohttp>=3.9.0
+websockets>=12.0
+python-dotenv>=1.0.0
+PyYAML>=6.0
+python-telegram-bot>=21.0
+
+# Optional for enhanced features
+# numpy>=1.24.0  # For advanced calculations
+# pandas>=2.0.0  # For data analysis

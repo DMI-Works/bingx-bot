@@ -1,0 +1,114 @@
+# Trading Bot Configuration
+
+# Exchange Configuration
+exchange:
+  name: "bingx"
+  api_key: "${BINGX_API_KEY}"
+  api_secret: "${BINGX_API_SECRET}"
+  testnet: true
+
+  # WebSocket Configuration
+  websocket:
+    enabled: true
+    reconnect_interval: 5
+    ping_interval: 20
+    max_reconnect_attempts: 10
+
+  # REST Configuration (fallback)
+  rest:
+    timeout: 30
+    max_retries: 3
+    retry_delay: 1
+
+# Trading Configuration
+trading:
+  enabled: false
+  direction: "both"  # long, short, both
+
+  # Position Sizing
+  position_size:
+    mode: "fixed_usd"  # fixed_usd, percent_balance, fixed_risk
+    value: 100
+
+  # Leverage
+  default_leverage: 10
+  leverage_by_symbol: {}
+
+  # Risk Management
+  risk:
+    max_open_positions: 3
+    max_positions_per_symbol: 1
+    max_total_risk_percent: 5.0
+    max_consecutive_losses: 3
+    cooldown_after_trade_seconds: 60
+
+  # Stop Loss
+  stop_loss:
+    mode: "fixed_percent"  # fixed_percent, atr, structural, local_extremum
+    value: 2.0
+
+  # Take Profit
+  take_profit:
+    enabled: true
+    levels:
+      - percent: 3.0
+        close_percent: 50
+      - percent: 5.0
+        close_percent: 50
+    trailing:
+      enabled: false
+      activation_percent: 2.0
+      callback_percent: 1.0
+
+  # Filters
+  filters:
+    whitelist_symbols: []
+    blacklist_symbols: []
+    min_price: {}
+    max_price: {}
+    min_volume_24h: 1000000
+    max_spread_percent: 0.5
+    min_atr: 0
+
+  # Time Filters
+  time_filters:
+    enabled: false
+    allowed_hours: []
+    timezone: "UTC"
+
+# Strategy Configuration
+strategies:
+  enabled: []
+
+# Database Configuration
+database:
+  path: "data/trading_bot.db"
+  backup_interval_hours: 6
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  file: "logs/trading_bot.log"
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+
+# Telegram Configuration
+telegram:
+  enabled: false
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  chat_id: "${TELEGRAM_CHAT_ID}"
+
+  # Notifications
+  notifications:
+    position_opened: true
+    position_closed: true
+    take_profit_hit: true
+    stop_loss_hit: true
+    errors: true
+    websocket_reconnect: true
+    daily_summary: true
+
+# Emergency Stop
+emergency:
+  active: false
+  close_positions: false
