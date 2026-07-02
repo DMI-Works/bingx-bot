@@ -132,12 +132,13 @@ class BingXClient:
 
     async def get_positions(self) -> List[Dict[str, Any]]:
         try:
-            response = await self.rest_client.get('/openApi/swap/v2/user/positions', signed=True)
-            if isinstance(response, list):
-                return response
-            elif isinstance(response, dict):
-                return response.get('data', {}).get('positions', [])
-            return []
+            response = await self.rest_client.get(
+                "/openApi/swap/v2/user/positions",
+                signed=True
+            )
+
+            return response.get("data", [])
+
         except Exception as e:
             logger.error(f"Failed to get positions: {e}")
             raise
