@@ -21,7 +21,7 @@ class BaseStrategy(ABC):
         if not self.enabled:
             return
 
-        data = event.data
+        data = event.data[0]
         symbol = data.get('s')
         price = float(data.get('p', 0))
 
