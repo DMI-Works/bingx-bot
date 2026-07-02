@@ -132,7 +132,8 @@ async def main():
                 event_bus=event_bus,
                 position_manager=position_manager,
                 order_manager=order_manager,
-                settings_manager=settings_manager
+                settings_manager=settings_manager,
+                exchange_client=exchange
             )
             await telegram_bot.start()
             logger.info("[OK] Telegram Bot started")

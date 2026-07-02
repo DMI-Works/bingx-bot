@@ -20,7 +20,8 @@ class TelegramBot:
         event_bus: EventBus,
         position_manager: PositionManager,
         order_manager: OrderManager,
-        settings_manager: SettingsManager
+        settings_manager: SettingsManager,
+        exchange_client=None
     ):
         self.token = token
         self.chat_id = chat_id
@@ -28,6 +29,7 @@ class TelegramBot:
         self.position_manager = position_manager
         self.order_manager = order_manager
         self.settings_manager = settings_manager
+        self.exchange_client = exchange_client
 
         self.application: Optional[Application] = None
         self.notifications_enabled = True
@@ -48,6 +50,7 @@ class TelegramBot:
 
         self.application.add_handler(CommandHandler("start", self._cmd_start))
         self.application.add_handler(CommandHandler("status", self._cmd_status))
+        self.application.add_handler(CommandHandler("balance", self._cmd_balance))
         self.application.add_handler(CommandHandler("positions", self._cmd_positions))
         self.application.add_handler(CommandHandler("settings", self._cmd_settings))
         self.application.add_handler(CommandHandler("emergency", self._cmd_emergency))
@@ -83,6 +86,7 @@ class TelegramBot:
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard = [
             [InlineKeyboardButton("📊 Status", callback_data="status")],
+            [InlineKeyboardButton("💰 Balance", callback_data="balance")],
             [InlineKeyboardButton("📈 Positions", callback_data="positions")],
             [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
             [InlineKeyboardButton("🚨 Emergency Stop", callback_data="emergency")]
@@ -107,6 +111,35 @@ Total Unrealized PnL: ${self.position_manager.get_total_unrealized_pnl():.2f}
 """
 
         await self._reply(update, status_text, parse_mode='HTML')
+
+    async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self.exchange_client:
+            await self._reply(update, "❌ Exchange client not available")
+            return
+
+        try:
+            balance_data = await self.exchange_client.get_account_balance()
+            print(f"Balance Data: {balance_data}")  # Debugging line to check the response structure
+            if balance_data.get('code') == 0 and 'data' in balance_data:
+                data = balance_data['data']
+                balance = data.get('balance', {})
+
+                balance_text = f"""
+<b>💰 Account Balance</b>
+
+Available Balance: ${float(balance.get('availableMargin', 0)):.2f}
+Total Balance: ${float(balance.get('balance', 0)):.2f}
+Unrealized PnL: ${float(balance.get('unrealizedProfit', 0)):.2f}
+Used Margin: ${float(balance.get('usedMargin', 0)):.2f}
+Equity: ${float(balance.get('equity', 0)):.2f}
+"""
+                await self._reply(update, balance_text, parse_mode='HTML')
+            else:
+                await self._reply(update, f"❌ Failed to fetch balance: {balance_data.get('msg', 'Unknown error')}")
+
+        except Exception as e:
+            logger.error(f"Error fetching balance: {e}")
+            await self._reply(update, f"❌ Error: {str(e)}")
 
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         positions = self.position_manager.get_open_positions()
@@ -158,6 +191,8 @@ Stop Loss: ${pos.stop_loss_price:.4f if pos.stop_loss_price else 'N/A'}
 
         if query.data == "status":
             await self._cmd_status(update, context)
+        elif query.data == "balance":
+            await self._cmd_balance(update, context)
         elif query.data == "positions":
             await self._cmd_positions(update, context)
         elif query.data == "settings":
@@ -237,22 +272,3 @@ Context: {event.data.get('context', 'N/A')}
 {event.data.get('error', 'Unknown critical error')}
 """
         await self.send_message(text)
-
-    async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        try:
-            balance = await self.exchange.get_balance()
-
-            text = f"""
-    <b>💰 Account Balance</b>
-
-    Available: {balance['availableMargin']} USDT
-    Balance: {balance['balance']} USDT
-    Equity: {balance['equity']} USDT
-    Unrealized PnL: {balance['unrealizedProfit']} USDT
-    """
-
-            await self._reply(update, text, parse_mode="HTML")
-
-        except Exception as e:
-            logger.exception(e)
-            await self._reply(update, f"❌ Failed to get balance\n\n{e}")
