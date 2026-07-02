@@ -25,13 +25,22 @@ def setup_logging(config: ConfigLoader) -> None:
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # File handler with UTF-8 encoding
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+    # Console handler with UTF-8 encoding
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+    # Force UTF-8 for console on Windows
+    if sys.platform == 'win32':
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+
     logging.basicConfig(
         level=getattr(logging, log_level),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(sys.stdout)
-        ]
+        handlers=[file_handler, console_handler]
     )
 
     logger = logging.getLogger(__name__)
@@ -50,11 +59,11 @@ async def main():
     logger.info("=" * 60)
 
     db = Database(config.get('database.path'))
-    logger.info("✓ Database initialized")
+    logger.info("[OK] Database initialized")
 
     event_bus = EventBus()
     await event_bus.start()
-    logger.info("✓ Event Bus started")
+    logger.info("[OK] Event Bus started")
 
     api_key = os.getenv('BINGX_API_KEY')
     api_secret = os.getenv('BINGX_API_SECRET')
@@ -70,16 +79,16 @@ async def main():
         testnet=testnet,
         event_bus=event_bus
     )
-    logger.info("✓ Exchange client initialized")
+    logger.info("[OK] Exchange client initialized")
 
     settings_manager = SettingsManager(db, event_bus)
-    logger.info("✓ Settings Manager initialized")
+    logger.info("[OK] Settings Manager initialized")
 
     order_manager = OrderManager(db, event_bus)
-    logger.info("✓ Order Manager initialized")
+    logger.info("[OK] Order Manager initialized")
 
     position_manager = PositionManager(db, event_bus)
-    logger.info("✓ Position Manager initialized")
+    logger.info("[OK] Position Manager initialized")
 
     recovery_engine = RecoveryEngine(
         exchange=exchange,
@@ -88,11 +97,11 @@ async def main():
         db=db,
         event_bus=event_bus
     )
-    logger.info("✓ Recovery Engine initialized")
+    logger.info("[OK] Recovery Engine initialized")
 
     risk_config = config.get('trading.risk')
     risk_manager = RiskManager(db, event_bus, risk_config)
-    logger.info("✓ Risk Manager initialized")
+    logger.info("[OK] Risk Manager initialized")
 
     execution_engine = ExecutionEngine(
         exchange=exchange,
@@ -101,7 +110,7 @@ async def main():
         event_bus=event_bus,
         db=db
     )
-    logger.info("✓ Execution Engine initialized")
+    logger.info("[OK] Execution Engine initialized")
 
     logger.info("Starting recovery process...")
     recovery_success = await recovery_engine.recover()
@@ -126,7 +135,7 @@ async def main():
                 settings_manager=settings_manager
             )
             await telegram_bot.start()
-            logger.info("✓ Telegram Bot started")
+            logger.info("[OK] Telegram Bot started")
         else:
             logger.warning("Telegram credentials not found, bot disabled")
 
@@ -135,12 +144,12 @@ async def main():
         await exchange.start_websocket()
         await exchange.subscribe_account()
         await exchange.subscribe_orders()
-        logger.info("✓ WebSocket connected")
+        logger.info("[OK] WebSocket connected")
 
         whitelist_symbols = config.get('trading.filters.whitelist_symbols', [])
         for symbol in whitelist_symbols:
             await exchange.subscribe_trades(symbol)
-            logger.info(f"✓ Subscribed to {symbol}")
+            logger.info(f"[OK] Subscribed to {symbol}")
 
     strategy_config = {
         'sma_period': 20,
@@ -154,7 +163,7 @@ async def main():
     enabled_strategies = config.get('strategies.enabled', [])
     if 'SimpleMovingAverageStrategy' in enabled_strategies:
         strategy.enable()
-        logger.info("✓ SimpleMovingAverageStrategy enabled")
+        logger.info("[OK] SimpleMovingAverageStrategy enabled")
 
     logger.info("=" * 60)
     logger.info("Ruflo Trading Bot is running")
@@ -172,19 +181,19 @@ async def main():
 
     if telegram_bot:
         await telegram_bot.stop()
-        logger.info("✓ Telegram Bot stopped")
+        logger.info("[OK] Telegram Bot stopped")
 
     await exchange.stop_websocket()
-    logger.info("✓ WebSocket stopped")
+    logger.info("[OK] WebSocket stopped")
 
     await exchange.close()
-    logger.info("✓ Exchange client closed")
+    logger.info("[OK] Exchange client closed")
 
     await event_bus.stop()
-    logger.info("✓ Event Bus stopped")
+    logger.info("[OK] Event Bus stopped")
 
     db.close()
-    logger.info("✓ Database closed")
+    logger.info("[OK] Database closed")
 
     logger.info("Ruflo Trading Bot stopped successfully")
 

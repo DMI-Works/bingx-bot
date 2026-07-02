@@ -5,7 +5,6 @@ from typing import Dict, Any, Optional, List
 from .websocket_client import WebSocketClient
 from .rest_client import RestClient
 from ..events import EventBus, Event, EventType
-from ..execution import Order, OrderSide, OrderType
 
 
 logger = logging.getLogger(__name__)
@@ -27,7 +26,7 @@ class BingXClient:
         # URLs
         if testnet:
             self.rest_base_url = "https://open-api-vst.bingx.com"
-            self.ws_url = "wss://open-api-vst.bingx.com/market"
+            self.ws_url = "wss://vst-open-api-ws.bingx.com/swap-market"
         else:
             self.rest_base_url = "https://open-api.bingx.com"
             self.ws_url = "wss://open-api-swap.bingx.com/swap-market"

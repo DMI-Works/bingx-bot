@@ -28,7 +28,7 @@ trading:
   # Position Sizing
   position_size:
     mode: "fixed_usd"  # fixed_usd, percent_balance, fixed_risk
-    value: 100
+    value: 10
 
   # Leverage
   default_leverage: 10
@@ -45,7 +45,7 @@ trading:
   # Stop Loss
   stop_loss:
     mode: "fixed_percent"  # fixed_percent, atr, structural, local_extremum
-    value: 2.0
+    value: 20.0
 
   # Take Profit
   take_profit:
@@ -62,7 +62,7 @@ trading:
 
   # Filters
   filters:
-    whitelist_symbols: []
+    whitelist_symbols: ["BTC-USDT", "ETH-USDT"]
     blacklist_symbols: []
     min_price: {}
     max_price: {}
@@ -94,7 +94,7 @@ logging:
 
 # Telegram Configuration
 telegram:
-  enabled: false
+  enabled: true
   bot_token: "${TELEGRAM_BOT_TOKEN}"
   chat_id: "${TELEGRAM_CHAT_ID}"
 

@@ -73,6 +73,13 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Failed to send Telegram message: {e}")
 
+    async def _reply(self, update: Update, text: str, **kwargs):
+        if update.message:
+            return await update.message.reply_text(text, **kwargs)
+
+        if update.callback_query:
+            return await update.callback_query.message.reply_text(text, **kwargs)
+            
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard = [
             [InlineKeyboardButton("📊 Status", callback_data="status")],
@@ -82,7 +89,7 @@ class TelegramBot:
         ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Trading Bot Control Panel", reply_markup=reply_markup)
+        await self._reply(update, "Trading Bot Control Panel", reply_markup=reply_markup)
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         positions = self.position_manager.get_open_positions()
@@ -99,13 +106,13 @@ Total Margin Used: ${self.position_manager.get_total_margin_used():.2f}
 Total Unrealized PnL: ${self.position_manager.get_total_unrealized_pnl():.2f}
 """
 
-        await update.message.reply_text(status_text, parse_mode='HTML')
+        await self._reply(update, status_text, parse_mode='HTML')
 
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         positions = self.position_manager.get_open_positions()
 
         if not positions:
-            await update.message.reply_text("No open positions")
+            await self._reply(update, "No open positions")
             return
 
         text = "<b>📈 Open Positions</b>\n\n"
@@ -122,7 +129,7 @@ Stop Loss: ${pos.stop_loss_price:.4f if pos.stop_loss_price else 'N/A'}
 ---
 """
 
-        await update.message.reply_text(text, parse_mode='HTML')
+        await self._reply(update, text, parse_mode='HTML')
 
     async def _cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard = [
@@ -133,7 +140,7 @@ Stop Loss: ${pos.stop_loss_price:.4f if pos.stop_loss_price else 'N/A'}
         ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("⚙️ Settings", reply_markup=reply_markup)
+        await self._reply(update, "⚙️ Settings", reply_markup=reply_markup)
 
     async def _cmd_emergency(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard = [
@@ -143,7 +150,7 @@ Stop Loss: ${pos.stop_loss_price:.4f if pos.stop_loss_price else 'N/A'}
         ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("⚠️ Emergency Stop - Choose action:", reply_markup=reply_markup)
+        await self._reply(update, "⚠️ Emergency Stop - Choose action:", reply_markup=reply_markup)
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -230,3 +237,22 @@ Context: {event.data.get('context', 'N/A')}
 {event.data.get('error', 'Unknown critical error')}
 """
         await self.send_message(text)
+
+    async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            balance = await self.exchange.get_balance()
+
+            text = f"""
+    <b>💰 Account Balance</b>
+
+    Available: {balance['availableMargin']} USDT
+    Balance: {balance['balance']} USDT
+    Equity: {balance['equity']} USDT
+    Unrealized PnL: {balance['unrealizedProfit']} USDT
+    """
+
+            await self._reply(update, text, parse_mode="HTML")
+
+        except Exception as e:
+            logger.exception(e)
+            await self._reply(update, f"❌ Failed to get balance\n\n{e}")

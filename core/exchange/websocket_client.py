@@ -1,6 +1,7 @@
 import asyncio
 import websockets
 import json
+import gzip
 import logging
 from typing import Callable, Optional
 from datetime import datetime
@@ -100,6 +101,19 @@ class WebSocketClient:
         while self.is_running and self.is_connected:
             try:
                 message = await asyncio.wait_for(self.ws.recv(), timeout=self.ping_interval * 2)
+
+                # Handle binary gzip-compressed data
+                if isinstance(message, bytes):
+                    try:
+                        message = gzip.decompress(message).decode('utf-8')
+                    except Exception:
+                        # Not gzipped, try direct decode
+                        message = message.decode('utf-8')
+
+                if isinstance(message, str) and message.lower() == "ping":
+                    await self.ws.send("Pong")
+                    continue
+
                 data = json.loads(message)
                 logger.debug(f"Received: {data}")
 
