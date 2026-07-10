@@ -153,7 +153,7 @@ async def main():
             logger.info(f"[OK] Subscribed to {symbol}")
 
     strategy_config = {
-        'sma_period': 20,
+        'sma_period': 5,  
         'position_size': config.get('trading.position_size.value', 100),
         'stop_loss_percent': config.get('trading.stop_loss.value', 2.0),
         'take_profit_percent': config.get('trading.take_profit.levels.0.percent', 3.0)

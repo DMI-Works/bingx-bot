@@ -163,7 +163,8 @@ class BingXClient:
         quantity: float,
         price: Optional[float] = None,
         stop_price: Optional[float] = None,
-        reduce_only: bool = False
+        reduce_only: bool = False,
+        position_side: Optional[str] = None
     ) -> Dict[str, Any]:
 
         try:
@@ -172,8 +173,16 @@ class BingXClient:
                 'side': side,
                 'type': order_type,
                 'quantity': quantity,
-                'reduceOnly': reduce_only
             }
+
+            if position_side:
+                params['positionSide'] = position_side
+            else:
+                # BUY = LONG position, SELL = SHORT position
+                params['positionSide'] = 'LONG' if side == 'BUY' else 'SHORT'
+
+            if reduce_only:
+                params['reduceOnly'] = 'true'
 
             if price:
                 params['price'] = price

@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import time
 import logging
+import json
 from typing import Dict, Any, Optional
 from urllib.parse import urlencode
 
@@ -35,14 +36,19 @@ class RestClient:
             )
         return self.session
 
-    def _generate_signature(self, params: Dict[str, Any]) -> str:
-        query_string = urlencode(sorted(params.items()))
+    def _generate_signature(self, params_str: str) -> str:
         signature = hmac.new(
             self.api_secret.encode('utf-8'),
-            query_string.encode('utf-8'),
+            params_str.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
         return signature
+
+    def _parse_param(self, params: Dict[str, Any]) -> str:
+        """Generate parseParam string according to BingX requirements"""
+        sorted_keys = sorted(params.keys())
+        params_list = [f"{key}={params[key]}" for key in sorted_keys]
+        return "&".join(params_list)
 
     async def _request(
         self,
@@ -57,7 +63,9 @@ class RestClient:
 
         if signed:
             params['timestamp'] = int(time.time() * 1000)
-            params['signature'] = self._generate_signature(params)
+            params_str = self._parse_param(params)
+            signature = self._generate_signature(params_str)
+            params['signature'] = signature
 
         headers = {
             'X-BX-APIKEY': self.api_key
@@ -70,18 +78,23 @@ class RestClient:
             try:
                 if method == 'GET':
                     async with session.get(url, params=params, headers=headers) as response:
+                        result = await response.json()
                         response.raise_for_status()
-                        return await response.json()
+                        return result
 
                 elif method == 'POST':
-                    async with session.post(url, json=params, headers=headers) as response:
+                    # For POST, add params to URL query string
+                    full_url = f"{url}?{self._parse_param(params)}" if params else url
+                    async with session.post(full_url, headers=headers) as response:
+                        result = await response.json()
                         response.raise_for_status()
-                        return await response.json()
+                        return result
 
                 elif method == 'DELETE':
                     async with session.delete(url, params=params, headers=headers) as response:
+                        result = await response.json()
                         response.raise_for_status()
-                        return await response.json()
+                        return result
 
             except aiohttp.ClientError as e:
                 logger.warning(f"Request failed (attempt {attempt + 1}/{self.max_retries}): {e}")
