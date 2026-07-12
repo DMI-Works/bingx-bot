@@ -83,7 +83,6 @@ class ExecutionEngine:
                 order_type=OrderType.MARKET,
                 quantity=quantity
             )
-            logger.info(f"Test 1")
             order = await self.order_manager.create_order(order)
 
             exchange_order = await self._send_order_with_retry(order)
@@ -111,8 +110,6 @@ class ExecutionEngine:
                 order_status = exchange_order.get('status')
                 avg_price = float(exchange_order.get('avgPrice', 0))
                 executed_qty = float(exchange_order.get('executedQty', 0))
-
-            logger.info(f"Test 2, order_id: {order_id}, status: {order_status}, avg_price: {avg_price}, executed_qty: {executed_qty}")
 
             # Якщо ордер вже заповнений (MARKET ордери часто заповнюються миттєво)
             # Перевіряємо статус FILLED або executed_qty близький до order.quantity (з урахуванням округлення біржі)
@@ -143,13 +140,14 @@ class ExecutionEngine:
             logger.info(f"Order filled: {order.id} @ {order.average_price}")
 
             entry_price = order.average_price
+            actual_quantity = order.filled_quantity if order.filled_quantity else quantity
             margin = (entry_price * quantity) / leverage
 
             position = Position(
                 symbol=symbol,
                 side=PositionSide.LONG if side == 'LONG' else PositionSide.SHORT,
                 entry_price=entry_price,
-                quantity=quantity,
+                quantity=actual_quantity,
                 leverage=leverage,
                 margin=margin,
                 stop_loss_price=stop_loss_price,
@@ -201,7 +199,7 @@ class ExecutionEngine:
 
             order = await self.order_manager.create_order(order)
 
-            exchange_order = await self._send_order_with_retry(order, reduce_only=True)
+            exchange_order = await self._send_order_with_retry(order, reduce_only=True, position_side=position.side.value)
 
             if not exchange_order:
                 logger.error(f"Failed to send close order after retries")
@@ -239,7 +237,7 @@ class ExecutionEngine:
 
             return False
 
-    async def _send_order_with_retry(self, order: Order, reduce_only: bool = False) -> Optional[dict]:
+    async def _send_order_with_retry(self, order: Order, reduce_only: bool = False,  position_side: Optional[str] = None) -> Optional[dict]:
         for attempt in range(self.max_order_retries):
             try:
                 exchange_order = await self.exchange.create_order(
@@ -249,7 +247,8 @@ class ExecutionEngine:
                     quantity=order.quantity,
                     price=order.price,
                     stop_price=order.stop_price,
-                    reduce_only=reduce_only
+                    reduce_only=reduce_only,
+                    position_side=position_side
                 )
 
                 return exchange_order
@@ -358,7 +357,8 @@ class ExecutionEngine:
                     order_type=order.order_type.value,
                     quantity=order.quantity,
                     stop_price=order.stop_price,
-                    reduce_only=True
+                    reduce_only=True,
+                    position_side=position.side.value
                 )
 
                 await self.order_manager.update_order_status(
@@ -421,7 +421,8 @@ class ExecutionEngine:
                     order_type=order.order_type.value,
                     quantity=order.quantity,
                     stop_price=order.stop_price,
-                    reduce_only=True
+                    reduce_only=True,
+                    position_side=position.side.value
                 )
 
                 await self.order_manager.update_order_status(

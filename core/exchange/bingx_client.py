@@ -237,8 +237,8 @@ class BingXClient:
                 # BUY = LONG position, SELL = SHORT position
                 params['positionSide'] = 'LONG' if side == 'BUY' else 'SHORT'
 
-            if reduce_only:
-                params['reduceOnly'] = 'true'
+            # if reduce_only:
+            #     params['reduceOnly'] = 'true'
 
             if price:
                 params['price'] = price
