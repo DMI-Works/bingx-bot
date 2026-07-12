@@ -152,11 +152,14 @@ async def main():
             await exchange.subscribe_trades(symbol)
             logger.info(f"[OK] Subscribed to {symbol}")
 
+    tp_levels_config = config.get('trading.take_profit.levels', [])
+    first_tp_percent = tp_levels_config[0]['percent'] if tp_levels_config else 3.0
+
     strategy_config = {
         'sma_period': 5,  
         'position_size': config.get('trading.position_size.value', 100),
         'stop_loss_percent': config.get('trading.stop_loss.value', 2.0),
-        'take_profit_percent': config.get('trading.take_profit.levels.0.percent', 3.0)
+        'take_profit_percent': first_tp_percent
     }
 
     strategy = SimpleMovingAverageStrategy(event_bus, strategy_config)

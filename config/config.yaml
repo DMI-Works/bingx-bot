@@ -22,16 +22,16 @@ exchange:
 
 # Trading Configuration
 trading:
-  enabled: false
+  enabled: true
   direction: "both"  # long, short, both
 
   # Position Sizing
   position_size:
     mode: "fixed_usd"  # fixed_usd, percent_balance, fixed_risk
-    value: 10
+    value: 100
 
   # Leverage
-  default_leverage: 10
+  default_leverage: 20
   leverage_by_symbol: {}
 
   # Risk Management
@@ -45,7 +45,7 @@ trading:
   # Stop Loss
   stop_loss:
     mode: "fixed_percent"  # fixed_percent, atr, structural, local_extremum
-    value: 20.0
+    value: 2.0
 
   # Take Profit
   take_profit:
@@ -53,8 +53,8 @@ trading:
     levels:
       - percent: 3.0
         close_percent: 50
-      - percent: 5.0
-        close_percent: 50
+      # - percent: 5.0
+      #   close_percent: 50
     trailing:
       enabled: false
       activation_percent: 2.0
@@ -62,7 +62,8 @@ trading:
 
   # Filters
   filters:
-    whitelist_symbols: ["BTC-USDT", "ETH-USDT"]
+    whitelist_symbols: ["VINE-USDT"]
+    # whitelist_symbols: ["CLO-USDT", "VINE-USDT"]
     blacklist_symbols: []
     min_price: {}
     max_price: {}
@@ -78,7 +79,7 @@ trading:
 
 # Strategy Configuration
 strategies:
-  enabled: []
+  enabled: ['SimpleMovingAverageStrategy']
 
 # Database Configuration
 database:
