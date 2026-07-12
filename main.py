@@ -9,6 +9,7 @@ from config import ConfigLoader
 from core.database import Database
 from core.events import EventBus
 from core.exchange import BingXClient
+from core.exchange import SymbolSelector
 from core.execution import OrderManager, ExecutionEngine
 from core.state import PositionManager, RecoveryEngine, SettingsManager
 from core.risk import RiskManager
@@ -146,10 +147,16 @@ async def main():
         await exchange.start_user_data_stream()
         logger.info("[OK] WebSocket connected")
 
-        whitelist_symbols = config.get('trading.filters.whitelist_symbols', [])
-        for symbol in whitelist_symbols:
-            await exchange.subscribe_trades(symbol)
-            logger.info(f"[OK] Subscribed to {symbol}")
+
+
+        filters_config = config.get('trading.filters', {})
+        refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)
+
+        symbol_selector = SymbolSelector(exchange, filters_config)
+        selected_symbols = await symbol_selector.apply()
+        logger.info(f"[OK] Initial symbol selection: {sorted(selected_symbols)}")
+
+        await symbol_selector.start_refresh_loop(refresh_interval)
 
     tp_levels_config = config.get('trading.take_profit.levels', [])
     first_tp_percent = tp_levels_config[0]['percent'] if tp_levels_config else 3.0
@@ -190,6 +197,9 @@ async def main():
     if telegram_bot:
         await telegram_bot.stop()
         logger.info("[OK] Telegram Bot stopped")
+
+    await symbol_selector.stop_refresh_loop()
+    logger.info("[OK] Symbol selector stopped")
 
     await exchange.stop_websocket()
     logger.info("[OK] WebSocket stopped")
