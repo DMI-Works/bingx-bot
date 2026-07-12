@@ -47,14 +47,18 @@ class BingXClient:
 
     async def _handle_ws_message(self, data: Dict[str, Any]) -> None:
         try:
-            if 'dataType' in data:
+            if 'e' in data:
+                event_type = data['e']
+
+                if event_type == 'ACCOUNT_UPDATE':
+                    await self._handle_account_update(data)
+                elif event_type == 'ORDER_TRADE_UPDATE':
+                    await self._handle_order_update(data)
+
+            elif 'dataType' in data:
                 data_type = data['dataType']
 
-                if data_type == 'ACCOUNT_UPDATE':
-                    await self._handle_account_update(data)
-                elif data_type == 'ORDER_TRADE_UPDATE':
-                    await self._handle_order_update(data)
-                elif data_type.endswith('@trade'):
+                if data_type.endswith('@trade'):
                     await self._handle_price_update(data)
 
         except Exception as e:
@@ -117,51 +121,29 @@ class BingXClient:
             await self.ws_client.subscribe(f"{symbol}@trade", symbol)
             self.subscribed_symbols.add(symbol)
 
-    async def subscribe_account(self) -> None:
-        if self.ws_client:
-            # Для приватних каналів потрібна авторизація
-            timestamp = int(time.time() * 1000)
-            params_str = f"timestamp={timestamp}"
-            signature = hmac.new(
-                self.api_secret.encode('utf-8'),
-                params_str.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
+    async def start_user_data_stream(self) -> None:
+        self.listen_key = await self.get_listen_key()
+        private_ws_url = f"{self.ws_url}?listenKey={self.listen_key}"
 
-            auth_message = {
-                "id": f"auth_{timestamp}",
-                "reqType": "sub",
-                "dataType": "ACCOUNT_UPDATE",
-                "apiKey": self.api_key,
-                "timestamp": timestamp,
-                "signature": signature
-            }
+        self.private_ws_client = WebSocketClient(
+            url=private_ws_url,
+            on_message=self._handle_ws_message,
+            ping_interval=20,
+            reconnect_interval=5,
+            max_reconnect_attempts=10
+        )
+        await self.private_ws_client.start()
 
-            await self.ws_client.send(auth_message)
-            logger.info("Authenticated and subscribed to ACCOUNT_UPDATE")
+        self._keepalive_task = asyncio.create_task(self._listen_key_keepalive_loop())
 
-    async def subscribe_orders(self) -> None:
-        if self.ws_client:
-            # ORDER_TRADE_UPDATE використовує ту саму авторизацію
-            timestamp = int(time.time() * 1000)
-            params_str = f"timestamp={timestamp}"
-            signature = hmac.new(
-                self.api_secret.encode('utf-8'),
-                params_str.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
-
-            auth_message = {
-                "id": f"auth_{timestamp}",
-                "reqType": "sub",
-                "dataType": "ORDER_TRADE_UPDATE",
-                "apiKey": self.api_key,
-                "timestamp": timestamp,
-                "signature": signature
-            }
-
-            await self.ws_client.send(auth_message)
-            logger.info("Authenticated and subscribed to ORDER_TRADE_UPDATE")
+    async def _listen_key_keepalive_loop(self) -> None:
+        while True:
+            await asyncio.sleep(30 * 60)
+            try:
+                await self.keep_alive_listen_key(self.listen_key)
+                logger.info("Listen key extended")
+            except Exception as e:
+                logger.error(f"Failed to extend listen key: {e}")
 
     # REST API Methods
 
@@ -326,3 +308,13 @@ class BingXClient:
         await self.stop_websocket()
         await self.rest_client.close()
         logger.info("BingXClient closed")
+
+    async def get_listen_key(self) -> str:
+        response = await self.rest_client.post('/openApi/user/auth/userDataStream', {})
+        return response.get('listenKey')
+
+    async def keep_alive_listen_key(self, listen_key: str) -> None:
+        await self.rest_client.put('/openApi/user/auth/userDataStream', {'listenKey': listen_key})
+
+    async def close_listen_key(self, listen_key: str) -> None:
+        await self.rest_client.delete('/openApi/user/auth/userDataStream', {'listenKey': listen_key})

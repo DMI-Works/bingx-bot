@@ -32,6 +32,7 @@ class ExecutionEngine:
         self.order_retry_delay = 2
 
         self.event_bus.subscribe(EventType.SIGNAL_GENERATED, self._handle_signal)
+        self.event_bus.subscribe(EventType.ORDER_FILLED, self._handle_exchange_order_update)
         logger.info("ExecutionEngine initialized")
 
     async def _handle_signal(self, event: Event) -> None:
@@ -444,3 +445,26 @@ class ExecutionEngine:
                 data={'position_id': position.id, 'levels': len(tp_levels)},
                 source="ExecutionEngine"
             ))
+
+
+    async def _handle_exchange_order_update(self, event: Event) -> None:
+        order_data = event.data.get('o', {})
+        exchange_order_id = order_data.get('i')
+        status = order_data.get('X')  # NEW, FILLED, CANCELED, etc.
+        symbol = order_data.get('s')
+        position_side = order_data.get('ps')  # LONG / SHORT
+        realized_pnl = float(order_data.get('rp', 0))
+        avg_price = float(order_data.get('ap', 0))
+        order_type = order_data.get('o')  # MARKET, STOP_MARKET, TAKE_PROFIT_MARKET
+
+        if status == 'FILLED' and order_type in ('STOP_MARKET', 'TAKE_PROFIT_MARKET', 'MARKET') and order_data.get('ro') == True:
+            pos_side_enum = PositionSide.LONG if position_side == 'LONG' else PositionSide.SHORT
+            position = self.position_manager.get_position(symbol, pos_side_enum)
+            if position:
+                await self.position_manager.close_position(position, avg_price, realized_pnl)
+                logger.info(f"Position closed via exchange event: {symbol} {position_side}")
+
+        elif status == 'CANCELED':
+            local_order = await self.order_manager.get_order_by_exchange_id(str(exchange_order_id))
+            if local_order:
+                await self.order_manager.update_order_status(local_order, OrderStatus.CANCELLED)

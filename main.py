@@ -143,8 +143,7 @@ async def main():
     ws_enabled = config.get('exchange.websocket.enabled', True)
     if ws_enabled:
         await exchange.start_websocket()
-        await exchange.subscribe_account()
-        await exchange.subscribe_orders()
+        await exchange.start_user_data_stream()
         logger.info("[OK] WebSocket connected")
 
         whitelist_symbols = config.get('trading.filters.whitelist_symbols', [])
