@@ -155,10 +155,15 @@ async def main():
     first_tp_percent = tp_levels_config[0]['percent'] if tp_levels_config else 3.0
 
     strategy_config = {
-        'sma_period': 5,  
+        'timeframe_seconds': 60,
+        'sma_period': config.get('trading.sma_period', 20),
+        'threshold_percent': config.get('trading.threshold_percent', 0.3),
+        'confirmation_candles': config.get('trading.confirmation_candles', 2),
+        'cooldown_seconds': config.get('trading.cooldown_seconds', 300),
         'position_size': config.get('trading.position_size.value', 100),
+        'leverage': config.get('trading.leverage', 10),
         'stop_loss_percent': config.get('trading.stop_loss.value', 2.0),
-        'take_profit_percent': first_tp_percent
+        'take_profit_levels': config.get('trading.take_profit.levels', [{'percent': 3.0, 'close_percent': 100}]),
     }
 
     strategy = SimpleMovingAverageStrategy(event_bus, strategy_config)

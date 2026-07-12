@@ -1,4 +1,5 @@
-from typing import Optional
+import time
+from typing import Optional, List, Dict
 import logging
 
 from .base_strategy import BaseStrategy
@@ -8,64 +9,211 @@ from ..events import EventBus
 logger = logging.getLogger(__name__)
 
 
+class Candle:
+    __slots__ = ('open', 'high', 'low', 'close', 'start_time')
+
+    def __init__(self, price: float, start_time: float):
+        self.open = price
+        self.high = price
+        self.low = price
+        self.close = price
+        self.start_time = start_time
+
+    def update(self, price: float) -> None:
+        self.high = max(self.high, price)
+        self.low = min(self.low, price)
+        self.close = price
+
+
 class SimpleMovingAverageStrategy(BaseStrategy):
     def __init__(self, event_bus: EventBus, config: dict):
         super().__init__("SimpleMovingAverageStrategy", event_bus, config)
 
-        self.price_history = {}
-        self.sma_period = config.get('sma_period', 20)
-        self.position_size = config.get('position_size', 100)
-        self.stop_loss_percent = config.get('stop_loss_percent', 2.0)
-        self.take_profit_percent = config.get('take_profit_percent', 3.0)
+        # --- свечи ---
+        self.timeframe_seconds = config.get('timeframe_seconds', 60)
 
-        logger.info(f"SimpleMovingAverageStrategy initialized with period={self.sma_period}")
+        # --- SMA / сигнал ---
+        self.sma_period = config.get('sma_period', 20)
+        self.threshold_percent = config.get('threshold_percent', 0.3)
+        self.confirmation_candles = config.get('confirmation_candles', 2)
+
+        # --- ATR ---
+        self.atr_period = config.get('atr_period', 14)
+        self.use_atr_risk = config.get('use_atr_risk', True)
+        self.atr_stop_multiplier = config.get('atr_stop_multiplier', 1.5)
+        self.atr_tp_multipliers = config.get('atr_tp_multipliers', [2.0, 3.5])  # R-множители по уровням
+        self.tp_close_percents = config.get('tp_close_percents', [50, 50])      # % закрытия на каждом уровне
+
+        # --- fallback: фиксированные проценты, если ATR выключен ---
+        self.stop_loss_percent = config.get('stop_loss_percent', 2.0)
+        self.take_profit_levels_config = config.get(
+            'take_profit_levels', [{'percent': 3.0, 'close_percent': 100}]
+        )
+
+        # --- риск / размер позиции ---
+        self.position_size = config.get('position_size', 100)
+        self.leverage = config.get('leverage', 10)
+
+        # --- кулдаун ---
+        self.cooldown_seconds = config.get('cooldown_seconds', 300)
+
+        # --- состояние per symbol ---
+        self.candles: Dict[str, List[Candle]] = {}
+        self.current_candle: Dict[str, Candle] = {}
+        self.side_history: Dict[str, List[str]] = {}
+        self.last_trade_time: Dict[str, float] = {}
+
+        logger.info(
+            f"SimpleMovingAverageStrategy initialized: sma_period={self.sma_period}, "
+            f"timeframe={self.timeframe_seconds}s, threshold={self.threshold_percent}%, "
+            f"use_atr_risk={self.use_atr_risk}, atr_period={self.atr_period}, "
+            f"atr_stop_mult={self.atr_stop_multiplier}, atr_tp_mults={self.atr_tp_multipliers}"
+        )
 
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
-        if symbol not in self.price_history:
-            self.price_history[symbol] = []
+        now = time.time()
+        closed_candle = self._update_candle(symbol, price, now)
 
-        self.price_history[symbol].append(price)
-
-        if len(self.price_history[symbol]) > self.sma_period * 2:
-            self.price_history[symbol].pop(0)
-
-        if len(self.price_history[symbol]) < self.sma_period:
+        if closed_candle is None:
             return None
 
-        sma = sum(self.price_history[symbol][-self.sma_period:]) / self.sma_period
+        candles = self.candles.get(symbol, [])
+        min_needed = max(self.sma_period, self.atr_period + 1)
+        if len(candles) < min_needed:
+            return None
 
-        if price > sma * 1.0001:
-            stop_loss_price = price * (1 - self.stop_loss_percent / 100)
-            take_profit_price = price * (1 + self.take_profit_percent / 100)
+        sma = sum(c.close for c in candles[-self.sma_period:]) / self.sma_period
+        deviation_percent = (closed_candle.close - sma) / sma * 100
 
-            return {
-                'action': 'OPEN',
-                'symbol': symbol,
-                'side': 'LONG',
-                'quantity': self.position_size / price,
-                'leverage': 10,
-                'stop_loss_price': stop_loss_price,
-                'take_profit_levels': [
-                    {'price': take_profit_price, 'close_percent': 100}
-                ],
-                'reason': f'Price {price} > SMA {sma:.2f}'
-            }
+        side = 'above' if deviation_percent > 0 else 'below'
+        history = self.side_history.setdefault(symbol, [])
+        history.append(side)
+        if len(history) > self.confirmation_candles:
+            history.pop(0)
 
-        elif price < sma * 0.9999:
-            stop_loss_price = price * (1 + self.stop_loss_percent / 100)
-            take_profit_price = price * (1 - self.take_profit_percent / 100)
+        last_trade = self.last_trade_time.get(symbol, 0)
+        if now - last_trade < self.cooldown_seconds:
+            return None
 
-            return {
-                'action': 'OPEN',
-                'symbol': symbol,
-                'side': 'SHORT',
-                'quantity': self.position_size / price,
-                'leverage': 10,
-                'stop_loss_price': stop_loss_price,
-                'take_profit_levels': [
-                    {'price': take_profit_price, 'close_percent': 100}
-                ],
-                'reason': f'Price {price} < SMA {sma:.2f}'
-            }
+        confirmed = (
+            len(history) == self.confirmation_candles and
+            len(set(history)) == 1
+        )
+        if not confirmed:
+            return None
+
+        atr = self._calculate_atr(candles)
+        if self.use_atr_risk and (atr is None or atr <= 0):
+            # нет валидного ATR — пропускаем сигнал, чтобы не открыть позицию без адекватного стопа
+            return None
+
+        if side == 'above' and deviation_percent > self.threshold_percent:
+            signal = self._build_signal(symbol, 'LONG', price, sma, deviation_percent, atr)
+            self.last_trade_time[symbol] = now
+            return signal
+
+        elif side == 'below' and deviation_percent < -self.threshold_percent:
+            signal = self._build_signal(symbol, 'SHORT', price, sma, deviation_percent, atr)
+            self.last_trade_time[symbol] = now
+            return signal
 
         return None
+
+    def _update_candle(self, symbol: str, price: float, now: float) -> Optional[Candle]:
+        current = self.current_candle.get(symbol)
+
+        if current is None:
+            self.current_candle[symbol] = Candle(price, now)
+            return None
+
+        candle_end = current.start_time + self.timeframe_seconds
+
+        if now < candle_end:
+            current.update(price)
+            return None
+
+        closed = current
+        history = self.candles.setdefault(symbol, [])
+        history.append(closed)
+        max_needed = max(self.sma_period, self.atr_period + 1) * 2
+        if len(history) > max_needed:
+            history.pop(0)
+
+        self.current_candle[symbol] = Candle(price, now)
+        return closed
+
+    def _calculate_atr(self, candles: List[Candle]) -> Optional[float]:
+        """Average True Range по последним atr_period свечам (метод простого среднего)."""
+        if len(candles) < self.atr_period + 1:
+            return None
+
+        relevant = candles[-(self.atr_period + 1):]
+        true_ranges = []
+
+        for i in range(1, len(relevant)):
+            current = relevant[i]
+            prev_close = relevant[i - 1].close
+
+            tr = max(
+                current.high - current.low,
+                abs(current.high - prev_close),
+                abs(current.low - prev_close)
+            )
+            true_ranges.append(tr)
+
+        if not true_ranges:
+            return None
+
+        return sum(true_ranges) / len(true_ranges)
+
+    def _build_signal(
+        self, symbol: str, side: str, price: float, sma: float,
+        deviation_percent: float, atr: Optional[float]
+    ) -> dict:
+        is_long = side == 'LONG'
+
+        if self.use_atr_risk and atr:
+            stop_distance = atr * self.atr_stop_multiplier
+            stop_loss_price = price - stop_distance if is_long else price + stop_distance
+
+            take_profit_levels = [
+                {
+                    'price': (
+                        price + atr * mult if is_long
+                        else price - atr * mult
+                    ),
+                    'close_percent': self.tp_close_percents[i] if i < len(self.tp_close_percents) else 100
+                }
+                for i, mult in enumerate(self.atr_tp_multipliers)
+            ]
+            risk_desc = f'ATR={atr:.6f}, stop_dist={stop_distance:.6f}'
+        else:
+            stop_loss_price = (
+                price * (1 - self.stop_loss_percent / 100) if is_long
+                else price * (1 + self.stop_loss_percent / 100)
+            )
+            take_profit_levels = [
+                {
+                    'price': (
+                        price * (1 + lvl['percent'] / 100) if is_long
+                        else price * (1 - lvl['percent'] / 100)
+                    ),
+                    'close_percent': lvl['close_percent']
+                }
+                for lvl in self.take_profit_levels_config
+            ]
+            risk_desc = 'fixed percent risk'
+
+        return {
+            'action': 'OPEN',
+            'symbol': symbol,
+            'side': side,
+            'quantity': self.position_size / price,
+            'leverage': self.leverage,
+            'stop_loss_price': stop_loss_price,
+            'take_profit_levels': take_profit_levels,
+            'reason': (
+                f'Price {price:.6f} {"above" if is_long else "below"} SMA {sma:.6f} '
+                f'({deviation_percent:+.2f}%), confirmed {self.confirmation_candles} candles, {risk_desc}'
+            )
+        }

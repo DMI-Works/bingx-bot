@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -54,7 +56,9 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("positions", self._cmd_positions))
         self.application.add_handler(CommandHandler("settings", self._cmd_settings))
         self.application.add_handler(CommandHandler("emergency", self._cmd_emergency))
+        self.application.add_handler(CommandHandler("export_db", self._cmd_export_db))
         self.application.add_handler(CallbackQueryHandler(self._handle_callback))
+
 
         await self.application.initialize()
         await self.application.start()
@@ -88,6 +92,7 @@ class TelegramBot:
             [InlineKeyboardButton("📊 Статус", callback_data="status")],
             [InlineKeyboardButton("💰 Баланс", callback_data="balance")],
             [InlineKeyboardButton("📈 Позиції", callback_data="positions")],
+            [InlineKeyboardButton("💾 Експорт бази", callback_data="export_db")],
             [InlineKeyboardButton("⚙️ Налаштування", callback_data="settings")],
             [InlineKeyboardButton("🚨 Аварійна зупинка", callback_data="emergency")]
         ]
@@ -253,6 +258,8 @@ class TelegramBot:
         elif query.data == "emergency_stop_close":
             await self.settings_manager.activate_emergency_stop(close_positions=True)
             await query.edit_message_text("🚨 Аварійна зупинка активована - Закриваємо всі позиції")
+        elif query.data == "export_db":
+            await self._cmd_export_db(update, context)
 
     async def _on_position_opened(self, event: Event) -> None:
         data = event.data
@@ -321,3 +328,35 @@ class TelegramBot:
 {event.data.get('error', 'Невідома критична помилка')}
 """
         await self.send_message(text)
+
+    
+
+    async def _cmd_export_db(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        DB_PATH = "data/trading_bot.db"
+
+        try:
+            if not os.path.exists(DB_PATH):
+                await self._reply(update, "❌ Файл бази даних не знайдено")
+                return
+
+            file_size = os.path.getsize(DB_PATH)
+            max_size = 50 * 1024 * 1024  # ліміт Telegram Bot API — 50 МБ
+
+            if file_size > max_size:
+                await self._reply(
+                    update,
+                    f"❌ Файл завеликий для відправки через Telegram ({file_size / 1024 / 1024:.1f} МБ, ліміт 50 МБ)"
+                )
+                return
+
+            with open(DB_PATH, 'rb') as db_file:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=db_file,
+                    filename='trading_bot.db',
+                    caption=f'📦 Резервна копія бази даних ({file_size / 1024:.1f} КБ)'
+                )
+
+        except Exception as e:
+            logger.error(f"Error exporting database: {e}", exc_info=True)
+            await self._reply(update, f"❌ Помилка експорту бази: {str(e)}")
