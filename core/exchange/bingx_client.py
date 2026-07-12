@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import hmac
+import hashlib
+import time
 from typing import Dict, Any, Optional, List
 
 from .websocket_client import WebSocketClient
@@ -59,11 +62,13 @@ class BingXClient:
 
     async def _handle_account_update(self, data: Dict[str, Any]) -> None:
         if self.event_bus:
+            logger.info(f"[WS] Publishing BALANCE_UPDATED event: {data}")
             await self.event_bus.publish(Event(
                 type=EventType.BALANCE_UPDATED,
                 data=data,
                 source="BingXClient"
             ))
+            logger.info("[WS] BALANCE_UPDATED event published")
 
     async def _handle_order_update(self, data: Dict[str, Any]) -> None:
         if self.event_bus:
@@ -114,11 +119,49 @@ class BingXClient:
 
     async def subscribe_account(self) -> None:
         if self.ws_client:
-            await self.ws_client.subscribe("ACCOUNT_UPDATE")
+            # Для приватних каналів потрібна авторизація
+            timestamp = int(time.time() * 1000)
+            params_str = f"timestamp={timestamp}"
+            signature = hmac.new(
+                self.api_secret.encode('utf-8'),
+                params_str.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+
+            auth_message = {
+                "id": f"auth_{timestamp}",
+                "reqType": "sub",
+                "dataType": "ACCOUNT_UPDATE",
+                "apiKey": self.api_key,
+                "timestamp": timestamp,
+                "signature": signature
+            }
+
+            await self.ws_client.send(auth_message)
+            logger.info("Authenticated and subscribed to ACCOUNT_UPDATE")
 
     async def subscribe_orders(self) -> None:
         if self.ws_client:
-            await self.ws_client.subscribe("ORDER_TRADE_UPDATE")
+            # ORDER_TRADE_UPDATE використовує ту саму авторизацію
+            timestamp = int(time.time() * 1000)
+            params_str = f"timestamp={timestamp}"
+            signature = hmac.new(
+                self.api_secret.encode('utf-8'),
+                params_str.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+
+            auth_message = {
+                "id": f"auth_{timestamp}",
+                "reqType": "sub",
+                "dataType": "ORDER_TRADE_UPDATE",
+                "apiKey": self.api_key,
+                "timestamp": timestamp,
+                "signature": signature
+            }
+
+            await self.ws_client.send(auth_message)
+            logger.info("Authenticated and subscribed to ORDER_TRADE_UPDATE")
 
     # REST API Methods
 
