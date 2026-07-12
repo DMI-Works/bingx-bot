@@ -318,3 +318,26 @@ class BingXClient:
 
     async def close_listen_key(self, listen_key: str) -> None:
         await self.rest_client.delete('/openApi/user/auth/userDataStream', {'listenKey': listen_key})
+
+    async def get_all_tickers(self) -> List[Dict[str, Any]]:
+        """24h статистика по всім swap-контрактам (об'єм, ціна, спред)."""
+        try:
+            response = await self.rest_client.get('/openApi/swap/v2/quote/ticker')
+            return response.get('data', [])
+        except Exception as e:
+            logger.error(f"Failed to get all tickers: {e}")
+            raise
+
+    async def get_all_contracts(self) -> List[Dict[str, Any]]:
+        """Список всіх доступних swap-контрактів."""
+        try:
+            response = await self.rest_client.get('/openApi/swap/v2/quote/contracts')
+            return response.get('data', [])
+        except Exception as e:
+            logger.error(f"Failed to get contracts: {e}")
+            raise
+
+    async def unsubscribe_trades(self, symbol: str) -> None:
+        if self.ws_client:
+            await self.ws_client.unsubscribe(f"{symbol}@trade", symbol)
+            self.subscribed_symbols.discard(symbol)

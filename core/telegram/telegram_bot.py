@@ -23,7 +23,9 @@ class TelegramBot:
         position_manager: PositionManager,
         order_manager: OrderManager,
         settings_manager: SettingsManager,
-        exchange_client=None
+        exchange_client=None,
+        symbol_selector=None   
+
     ):
         self.token = token
         self.chat_id = chat_id
@@ -32,6 +34,7 @@ class TelegramBot:
         self.order_manager = order_manager
         self.settings_manager = settings_manager
         self.exchange_client = exchange_client
+        self.symbol_selector = symbol_selector
 
         self.application: Optional[Application] = None
         self.notifications_enabled = True
@@ -46,6 +49,7 @@ class TelegramBot:
         self.event_bus.subscribe(EventType.TAKE_PROFIT_TRIGGERED, self._on_take_profit_triggered)
         self.event_bus.subscribe(EventType.ERROR, self._on_error)
         self.event_bus.subscribe(EventType.CRITICAL_ERROR, self._on_critical_error)
+        
 
     async def start(self) -> None:
         self.application = Application.builder().token(self.token).build()
@@ -57,6 +61,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("settings", self._cmd_settings))
         self.application.add_handler(CommandHandler("emergency", self._cmd_emergency))
         self.application.add_handler(CommandHandler("export_db", self._cmd_export_db))
+        self.application.add_handler(CommandHandler("symbols", self._cmd_symbols))
         self.application.add_handler(CallbackQueryHandler(self._handle_callback))
 
 
@@ -218,7 +223,7 @@ class TelegramBot:
     async def _cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard = [
             [InlineKeyboardButton("🔄 Перемкнути торгівлю", callback_data="toggle_trading")],
-            [InlineKeyboardButton("📋 Білий список", callback_data="whitelist")],
+            [InlineKeyboardButton("📋 Підписані символи", callback_data="symbols")],
             [InlineKeyboardButton("🛡️ Налаштування ризику", callback_data="risk_settings")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
         ]
@@ -238,7 +243,11 @@ class TelegramBot:
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
-        await query.answer()
+
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.warning(f"Failed to answer callback query (probably expired): {e}")
 
         if query.data == "status":
             await self._cmd_status(update, context)
@@ -248,6 +257,16 @@ class TelegramBot:
             await self._cmd_positions(update, context)
         elif query.data == "settings":
             await self._cmd_settings(update, context)
+        elif query.data == "export_db":
+            await self._cmd_export_db(update, context)
+        elif query.data == "symbols":
+            await self._cmd_symbols(update, context)
+        elif query.data == "risk_settings":
+            await self._cmd_risk_settings(update, context)
+        elif query.data == "back":
+            await self._cmd_start(update, context)
+        elif query.data == "cancel":
+            await query.edit_message_text("❌ Скасовано")
         elif query.data == "toggle_trading":
             enabled = self.settings_manager.get_trading_enabled()
             await self.settings_manager.set_trading_enabled(not enabled)
@@ -258,8 +277,6 @@ class TelegramBot:
         elif query.data == "emergency_stop_close":
             await self.settings_manager.activate_emergency_stop(close_positions=True)
             await query.edit_message_text("🚨 Аварійна зупинка активована - Закриваємо всі позиції")
-        elif query.data == "export_db":
-            await self._cmd_export_db(update, context)
 
     async def _on_position_opened(self, event: Event) -> None:
         data = event.data
@@ -360,3 +377,23 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Error exporting database: {e}", exc_info=True)
             await self._reply(update, f"❌ Помилка експорту бази: {str(e)}")
+    
+    async def _cmd_symbols(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self.symbol_selector:
+            await self._reply(update, "❌ Символ-селектор недоступний")
+            return
+
+        symbols = sorted(self.symbol_selector.current_symbols)
+
+        if not symbols:
+            await self._reply(update, "📭 Немає підписаних символів")
+            return
+
+        text = f"<b>📋 Підписані символи ({len(symbols)})</b>\n\n"
+        text += "\n".join(f"• {s}" for s in symbols)
+
+        await self._reply(update, text, parse_mode='HTML')
+
+    async def _cmd_risk_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text = "🛡️ <b>Налаштування ризику</b>\n\nРедагування поки доступне тільки через конфіг-файл."
+        await self._reply(update, text, parse_mode='HTML')

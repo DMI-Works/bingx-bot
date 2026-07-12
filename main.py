@@ -113,6 +113,11 @@ async def main():
     )
     logger.info("[OK] Execution Engine initialized")
 
+    filters_config = config.get('trading.filters', {})
+    refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)
+    symbol_selector = SymbolSelector(exchange, filters_config)
+    logger.info("[OK] Symbol Selector initialized")
+
     logger.info("Starting recovery process...")
     recovery_success = await recovery_engine.recover()
 
@@ -134,7 +139,8 @@ async def main():
                 position_manager=position_manager,
                 order_manager=order_manager,
                 settings_manager=settings_manager,
-                exchange_client=exchange
+                exchange_client=exchange,
+                symbol_selector=symbol_selector
             )
             await telegram_bot.start()
             logger.info("[OK] Telegram Bot started")
@@ -147,12 +153,6 @@ async def main():
         await exchange.start_user_data_stream()
         logger.info("[OK] WebSocket connected")
 
-
-
-        filters_config = config.get('trading.filters', {})
-        refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)
-
-        symbol_selector = SymbolSelector(exchange, filters_config)
         selected_symbols = await symbol_selector.apply()
         logger.info(f"[OK] Initial symbol selection: {sorted(selected_symbols)}")
 
