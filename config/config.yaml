@@ -62,8 +62,7 @@ trading:
 
   # Filters
   filters:
-    whitelist_symbols: ["VINE-USDT"]
-    # whitelist_symbols: ["CLO-USDT", "VINE-USDT"]
+    whitelist_symbols: ["CLO-USDT", "VINE-USDT", "DEXE-USDT", "BEAT-USDT", "XPIN-USDT"]
     blacklist_symbols: []
     min_price: {}
     max_price: {}
