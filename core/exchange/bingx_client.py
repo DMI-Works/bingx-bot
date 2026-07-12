@@ -155,6 +155,19 @@ class BingXClient:
             logger.error(f"Failed to get open orders: {e}")
             raise
 
+    async def get_order(self, symbol: str, order_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            params = {
+                'symbol': symbol,
+                'orderId': order_id
+            }
+
+            response = await self.rest_client.get('/openApi/swap/v2/trade/order', params, signed=True)
+            return response.get('data', {}).get('order')
+        except Exception as e:
+            logger.error(f"Failed to get order {order_id}: {e}")
+            return None
+
     async def create_order(
         self,
         symbol: str,

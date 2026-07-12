@@ -20,8 +20,11 @@ class PositionManager:
         logger.info("PositionManager initialized")
 
     async def open_position(self, position: Position) -> Position:
+        logger.info(f"Opening position: TEST")
         position.status = PositionStatus.OPEN
         position.opened_at = datetime.utcnow()
+
+        
 
         tp_levels_json = json.dumps(position.take_profit_levels) if position.take_profit_levels else None
         metadata_json = json.dumps(position.metadata) if position.metadata else None
@@ -38,11 +41,13 @@ class PositionManager:
 
         logger.info(f"Position opened: {position.symbol} {position.side.value} {position.quantity} @ {position.entry_price}")
 
+        logger.info(f"Publishing POSITION_OPENED event for {position.symbol}")
         await self.event_bus.publish(Event(
             type=EventType.POSITION_OPENED,
             data=position.to_dict(),
             source="PositionManager"
         ))
+        logger.info(f"POSITION_OPENED event published for {position.symbol}")
 
         return position
 

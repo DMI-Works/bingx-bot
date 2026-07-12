@@ -65,6 +65,14 @@ class ExecutionEngine:
     ) -> Optional[Position]:
 
         try:
+            # Перевіряємо, чи вже є відкрита позиція з таким же символом і напрямком
+            position_side = PositionSide.LONG if side == 'LONG' else PositionSide.SHORT
+            existing_position = self.position_manager.get_position(symbol, position_side)
+
+            if existing_position:
+                logger.warning(f"Position already exists: {symbol} {side}, skipping")
+                return existing_position
+
             logger.info(f"Opening position: {symbol} {side} {quantity}")
 
             await self.exchange.set_leverage(symbol, leverage)
@@ -75,7 +83,7 @@ class ExecutionEngine:
                 order_type=OrderType.MARKET,
                 quantity=quantity
             )
-
+            logger.info(f"Test 1")
             order = await self.order_manager.create_order(order)
 
             exchange_order = await self._send_order_with_retry(order)
@@ -84,19 +92,57 @@ class ExecutionEngine:
                 logger.error(f"Failed to send order after retries")
                 return None
 
-            await self.order_manager.update_order_status(
-                order,
-                OrderStatus.SENT,
-                exchange_order_id=exchange_order.get('orderId')
-            )
+            logger.info(f"Exchange order response: {exchange_order}")
 
-            filled_order = await self._wait_for_order_fill(order)
+            # Отримуємо orderId та статус з відповіді (BingX повертає у data.order)
+            order_id = None
+            order_status = None
+            avg_price = None
+            executed_qty = None
 
-            if not filled_order or not filled_order.is_filled():
-                logger.error(f"Order not filled: {order.id}")
-                return None
+            if 'data' in exchange_order and 'order' in exchange_order['data']:
+                order_data = exchange_order['data']['order']
+                order_id = order_data.get('orderId')
+                order_status = order_data.get('status')
+                avg_price = float(order_data.get('avgPrice', 0))
+                executed_qty = float(order_data.get('executedQty', 0))
+            elif 'orderId' in exchange_order:
+                order_id = exchange_order.get('orderId')
+                order_status = exchange_order.get('status')
+                avg_price = float(exchange_order.get('avgPrice', 0))
+                executed_qty = float(exchange_order.get('executedQty', 0))
 
-            entry_price = filled_order.average_price
+            logger.info(f"Test 2, order_id: {order_id}, status: {order_status}, avg_price: {avg_price}, executed_qty: {executed_qty}")
+
+            # Якщо ордер вже заповнений (MARKET ордери часто заповнюються миттєво)
+            # Перевіряємо статус FILLED або executed_qty близький до order.quantity (з урахуванням округлення біржі)
+            if order_status == 'FILLED' and avg_price > 0:
+                logger.info(f"Order filled immediately: {order.id}")
+                await self.order_manager.update_order_status(
+                    order,
+                    OrderStatus.FILLED,
+                    exchange_order_id=order_id,
+                    filled_quantity=executed_qty if executed_qty > 0 else order.quantity,
+                    average_price=avg_price
+                )
+            else:
+                # Ордер ще не заповнений, встановлюємо статус SENT
+                await self.order_manager.update_order_status(
+                    order,
+                    OrderStatus.SENT,
+                    exchange_order_id=order_id
+                )
+
+                logger.info(f"Waiting for order fill: {order.id}, exchange_order_id: {order.exchange_order_id}")
+                filled_order = await self._wait_for_order_fill(order)
+
+                if not filled_order or not filled_order.is_filled():
+                    logger.error(f"Order not filled: {order.id}, status: {filled_order.status if filled_order else 'None'}")
+                    return None
+
+            logger.info(f"Order filled: {order.id} @ {order.average_price}")
+
+            entry_price = order.average_price
             margin = (entry_price * quantity) / leverage
 
             position = Position(
@@ -228,6 +274,7 @@ class ExecutionEngine:
 
         while (datetime.utcnow() - start_time).seconds < timeout:
             if order.is_filled():
+                logger.info(f"Order {order.id} is filled")
                 return order
 
             if order.status in [OrderStatus.REJECTED, OrderStatus.CANCELLED, OrderStatus.EXPIRED]:
@@ -238,11 +285,16 @@ class ExecutionEngine:
 
             try:
                 open_orders = await self.exchange.get_open_orders(order.symbol)
+                logger.debug(f"Checking order status, open orders count: {len(open_orders)}")
 
+                order_found = False
                 for ex_order in open_orders:
                     if ex_order.get('orderId') == order.exchange_order_id:
+                        order_found = True
                         filled_qty = float(ex_order.get('executedQty', 0))
                         avg_price = float(ex_order.get('avgPrice', 0))
+
+                        logger.debug(f"Order {order.id} found: filled_qty={filled_qty}, avg_price={avg_price}")
 
                         if filled_qty > 0:
                             await self.order_manager.update_order_status(
@@ -255,10 +307,34 @@ class ExecutionEngine:
                         if filled_qty >= order.quantity:
                             return order
 
-            except Exception as e:
-                logger.error(f"Error checking order status: {e}")
+                if not order_found:
+                    logger.debug(f"Order {order.exchange_order_id} not found in open orders, might be already filled")
+                    # Якщо ордер не знайдено в open orders, можливо він вже виконаний
+                    # Спробуємо отримати інформацію з історії ордерів
+                    try:
+                        order_info = await self.exchange.get_order(order.symbol, order.exchange_order_id)
+                        if order_info:
+                            filled_qty = float(order_info.get('executedQty', 0))
+                            avg_price = float(order_info.get('avgPrice', 0))
+                            status = order_info.get('status', '')
 
-        logger.warning(f"Order fill timeout: {order.id}")
+                            logger.info(f"Order from history: status={status}, filled_qty={filled_qty}, avg_price={avg_price}")
+
+                            if status == 'FILLED' and filled_qty >= order.quantity and avg_price > 0:
+                                await self.order_manager.update_order_status(
+                                    order,
+                                    OrderStatus.FILLED,
+                                    filled_quantity=filled_qty,
+                                    average_price=avg_price
+                                )
+                                return order
+                    except Exception as e:
+                        logger.debug(f"Could not get order from history: {e}")
+
+            except Exception as e:
+                logger.error(f"Error checking order status: {e}", exc_info=True)
+
+        logger.warning(f"Order fill timeout: {order.id}, final status: {order.status.value}")
         return order
 
     async def _create_stop_loss_with_retry(self, position: Position, stop_loss_price: float) -> bool:

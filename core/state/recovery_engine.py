@@ -27,6 +27,9 @@ class RecoveryEngine:
         self.db = db
         self.event_bus = event_bus
 
+        # Підписуємося на події оновлення балансу/позицій
+        self.event_bus.subscribe(EventType.BALANCE_UPDATED, self._on_account_update)
+
         logger.info("RecoveryEngine initialized")
 
     async def recover(self) -> bool:
@@ -84,6 +87,29 @@ class RecoveryEngine:
 
         local_positions = self.position_manager.get_all_positions()
 
+        # Перевіряємо локальні позиції - чи існують вони на біржі
+        for local_pos in local_positions:
+            found_on_exchange = False
+
+            for ex_pos in exchange_positions:
+                symbol = ex_pos.get('symbol')
+                position_side = ex_pos.get('positionSide', 'LONG')
+                quantity = float(ex_pos.get('positionAmt', 0))
+
+                from ..state import PositionSide
+                side = PositionSide.LONG if position_side == 'LONG' else PositionSide.SHORT
+
+                if symbol == local_pos.symbol and side == local_pos.side and quantity != 0:
+                    found_on_exchange = True
+                    break
+
+            if not found_on_exchange:
+                logger.warning(f"Position closed on exchange but still in local state: {local_pos.symbol} {local_pos.side.value}")
+                # Закриваємо позицію локально
+                await self.position_manager.close_position(local_pos, 0, 0)
+                logger.info(f"Closed local position: {local_pos.symbol} {local_pos.side.value}")
+
+        # Додаємо позиції з біржі, яких немає локально
         for ex_pos in exchange_positions:
             symbol = ex_pos.get('symbol')
             position_side = ex_pos.get('positionSide', 'LONG')
@@ -113,6 +139,22 @@ class RecoveryEngine:
 
                 await self.position_manager.open_position(position)
                 logger.info(f"Position recovered and added to DB: {symbol} {side.value}")
+
+    async def sync_positions_periodic(self) -> None:
+        """Періодична синхронізація позицій з біржею"""
+        try:
+            exchange_positions = await self.exchange.get_positions()
+            await self._sync_positions(exchange_positions)
+        except Exception as e:
+            logger.error(f"Failed to sync positions: {e}", exc_info=True)
+
+    async def _on_account_update(self, event: Event) -> None:
+        """Обробка події оновлення рахунку/позицій з WebSocket"""
+        try:
+            logger.info("Received account update from WebSocket, syncing positions...")
+            await self.sync_positions_periodic()
+        except Exception as e:
+            logger.error(f"Failed to handle account update: {e}", exc_info=True)
 
     async def _sync_orders(self, exchange_orders: List[Dict]) -> None:
         logger.info(f"Syncing {len(exchange_orders)} orders from exchange")

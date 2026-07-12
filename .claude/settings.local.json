@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python main.py)"
+      "Bash(python main.py)",
+      "Bash(python *)",
+      "WebSearch",
+      "WebFetch(domain:bingx-api.github.io)",
+      "Bash(xargs grep -l \"class.*Strategy\\\\|def.*signal\\\\|SIGNAL_GENERATED\")",
+      "Bash(sqlite3 *)"
     ]
   }
 }

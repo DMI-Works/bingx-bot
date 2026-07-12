@@ -34,7 +34,7 @@ class SimpleMovingAverageStrategy(BaseStrategy):
 
         sma = sum(self.price_history[symbol][-self.sma_period:]) / self.sma_period
 
-        if price > sma * 1.01:
+        if price > sma * 1.0001:
             stop_loss_price = price * (1 - self.stop_loss_percent / 100)
             take_profit_price = price * (1 + self.take_profit_percent / 100)
 
@@ -51,7 +51,7 @@ class SimpleMovingAverageStrategy(BaseStrategy):
                 'reason': f'Price {price} > SMA {sma:.2f}'
             }
 
-        elif price < sma * 0.99:
+        elif price < sma * 0.9999:
             stop_loss_price = price * (1 + self.stop_loss_percent / 100)
             take_profit_price = price * (1 - self.take_profit_percent / 100)
 

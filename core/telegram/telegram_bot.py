@@ -142,27 +142,73 @@ class TelegramBot:
             await self._reply(update, f"❌ Помилка: {str(e)}")
 
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        positions = self.position_manager.get_open_positions()
-
-        if not positions:
-            await self._reply(update, "Немає відкритих позицій")
+        if not self.exchange_client:
+            await self._reply(update, "❌ Клієнт біржі недоступний")
             return
 
-        text = "<b>📈 Відкриті позиції</b>\n\n"
+        try:
+            positions_data = await self.exchange_client.get_positions()
 
-        for pos in positions:
-            text += f"""
-<b>{pos.symbol}</b> {pos.side.value}
-Вхід: ${pos.entry_price:.4f}
-Кількість: {pos.quantity}
-Плече: {pos.leverage}x
-Нереалізований PnL: ${pos.unrealized_pnl:.2f}
-ROI: {pos.roi:.2f}%
-Стоп-лосс: ${pos.stop_loss_price:.4f if pos.stop_loss_price else 'N/A'}
----
+            if not positions_data:
+                await self._reply(update, "📭 Немає відкритих позицій")
+                return
+
+            # Фільтруємо тільки активні позиції
+            active_positions = [pos for pos in positions_data if float(pos.get('positionAmt', 0)) != 0]
+
+            if not active_positions:
+                await self._reply(update, "📭 Немає відкритих позицій")
+                return
+
+            text = "<b>📈 Відкриті позиції на BingX</b>\n\n"
+            total_unrealized_pnl = 0
+
+            for pos in active_positions:
+                symbol = pos.get('symbol', 'N/A')
+                position_side = pos.get('positionSide', 'N/A')
+                position_amt = float(pos.get('positionAmt', 0))
+                entry_price = float(pos.get('avgPrice', 0))
+                mark_price = float(pos.get('markPrice', 0))
+                unrealized_pnl = float(pos.get('unrealizedProfit', 0))
+                leverage = int(pos.get('leverage', 1))
+                isolated_margin = float(pos.get('isolatedMargin', 0))
+
+                # Розрахунок ROE%
+                if isolated_margin > 0:
+                    roe = (unrealized_pnl / isolated_margin) * 100
+                else:
+                    roe = 0
+
+                total_unrealized_pnl += unrealized_pnl
+
+                # Емодзі для прибутку/збитку
+                pnl_emoji = "🟢" if unrealized_pnl >= 0 else "🔴"
+                side_emoji = "🟢" if position_side == "LONG" else "🔴"
+
+                text += f"""
+{side_emoji} <b>{symbol}</b> {position_side} {leverage}x
+├ Вхід: <code>${entry_price:.4f}</code>
+├ Поточна: <code>${mark_price:.4f}</code>
+├ Кількість: <code>{abs(position_amt)}</code>
+├ Маржа: <code>${isolated_margin:.2f}</code>
+├ {pnl_emoji} PnL: <b>${unrealized_pnl:+.2f}</b>
+└ ROE: <b>{roe:+.2f}%</b>
+
 """
 
-        await self._reply(update, text, parse_mode='HTML')
+            # Підсумок
+            summary_emoji = "🟢" if total_unrealized_pnl >= 0 else "🔴"
+            text += f"""
+━━━━━━━━━━━━━━━━━━━━
+{summary_emoji} <b>Загальний нереалізований PnL: ${total_unrealized_pnl:+.2f}</b>
+Всього позицій: {len(active_positions)}
+"""
+
+            await self._reply(update, text, parse_mode='HTML')
+
+        except Exception as e:
+            logger.error(f"Error fetching positions: {e}", exc_info=True)
+            await self._reply(update, f"❌ Помилка отримання позицій: {str(e)}")
 
     async def _cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard = [
@@ -210,6 +256,7 @@ ROI: {pos.roi:.2f}%
 
     async def _on_position_opened(self, event: Event) -> None:
         data = event.data
+
         text = f"""
 ✅ <b>Позицію відкрито</b>
 
@@ -218,8 +265,10 @@ ROI: {pos.roi:.2f}%
 Вхід: ${data['entry_price']:.4f}
 Кількість: {data['quantity']}
 Плече: {data['leverage']}x
-Маржа: ${data['margin']:.2f}
 """
+        if data.get('stop_loss_price'):
+            text += f"Stop Loss: ${data['stop_loss_price']:.4f}\n"
+
         await self.send_message(text)
 
     async def _on_position_closed(self, event: Event) -> None:
