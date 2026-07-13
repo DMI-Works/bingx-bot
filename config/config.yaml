@@ -64,6 +64,7 @@ trading:
   filters:
     whitelist_symbols: ["CLO-USDT", "VINE-USDT", "DEXE-USDT", "BEAT-USDT", "XPIN-USDT"]
     blacklist_symbols: []
+    max_symbols: 7
     min_price: {}
     max_price: {}
     min_volume_24h: 1000000

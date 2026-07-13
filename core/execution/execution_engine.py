@@ -20,13 +20,15 @@ class ExecutionEngine:
         order_manager: OrderManager,
         position_manager: PositionManager,
         event_bus: EventBus,
-        db: Database
+        db: Database,
+        max_open_positions: int = 3
     ):
         self.exchange = exchange
         self.order_manager = order_manager
         self.position_manager = position_manager
         self.event_bus = event_bus
         self.db = db
+        self.max_open_positions = max_open_positions  
 
         self.max_order_retries = 3
         self.order_retry_delay = 2
@@ -73,6 +75,14 @@ class ExecutionEngine:
             if existing_position:
                 logger.warning(f"Position already exists: {symbol} {side}, skipping")
                 return existing_position
+
+            current_count = self.position_manager.get_position_count()
+            if current_count >= self.max_open_positions:
+                logger.warning(
+                    f"Max open positions limit reached ({current_count}/{self.max_open_positions}), "
+                    f"skipping {symbol} {side}"
+                )
+                return None
 
             logger.info(f"Opening position: {symbol} {side} {quantity}")
 

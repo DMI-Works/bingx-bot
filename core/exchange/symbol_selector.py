@@ -19,17 +19,19 @@ class SymbolSelector:
         Формує список символів для торгівлі:
         - завжди включає символи відкритих позицій (щоб бот не втратив керування ними)
         - додає символи, що проходять фільтри 24h об'єму/спреду/ціни
+        - обмежує загальну кількість символів (max_symbols), пріоритет — за об'ємом
         """
         blacklist = set(self.filters.get('blacklist_symbols', []))
         min_volume_24h = self.filters.get('min_volume_24h', 0)
         max_spread_percent = self.filters.get('max_spread_percent', None)
         min_price = self.filters.get('min_price', {}) or {}
         max_price = self.filters.get('max_price', {}) or {}
-
+        max_symbols = self.filters.get('max_symbols', None)   
+        
         held_symbols = await self._get_held_symbols()
         tickers = await self._get_tickers()
 
-        selected = set(held_symbols)
+        candidates = []
 
         for ticker in tickers:
             symbol = ticker.get('symbol')
@@ -60,11 +62,22 @@ class SymbolSelector:
                 if spread_percent > max_spread_percent:
                     continue
 
-            selected.add(symbol)
+            candidates.append((symbol, quote_volume))
+
+        candidates.sort(key=lambda c: c[1], reverse=True)
+
+        if max_symbols is not None:
+            filtered_symbols = {c[0] for c in candidates[:max_symbols]}
+        else:
+            filtered_symbols = {c[0] for c in candidates}
+
+        # held_symbols добавляем ВСЕГДА, сверх лимита max_symbols
+        selected = held_symbols | filtered_symbols
 
         logger.info(
             f"Symbol selection: {len(held_symbols)} held + "
-            f"{len(selected) - len(held_symbols)} matched filters = {len(selected)} total"
+            f"{len(filtered_symbols - held_symbols)} matched filters "
+            f"(capped at {max_symbols or 'unlimited'}) = {len(selected)} total"
         )
 
         return sorted(selected)
@@ -80,7 +93,6 @@ class SymbolSelector:
         for symbol in to_subscribe:
             try:
                 await self.exchange.subscribe_trades(symbol)
-                logger.info(f"[SYMBOLS] Subscribed: {symbol}")
             except Exception as e:
                 logger.error(f"Failed to subscribe {symbol}: {e}")
 

@@ -104,14 +104,16 @@ async def main():
     risk_manager = RiskManager(db, event_bus, risk_config)
     logger.info("[OK] Risk Manager initialized")
 
+    max_open_positions = config.get('trading.risk.max_open_positions', 3)
     execution_engine = ExecutionEngine(
         exchange=exchange,
         order_manager=order_manager,
         position_manager=position_manager,
         event_bus=event_bus,
-        db=db
+        db=db,
+        max_open_positions=max_open_positions
     )
-    logger.info("[OK] Execution Engine initialized")
+    logger.info(f"[OK] Execution Engine initialized (max_open_positions={max_open_positions})")
 
     filters_config = config.get('trading.filters', {})
     refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)
