@@ -307,3 +307,29 @@ class Database:
         if self.conn:
             self.conn.close()
             logger.info("Database connection closed")
+
+
+    def get_closed_positions(self, limit: int = 5, offset: int = 0):
+        return self.fetch_all("""
+            SELECT * FROM positions
+            WHERE status = 'CLOSED'
+            ORDER BY closed_at DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset))
+
+    def get_closed_positions_stats(self):
+        row = self.fetch_one("""
+            SELECT
+                COUNT(*) as total_count,
+                COALESCE(SUM(realized_pnl), 0) as total_pnl,
+                COALESCE(SUM(CASE WHEN realized_pnl >= 0 THEN 1 ELSE 0 END), 0) as profitable_count,
+                COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END), 0) as losing_count
+            FROM positions
+            WHERE status = 'CLOSED'
+        """)
+        return {
+            'total_count': row['total_count'] if row else 0,
+            'total_pnl': row['total_pnl'] if row else 0.0,
+            'profitable_count': row['profitable_count'] if row else 0,
+            'losing_count': row['losing_count'] if row else 0
+        }

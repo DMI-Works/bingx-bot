@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 import asyncio
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from typing import Optional
@@ -10,6 +12,8 @@ from ..events import EventBus, Event, EventType
 from ..state import PositionManager, SettingsManager
 from ..execution import OrderManager
 
+LOCAL_TZ = ZoneInfo("Europe/Kyiv")
+PAGE_SIZE = 5
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +66,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("emergency", self._cmd_emergency))
         self.application.add_handler(CommandHandler("export_db", self._cmd_export_db))
         self.application.add_handler(CommandHandler("symbols", self._cmd_symbols))
+        self.application.add_handler(CommandHandler("history", self._cmd_history))
         self.application.add_handler(CallbackQueryHandler(self._handle_callback))
 
 
@@ -97,6 +102,7 @@ class TelegramBot:
             [InlineKeyboardButton("📊 Статус", callback_data="status")],
             [InlineKeyboardButton("💰 Баланс", callback_data="balance")],
             [InlineKeyboardButton("📈 Позиції", callback_data="positions")],
+            [InlineKeyboardButton("📜 Історія угод", callback_data="history_page_0")],
             [InlineKeyboardButton("💾 Експорт бази", callback_data="export_db")],
             [InlineKeyboardButton("⚙️ Налаштування", callback_data="settings")],
             [InlineKeyboardButton("🚨 Аварійна зупинка", callback_data="emergency")]
@@ -277,6 +283,9 @@ class TelegramBot:
         elif query.data == "emergency_stop_close":
             await self.settings_manager.activate_emergency_stop(close_positions=True)
             await query.edit_message_text("🚨 Аварійна зупинка активована - Закриваємо всі позиції")
+        elif query.data.startswith("history_page_"):
+            page = int(query.data.replace("history_page_", ""))
+            await self._show_history_page(update, context, page)
 
     async def _on_position_opened(self, event: Event) -> None:
         data = event.data
@@ -397,3 +406,76 @@ class TelegramBot:
     async def _cmd_risk_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = "🛡️ <b>Налаштування ризику</b>\n\nРедагування поки доступне тільки через конфіг-файл."
         await self._reply(update, text, parse_mode='HTML')
+
+    async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._show_history_page(update, context, page=0)
+
+    async def _show_history_page(self, update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
+        offset = page * PAGE_SIZE
+
+        try:
+            db = self.position_manager.db
+            rows = db.get_closed_positions(limit=PAGE_SIZE, offset=offset)
+            stats = db.get_closed_positions_stats()
+        except Exception as e:
+            logger.error(f"Failed to fetch position history: {e}", exc_info=True)
+            await self._reply(update, f"❌ Помилка отримання історії: {str(e)}")
+            return
+
+        total_count = stats['total_count']
+        total_pnl = stats['total_pnl']
+        profitable_count = stats['profitable_count']
+        losing_count = stats['losing_count']
+
+        total_pages = max(1, (total_count + PAGE_SIZE - 1) // PAGE_SIZE)
+
+        summary_emoji = "🟢" if total_pnl >= 0 else "🔴"
+        text = f"""
+    <b>📊 Історія угод</b>
+
+    {summary_emoji} Загальний PnL: <b>${total_pnl:+.2f}</b>
+    🟢 Прибуткових: {profitable_count}
+    🔴 Збиткових: {losing_count}
+    Всього угод: {total_count}
+
+    ━━━━━━━━━━━━━━━━━━━━
+    """
+
+        if not rows:
+            text += "\n📭 Немає закритих позицій на цій сторінці"
+        else:
+            for row in rows:
+                pnl = row['realized_pnl'] or 0
+                emoji = "🟢" if pnl >= 0 else "🔴"
+                entry_price = row['entry_price'] or 0
+                closed_at_raw = row['closed_at']
+
+                try:
+                    closed_at_utc = datetime.fromisoformat(str(closed_at_raw)).replace(tzinfo=ZoneInfo("UTC"))
+                    closed_at_local = closed_at_utc.astimezone(LOCAL_TZ)
+                    closed_at = closed_at_local.strftime('%d.%m %H:%M')
+                except (ValueError, TypeError):
+                    closed_at = str(closed_at_raw)
+
+                text += f"""
+    {emoji} <b>{row['symbol']}</b> {row['side']}
+    ├ Вхід: <code>${entry_price:.4f}</code>
+    ├ Закрито: <code>{closed_at}</code>
+    └ PnL: <b>${pnl:+.2f}</b>
+    """
+
+        text += f"\n━━━━━━━━━━━━━━━━━━━━\nСторінка {page + 1} з {total_pages}"
+
+        keyboard_row = []
+        if page > 0:
+            keyboard_row.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"history_page_{page - 1}"))
+        if page < total_pages - 1:
+            keyboard_row.append(InlineKeyboardButton("Вперед ➡️", callback_data=f"history_page_{page + 1}"))
+
+        keyboard = [keyboard_row] if keyboard_row else []
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+        else:
+            await self._reply(update, text, parse_mode='HTML', reply_markup=reply_markup)
