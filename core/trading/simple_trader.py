@@ -7,6 +7,7 @@ import json
 from ..exchange import BingXClient
 from ..events import EventBus, Event, EventType
 from ..risk import RiskManager
+from ..database import Database
 
 
 logger = logging.getLogger(__name__)
@@ -19,10 +20,12 @@ class SimpleTrader:
         self,
         exchange: BingXClient,
         event_bus: EventBus,
+        db: Database,
         risk_manager: Optional[RiskManager] = None,
     ):
         self.exchange = exchange
         self.event_bus = event_bus
+        self.db = db
         self.risk_manager = risk_manager
 
         self.open_positions = {}
@@ -35,6 +38,39 @@ class SimpleTrader:
 
         self.event_bus.subscribe(EventType.BALANCE_UPDATED, self._handle_account_update)
 
+        # Відновлюємо активні позиції з БД при старті (переживають рестарт бота)
+        self._restore_open_positions()
+
+    def _restore_open_positions(self) -> None:
+        """Підтягуємо з БД позиції, які залишились OPEN з попереднього запуску"""
+        try:
+            rows = self.db.get_active_positions()
+            for row in rows:
+                position_key = f"{row['symbol']}_{row['side']}"
+                metadata = {}
+                try:
+                    metadata = json.loads(row['metadata']) if row['metadata'] else {}
+                except (TypeError, ValueError):
+                    metadata = {}
+
+                self.open_positions[position_key] = {
+                    'order_id': row['order_id'],
+                    'symbol': row['symbol'],
+                    'side': row['side'],
+                    'quantity': metadata.get('quantity', 0),
+                    'entry_price': metadata.get('entry_price', 0.0),
+                    'leverage': metadata.get('leverage', 10),
+                    'stop_loss_price': metadata.get('stop_loss_price'),
+                    'take_profit_levels': metadata.get('take_profit_levels'),
+                    'opened_by': metadata.get('opened_by', 'bot'),
+                    'sl_order_id': metadata.get('sl_order_id'),
+                    'tp_order_ids': metadata.get('tp_order_ids', [])
+                }
+
+            if rows:
+                logger.info(f"Restored {len(rows)} open positions from DB")
+        except Exception as e:
+            logger.error(f"Failed to restore open positions from DB: {e}", exc_info=True)
 
     async def _handle_signal(self, event: Event) -> None:
         """Обробка сигналу від стратегії"""
@@ -99,7 +135,7 @@ class SimpleTrader:
 
             # Зберігаємо позицію в пам'яті
             position_key = f"{symbol}_{side}"
-            self.open_positions[position_key] = {
+            position_data = {
                 'order_id': str(order_id),
                 'symbol': symbol,
                 'side': side,
@@ -112,8 +148,21 @@ class SimpleTrader:
                 'sl_order_id': None,
                 'tp_order_ids': []
             }
+            self.open_positions[position_key] = position_data
 
             logger.info(f"Position tracked: orderId={order_id}, {symbol} {side}")
+
+            # Зберігаємо позицію в БД
+            try:
+                self.db.insert_position(
+                    order_id=str(order_id),
+                    symbol=symbol,
+                    side=side,
+                    status='OPEN',
+                    metadata=json.dumps(position_data)
+                )
+            except Exception as e:
+                logger.error(f"Failed to save position to DB: {e}", exc_info=True)
 
             # Створюємо стоп/тейк ордери
             if stop_loss_price:
@@ -124,6 +173,15 @@ class SimpleTrader:
             if take_profit_levels:
                 tp_order_ids = await self._create_take_profit_orders(symbol, side, quantity, take_profit_levels)
                 self.open_positions[position_key]['tp_order_ids'] = [str(tid) for tid in tp_order_ids if tid]
+
+            # Оновлюємо metadata в БД з sl_order_id/tp_order_ids
+            try:
+                self.db.update_position_metadata(
+                    order_id=str(order_id),
+                    metadata=json.dumps(self.open_positions[position_key])
+                )
+            except Exception as e:
+                logger.error(f"Failed to update position metadata in DB: {e}", exc_info=True)
 
             # Публікуємо подію POSITION_OPENED
             await self.event_bus.publish(Event(
@@ -229,6 +287,16 @@ class SimpleTrader:
 
             logger.info(f"Position closed: {symbol} {position_side}, closed_by={closed_by}")
 
+            # Оновлюємо статус в БД
+            try:
+                self.db.update_position_status(
+                    order_id=position['order_id'],
+                    status='CLOSED',
+                    closed_at=datetime.utcnow()
+                )
+            except Exception as e:
+                logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
+
             # Публікуємо подію POSITION_CLOSED
             await self.event_bus.publish(Event(
                 type=EventType.POSITION_CLOSED,
@@ -259,7 +327,9 @@ class SimpleTrader:
 
             if pa != 0 and not existing:
                 # Позиція відкрита вручну на біржі — бот про неї не знав
-                self.open_positions[position_key] = {
+                manual_order_id = f"manual-{symbol}-{position_side}-{int(datetime.utcnow().timestamp())}"
+                position_data = {
+                    'order_id': manual_order_id,
                     'symbol': symbol,
                     'side': position_side,
                     'entry_price': float(pos.get('ep', 0)),
@@ -268,7 +338,20 @@ class SimpleTrader:
                     'sl_order_id': None,
                     'tp_order_ids': []
                 }
+                self.open_positions[position_key] = position_data
                 logger.info(f"Manual position detected and tracked: {symbol} {position_side}")
+
+                # Зберігаємо позицію в БД
+                try:
+                    self.db.insert_position(
+                        order_id=manual_order_id,
+                        symbol=symbol,
+                        side=position_side,
+                        status='OPEN',
+                        metadata=json.dumps(position_data)
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to save manual position to DB: {e}", exc_info=True)
 
                 # Публікуємо подію POSITION_OPENED
                 await self.event_bus.publish(Event(
@@ -288,6 +371,16 @@ class SimpleTrader:
                 del self.open_positions[position_key]
 
                 logger.info(f"Position closed (detected via account update): {symbol} {position_side}")
+
+                # Оновлюємо статус в БД
+                try:
+                    self.db.update_position_status(
+                        order_id=existing['order_id'],
+                        status='CLOSED',
+                        closed_at=datetime.utcnow()
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to update manual position status in DB: {e}", exc_info=True)
 
                 # Публікуємо подію POSITION_CLOSED
                 await self.event_bus.publish(Event(

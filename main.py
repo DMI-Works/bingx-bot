@@ -92,6 +92,7 @@ async def main():
     trader = SimpleTrader(
         exchange=exchange,
         event_bus=event_bus,
+        db=db,
         risk_manager=risk_manager,
     )
 
