@@ -6,7 +6,6 @@ import json
 
 from ..exchange import BingXClient
 from ..events import EventBus, Event, EventType
-from ..database import Database
 
 
 logger = logging.getLogger(__name__)
@@ -18,14 +17,14 @@ class SimpleTrader:
     def __init__(
         self,
         exchange: BingXClient,
-        db: Database,
         event_bus: EventBus,
         max_open_positions: int = 3
     ):
         self.exchange = exchange
-        self.db = db
         self.event_bus = event_bus
         self.max_open_positions = max_open_positions
+
+        self.open_positions = {}
 
         # Підписуємось на сигнали від стратегій
         self.event_bus.subscribe(EventType.SIGNAL_GENERATED, self._handle_signal)
@@ -63,10 +62,9 @@ class SimpleTrader:
         take_profit_levels: Optional[list] = None
     ) -> bool:
         try:
-            active_positions = self.db.get_active_positions()
-            if len(active_positions) >= self.max_open_positions:
+            if len(self.open_positions) >= self.max_open_positions:
                 logger.warning(
-                    f"Max open positions limit reached ({len(active_positions)}/{self.max_open_positions}), "
+                    f"Max open positions limit reached ({len(self.open_positions)}/{self.max_open_positions}), "
                     f"skipping {symbol} {side}"
                 )
                 return False
@@ -95,38 +93,51 @@ class SimpleTrader:
                 logger.error("Failed to get orderId from exchange response")
                 return False
 
-            # --- НОВОЕ: помечаем, что позицию открыл бот ---
-            metadata = {
-                'opened_by': 'bot',
+            # Отримуємо entry_price з відповіді біржі
+            entry_price = 0.0
+            if 'data' in exchange_order and 'order' in exchange_order['data']:
+                entry_price = float(exchange_order['data']['order'].get('avgPrice', 0))
+
+            # Зберігаємо позицію в пам'яті
+            position_key = f"{symbol}_{side}"
+            self.open_positions[position_key] = {
+                'order_id': str(order_id),
+                'symbol': symbol,
+                'side': side,
+                'quantity': quantity,
+                'entry_price': entry_price,
                 'leverage': leverage,
                 'stop_loss_price': stop_loss_price,
                 'take_profit_levels': take_profit_levels,
-                'quantity': quantity,
+                'opened_by': 'bot',
                 'sl_order_id': None,
                 'tp_order_ids': []
             }
 
-            self.db.insert_position(
-                order_id=str(order_id),
-                symbol=symbol,
-                side=side,
-                status='OPEN',
-                metadata=json.dumps(metadata)
-            )
+            logger.info(f"Position tracked: orderId={order_id}, {symbol} {side}")
 
-            logger.info(f"Position saved to DB: orderId={order_id}, {symbol} {side}")
-
-            # --- НОВОЕ: сохраняем id стоп/тейк ордеров в metadata, чтобы потом узнать их при срабатывании ---
+            # Створюємо стоп/тейк ордери
             if stop_loss_price:
                 sl_order_id = await self._create_stop_loss(symbol, side, quantity, stop_loss_price)
                 if sl_order_id:
-                    metadata['sl_order_id'] = str(sl_order_id)
+                    self.open_positions[position_key]['sl_order_id'] = str(sl_order_id)
 
             if take_profit_levels:
                 tp_order_ids = await self._create_take_profit_orders(symbol, side, quantity, take_profit_levels)
-                metadata['tp_order_ids'] = [str(tid) for tid in tp_order_ids if tid]
+                self.open_positions[position_key]['tp_order_ids'] = [str(tid) for tid in tp_order_ids if tid]
 
-            self.db.update_position_metadata(str(order_id), json.dumps(metadata))
+            # Публікуємо подію POSITION_OPENED
+            await self.event_bus.publish(Event(
+                type=EventType.POSITION_OPENED,
+                data={
+                    'symbol': symbol,
+                    'side': side,
+                    'entry_price': entry_price,
+                    'quantity': quantity,
+                    'leverage': leverage,
+                    'stop_loss_price': stop_loss_price
+                }
+            ))
 
             return True
 
@@ -201,35 +212,35 @@ class SimpleTrader:
         position_side = order_data.get('ps')  # LONG / SHORT
 
         if status == 'FILLED' and order_type in ('STOP_MARKET', 'TAKE_PROFIT_MARKET', 'MARKET') and order_data.get('ro') == True:
-            position_row = self.db.get_open_position_by_symbol_side(symbol, position_side)
+            position_key = f"{symbol}_{position_side}"
+            position = self.open_positions.get(position_key)
 
-            if not position_row:
-                logger.debug(f"No open position in DB for {symbol} {position_side}, skipping (may be handled by account_update)")
+            if not position:
+                logger.debug(f"No open position tracked for {symbol} {position_side}, skipping")
                 return
 
-            try:
-                metadata = json.loads(position_row['metadata']) if position_row['metadata'] else {}
-            except (TypeError, ValueError):
-                metadata = {}
-
-            known_bot_order_ids = set(metadata.get('tp_order_ids') or [])
-            if metadata.get('sl_order_id'):
-                known_bot_order_ids.add(metadata['sl_order_id'])
+            known_bot_order_ids = set(position.get('tp_order_ids', []))
+            if position.get('sl_order_id'):
+                known_bot_order_ids.add(position['sl_order_id'])
 
             closed_by = 'bot' if exchange_order_id in known_bot_order_ids else 'user'
 
-            metadata['closed_by'] = closed_by
-            self.db.update_position_metadata(position_row['order_id'], json.dumps(metadata))
+            # Видаляємо позицію з трекінгу
+            del self.open_positions[position_key]
 
-            try:
-                self.db.update_position_status(
-                    order_id=position_row['order_id'],
-                    status='CLOSED',
-                    closed_at=datetime.utcnow()
-                )
-                logger.info(f"Position closed: orderId={exchange_order_id}, closed_by={closed_by}")
-            except Exception as e:
-                logger.debug(f"Could not update position status: {e}")
+            logger.info(f"Position closed: {symbol} {position_side}, closed_by={closed_by}")
+
+            # Публікуємо подію POSITION_CLOSED
+            await self.event_bus.publish(Event(
+                type=EventType.POSITION_CLOSED,
+                data={
+                    'symbol': symbol,
+                    'side': position_side,
+                    'close_price': float(order_data.get('ap', 0)),
+                    'realized_pnl': 0.0,  # Біржа не дає PnL в ORDER_TRADE_UPDATE
+                    'closed_by': closed_by
+                }
+            ))
 
 
     async def _handle_account_update(self, event: Event) -> None:
@@ -244,40 +255,49 @@ class SimpleTrader:
             if not symbol or not position_side:
                 continue
 
-            existing = self.db.get_open_position_by_symbol_side(symbol, position_side)
+            position_key = f"{symbol}_{position_side}"
+            existing = self.open_positions.get(position_key)
 
             if pa != 0 and not existing:
                 # Позиція відкрита вручну на біржі — бот про неї не знав
-                synthetic_order_id = f"manual-{symbol}-{position_side}-{int(datetime.utcnow().timestamp() * 1000)}"
-                metadata = json.dumps({
+                self.open_positions[position_key] = {
+                    'symbol': symbol,
+                    'side': position_side,
+                    'entry_price': float(pos.get('ep', 0)),
+                    'quantity': abs(pa),
                     'opened_by': 'user',
-                    'entry_price': pos.get('ep')
-                })
-                self.db.insert_position(
-                    order_id=synthetic_order_id,
-                    symbol=symbol,
-                    side=position_side,
-                    status='OPEN',
-                    metadata=metadata
-                )
+                    'sl_order_id': None,
+                    'tp_order_ids': []
+                }
                 logger.info(f"Manual position detected and tracked: {symbol} {position_side}")
 
+                # Публікуємо подію POSITION_OPENED
+                await self.event_bus.publish(Event(
+                    type=EventType.POSITION_OPENED,
+                    data={
+                        'symbol': symbol,
+                        'side': position_side,
+                        'entry_price': float(pos.get('ep', 0)),
+                        'quantity': abs(pa),
+                        'leverage': 0,
+                        'stop_loss_price': None
+                    }
+                ))
+
             elif pa == 0 and existing:
-                # Позиція закрита на біржі, а в БД все ще OPEN
-                try:
-                    metadata = json.loads(existing['metadata']) if existing['metadata'] else {}
-                except (TypeError, ValueError):
-                    metadata = {}
+                # Позиція закрита на біржі
+                del self.open_positions[position_key]
 
-                metadata.setdefault('closed_by', 'user')
-                self.db.update_position_metadata(existing['order_id'], json.dumps(metadata))
+                logger.info(f"Position closed (detected via account update): {symbol} {position_side}")
 
-                try:
-                    self.db.update_position_status(
-                        order_id=existing['order_id'],
-                        status='CLOSED',
-                        closed_at=datetime.utcnow()
-                    )
-                    logger.info(f"Position closed (detected via account update): {symbol} {position_side}")
-                except Exception as e:
-                    logger.debug(f"Could not update position status via account_update: {e}")
+                # Публікуємо подію POSITION_CLOSED
+                await self.event_bus.publish(Event(
+                    type=EventType.POSITION_CLOSED,
+                    data={
+                        'symbol': symbol,
+                        'side': position_side,
+                        'close_price': 0.0,
+                        'realized_pnl': float(pos.get('cr', 0)),  # 'cr' = closed realized PnL
+                        'closed_by': existing.get('opened_by', 'user')
+                    }
+                ))

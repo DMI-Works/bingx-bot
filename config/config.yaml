@@ -25,6 +25,12 @@ trading:
   enabled: true
   direction: "both"  # long, short, both
 
+  # Strategy-level params (used by SimpleMovingAverageStrategy)
+  sma_period: 1
+  threshold_percent: 0.03
+  confirmation_candles: 2
+  cooldown_seconds: 3
+
   # Position Sizing
   position_size:
     mode: "fixed_usd"  # fixed_usd, percent_balance, fixed_risk
@@ -45,16 +51,22 @@ trading:
   # Stop Loss
   stop_loss:
     mode: "fixed_percent"  # fixed_percent, atr, structural, local_extremum
-    value: 2.0
+    value: 2.0             # используется при mode: fixed_percent
+    atr:                   # используется при mode: atr
+      period: 14
+      multiplier: 1.5
 
   # Take Profit
   take_profit:
     enabled: true
-    levels:
+    levels:                # используется при stop_loss.mode: fixed_percent
       - percent: 3.0
         close_percent: 50
       # - percent: 5.0
       #   close_percent: 50
+    atr:                   # используется при stop_loss.mode: atr
+      multipliers: [2.0, 3.5]
+      close_percents: [50, 50]
     trailing:
       enabled: false
       activation_percent: 2.0
@@ -104,12 +116,3 @@ telegram:
     position_opened: true
     position_closed: true
     take_profit_hit: true
-    stop_loss_hit: true
-    errors: true
-    websocket_reconnect: true
-    daily_summary: true
-
-# Emergency Stop
-emergency:
-  active: false
-  close_positions: false
