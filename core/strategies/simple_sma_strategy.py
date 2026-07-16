@@ -63,23 +63,22 @@ class SimpleMovingAverageStrategy(BaseStrategy):
         self.side_history: Dict[str, List[str]] = {}
         self.last_trade_time: Dict[str, float] = {}
 
-        logger.info(
-            f"SimpleMovingAverageStrategy initialized: sma_period={self.sma_period}, "
-            f"timeframe={self.timeframe_seconds}s, threshold={self.threshold_percent}%, "
-            f"use_atr_risk={self.use_atr_risk}, atr_period={self.atr_period}, "
-            f"atr_stop_mult={self.atr_stop_multiplier}, atr_tp_mults={self.atr_tp_multipliers}"
-        )
 
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
         now = time.time()
         closed_candle = self._update_candle(symbol, price, now)
 
         if closed_candle is None:
+            # свеча ещё не закрылась — это нормальное поведение, не спамим лог
             return None
 
         candles = self.candles.get(symbol, [])
         min_needed = max(self.sma_period, self.atr_period + 1)
         if len(candles) < min_needed:
+            logger.info(
+                f"[{symbol}] SKIP: not enough candles yet "
+                f"({len(candles)}/{min_needed} needed)"
+            )
             return None
 
         sma = sum(c.close for c in candles[-self.sma_period:]) / self.sma_period
@@ -91,8 +90,19 @@ class SimpleMovingAverageStrategy(BaseStrategy):
         if len(history) > self.confirmation_candles:
             history.pop(0)
 
+        logger.info(
+            f"[{symbol}] candle closed: close={closed_candle.close:.6f}, sma={sma:.6f}, "
+            f"deviation={deviation_percent:+.4f}% (threshold={self.threshold_percent}%), "
+            f"side={side}, side_history={history}"
+        )
+
         last_trade = self.last_trade_time.get(symbol, 0)
-        if now - last_trade < self.cooldown_seconds:
+        time_since_last = now - last_trade
+        if time_since_last < self.cooldown_seconds:
+            logger.info(
+                f"[{symbol}] SKIP: cooldown active "
+                f"({time_since_last:.1f}s / {self.cooldown_seconds}s)"
+            )
             return None
 
         confirmed = (
@@ -100,23 +110,34 @@ class SimpleMovingAverageStrategy(BaseStrategy):
             len(set(history)) == 1
         )
         if not confirmed:
+            logger.info(
+                f"[{symbol}] SKIP: not confirmed yet "
+                f"(need {self.confirmation_candles} matching candles, history={history})"
+            )
             return None
 
         atr = self._calculate_atr(candles)
         if self.use_atr_risk and (atr is None or atr <= 0):
             # нет валидного ATR — пропускаем сигнал, чтобы не открыть позицию без адекватного стопа
+            logger.info(f"[{symbol}] SKIP: invalid ATR (atr={atr})")
             return None
 
         if side == 'above' and deviation_percent > self.threshold_percent:
+            logger.info(f"[{symbol}] SIGNAL: LONG (deviation {deviation_percent:+.4f}% > {self.threshold_percent}%)")
             signal = self._build_signal(symbol, 'LONG', price, sma, deviation_percent, atr)
             self.last_trade_time[symbol] = now
             return signal
 
         elif side == 'below' and deviation_percent < -self.threshold_percent:
+            logger.info(f"[{symbol}] SIGNAL: SHORT (deviation {deviation_percent:+.4f}% < -{self.threshold_percent}%)")
             signal = self._build_signal(symbol, 'SHORT', price, sma, deviation_percent, atr)
             self.last_trade_time[symbol] = now
             return signal
 
+        logger.info(
+            f"[{symbol}] SKIP: deviation {deviation_percent:+.4f}% did not cross threshold "
+            f"±{self.threshold_percent}% (side={side})"
+        )
         return None
 
     def _update_candle(self, symbol: str, price: float, now: float) -> Optional[Candle]:
@@ -203,6 +224,11 @@ class SimpleMovingAverageStrategy(BaseStrategy):
                 for lvl in self.take_profit_levels_config
             ]
             risk_desc = 'fixed percent risk'
+
+        logger.info(
+            f"[{symbol}] BUILD SIGNAL: side={side}, entry={price:.6f}, "
+            f"stop_loss={stop_loss_price:.6f}, take_profit_levels={take_profit_levels}"
+        )
 
         return {
             'action': 'OPEN',

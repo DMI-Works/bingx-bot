@@ -89,13 +89,11 @@ async def main():
     risk_manager = RiskManager(db, event_bus, risk_config)
     logger.info("[OK] Risk Manager initialized")
 
-    max_open_positions = config.get('trading.risk.max_open_positions', 3)
     trader = SimpleTrader(
         exchange=exchange,
         event_bus=event_bus,
-        max_open_positions=max_open_positions
+        risk_manager=risk_manager,
     )
-    logger.info(f"[OK] Simple Trader initialized (max_open_positions={max_open_positions})")
 
     filters_config = config.get('trading.filters', {})
     refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)

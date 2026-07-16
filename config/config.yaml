@@ -26,8 +26,8 @@ trading:
   direction: "both"  # long, short, both
 
   # Strategy-level params (used by SimpleMovingAverageStrategy)
-  sma_period: 1
-  threshold_percent: 0.03
+  sma_period: 20
+  threshold_percent: 1.0
   confirmation_candles: 2
   cooldown_seconds: 3
 
@@ -53,7 +53,7 @@ trading:
     mode: "fixed_percent"  # fixed_percent, atr, structural, local_extremum
     value: 2.0             # используется при mode: fixed_percent
     atr:                   # используется при mode: atr
-      period: 14
+      period: 0
       multiplier: 1.5
 
   # Take Profit
@@ -74,7 +74,7 @@ trading:
 
   # Filters
   filters:
-    whitelist_symbols: ["CLO-USDT", "VINE-USDT", "DEXE-USDT", "BEAT-USDT", "XPIN-USDT"]
+    whitelist_symbols: [ "BSB-USDT","CLO-USDT", "VINE-USDT", "DEXE-USDT", "BEAT-USDT", "XPIN-USDT"]
     blacklist_symbols: []
     max_symbols: 7
     min_price: {}

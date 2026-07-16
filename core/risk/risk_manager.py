@@ -24,12 +24,22 @@ class RiskManager:
         self.consecutive_losses = 0
         self.last_trade_time: Optional[datetime] = None
         self.current_open_positions = 0
+        self.open_positions_by_symbol: dict[str, int] = {}
+
+        # Автоматично тримаємо стан у синхроні з реальними подіями відкриття/закриття позицій
+        self.event_bus.subscribe(EventType.POSITION_OPENED, self._on_position_opened_event)
+        self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed_event)
 
         logger.info("RiskManager initialized")
 
-    def can_open_position(self, symbol: str, risk_amount: float) -> tuple[bool, Optional[str]]:
+    def can_open_position(self, symbol: str, risk_amount: float = 0.0) -> tuple[bool, Optional[str]]:
         if self.current_open_positions >= self.max_open_positions:
             reason = f"Max open positions reached: {self.max_open_positions}"
+            logger.warning(reason)
+            return False, reason
+
+        if self.open_positions_by_symbol.get(symbol, 0) >= self.max_positions_per_symbol:
+            reason = f"Max positions per symbol reached for {symbol}: {self.max_positions_per_symbol}"
             logger.warning(reason)
             return False, reason
 
@@ -47,14 +57,19 @@ class RiskManager:
 
         return True, None
 
-    def position_opened(self) -> None:
+    def position_opened(self, symbol: Optional[str] = None) -> None:
         self.current_open_positions += 1
         self.last_trade_time = datetime.utcnow()
+        if symbol:
+            self.open_positions_by_symbol[symbol] = self.open_positions_by_symbol.get(symbol, 0) + 1
         logger.info(f"Position opened. Current open positions: {self.current_open_positions}")
 
-    def position_closed(self, pnl: float) -> None:
+    def position_closed(self, pnl: float, symbol: Optional[str] = None) -> None:
         self.current_open_positions = max(0, self.current_open_positions - 1)
         self.last_trade_time = datetime.utcnow()
+
+        if symbol and symbol in self.open_positions_by_symbol:
+            self.open_positions_by_symbol[symbol] = max(0, self.open_positions_by_symbol[symbol] - 1)
 
         if pnl < 0:
             self.consecutive_losses += 1
@@ -64,6 +79,14 @@ class RiskManager:
             logger.info("Win recorded. Consecutive losses reset to 0")
 
         logger.info(f"Position closed. Current open positions: {self.current_open_positions}")
+
+    async def _on_position_opened_event(self, event: Event) -> None:
+        self.position_opened(symbol=event.data.get('symbol'))
+
+    async def _on_position_closed_event(self, event: Event) -> None:
+        pnl = event.data.get('realized_pnl', 0.0)
+        symbol = event.data.get('symbol')
+        self.position_closed(pnl=pnl, symbol=symbol)
 
     def reset_consecutive_losses(self) -> None:
         self.consecutive_losses = 0

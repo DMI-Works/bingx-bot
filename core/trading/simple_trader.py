@@ -6,6 +6,7 @@ import json
 
 from ..exchange import BingXClient
 from ..events import EventBus, Event, EventType
+from ..risk import RiskManager
 
 
 logger = logging.getLogger(__name__)
@@ -18,11 +19,11 @@ class SimpleTrader:
         self,
         exchange: BingXClient,
         event_bus: EventBus,
-        max_open_positions: int = 3
+        risk_manager: Optional[RiskManager] = None,
     ):
         self.exchange = exchange
         self.event_bus = event_bus
-        self.max_open_positions = max_open_positions
+        self.risk_manager = risk_manager
 
         self.open_positions = {}
 
@@ -34,8 +35,6 @@ class SimpleTrader:
 
         self.event_bus.subscribe(EventType.BALANCE_UPDATED, self._handle_account_update)
 
-
-        logger.info(f"SimpleTrader initialized (max_open_positions={max_open_positions})")
 
     async def _handle_signal(self, event: Event) -> None:
         """Обробка сигналу від стратегії"""
@@ -62,12 +61,12 @@ class SimpleTrader:
         take_profit_levels: Optional[list] = None
     ) -> bool:
         try:
-            if len(self.open_positions) >= self.max_open_positions:
-                logger.warning(
-                    f"Max open positions limit reached ({len(self.open_positions)}/{self.max_open_positions}), "
-                    f"skipping {symbol} {side}"
-                )
-                return False
+            # Перевірка через RiskManager (ліміти, кулдаун, consecutive losses тощо)
+            if self.risk_manager:
+                can_open, reason = self.risk_manager.can_open_position(symbol)
+                if not can_open:
+                    logger.warning(f"Risk manager blocked {symbol} {side}: {reason}")
+                    return False
 
             logger.info(f"Opening position: {symbol} {side} {quantity}")
 

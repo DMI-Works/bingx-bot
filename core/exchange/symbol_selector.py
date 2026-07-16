@@ -17,17 +17,19 @@ class SymbolSelector:
     async def select(self) -> List[str]:
         """
         Формує список символів для торгівлі:
+        - завжди включає whitelist_symbols з конфігу (ваш пріоритетний список)
         - завжди включає символи відкритих позицій (щоб бот не втратив керування ними)
         - додає символи, що проходять фільтри 24h об'єму/спреду/ціни
         - обмежує загальну кількість символів (max_symbols), пріоритет — за об'ємом
         """
         blacklist = set(self.filters.get('blacklist_symbols', []))
+        whitelist = set(self.filters.get('whitelist_symbols', []))
         min_volume_24h = self.filters.get('min_volume_24h', 0)
         max_spread_percent = self.filters.get('max_spread_percent', None)
         min_price = self.filters.get('min_price', {}) or {}
         max_price = self.filters.get('max_price', {}) or {}
-        max_symbols = self.filters.get('max_symbols', None)   
-        
+        max_symbols = self.filters.get('max_symbols', None)
+
         held_symbols = await self._get_held_symbols()
         tickers = await self._get_tickers()
 
@@ -71,14 +73,10 @@ class SymbolSelector:
         else:
             filtered_symbols = {c[0] for c in candidates}
 
-        # held_symbols добавляем ВСЕГДА, сверх лимита max_symbols
-        selected = held_symbols | filtered_symbols
+        priority_symbols = whitelist | held_symbols
+        selected = priority_symbols | filtered_symbols
 
-        logger.info(
-            f"Symbol selection: {len(held_symbols)} held + "
-            f"{len(filtered_symbols - held_symbols)} matched filters "
-            f"(capped at {max_symbols or 'unlimited'}) = {len(selected)} total"
-        )
+
 
         return sorted(selected)
 
