@@ -341,3 +341,35 @@ class BingXClient:
         if self.ws_client:
             await self.ws_client.unsubscribe(f"{symbol}@trade", symbol)
             self.subscribed_symbols.discard(symbol)
+
+    
+    async def get_income_history(
+        self,
+        symbol: Optional[str] = None,
+        income_type: Optional[str] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Історія доходу (реалізований PnL, комісії, фандинг) — авторитетне джерело з боку біржі."""
+        try:
+            params = {}
+            if symbol:
+                params['symbol'] = symbol
+            if income_type:
+                params['incomeType'] = income_type
+            if start_time:
+                params['startTime'] = start_time
+            if end_time:
+                params['endTime'] = end_time
+            if limit:
+                params['limit'] = limit
+
+            logger.info(f"get_income_history params: {params}")  # <-- добавили
+            response = await self.rest_client.get('/openApi/swap/v2/user/income', params, signed=True)
+            logger.info(f"get_income_history raw response: {response}")  # <-- добавили
+
+            return response.get('data', [])
+        except Exception as e:
+            logger.error(f"Failed to get income history: {e}")
+            raise

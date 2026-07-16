@@ -71,27 +71,28 @@ class RestClient:
             'X-BX-APIKEY': self.api_key
         }
 
+        query_string = self._parse_param(params) if params else ""
         url = f"{self.base_url}{endpoint}"
+        full_url = f"{url}?{query_string}" if query_string else url
+
         session = await self._get_session()
 
         for attempt in range(self.max_retries):
             try:
                 if method == 'GET':
-                    async with session.get(url, params=params, headers=headers) as response:
+                    async with session.get(full_url, headers=headers) as response:
                         result = await response.json()
                         response.raise_for_status()
                         return result
 
                 elif method == 'POST':
-                    # For POST, add params to URL query string
-                    full_url = f"{url}?{self._parse_param(params)}" if params else url
                     async with session.post(full_url, headers=headers) as response:
                         result = await response.json()
                         response.raise_for_status()
                         return result
 
                 elif method == 'DELETE':
-                    async with session.delete(url, params=params, headers=headers) as response:
+                    async with session.delete(full_url, headers=headers) as response:
                         result = await response.json()
                         response.raise_for_status()
                         return result

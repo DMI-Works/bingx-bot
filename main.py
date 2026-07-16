@@ -10,11 +10,11 @@ from core.database import Database
 from core.events import EventBus
 from core.exchange import BingXClient
 from core.exchange import SymbolSelector
-from core.execution import OrderManager, ExecutionEngine
-from core.state import PositionManager, RecoveryEngine, SettingsManager
+from core.state import SettingsManager
 from core.risk import RiskManager
 from core.strategies import SimpleMovingAverageStrategy
 from core.telegram import TelegramBot
+from core.trading import SimpleTrader
 
 
 def setup_logging(config: ConfigLoader) -> None:
@@ -85,46 +85,23 @@ async def main():
     settings_manager = SettingsManager(db, event_bus)
     logger.info("[OK] Settings Manager initialized")
 
-    order_manager = OrderManager(db, event_bus)
-    logger.info("[OK] Order Manager initialized")
-
-    position_manager = PositionManager(db, event_bus)
-    logger.info("[OK] Position Manager initialized")
-
-    recovery_engine = RecoveryEngine(
-        exchange=exchange,
-        order_manager=order_manager,
-        position_manager=position_manager,
-        db=db,
-        event_bus=event_bus
-    )
-    logger.info("[OK] Recovery Engine initialized")
-
     risk_config = config.get('trading.risk')
     risk_manager = RiskManager(db, event_bus, risk_config)
     logger.info("[OK] Risk Manager initialized")
 
     max_open_positions = config.get('trading.risk.max_open_positions', 3)
-    execution_engine = ExecutionEngine(
+    trader = SimpleTrader(
         exchange=exchange,
-        order_manager=order_manager,
-        position_manager=position_manager,
-        event_bus=event_bus,
         db=db,
+        event_bus=event_bus,
         max_open_positions=max_open_positions
     )
-    logger.info(f"[OK] Execution Engine initialized (max_open_positions={max_open_positions})")
+    logger.info(f"[OK] Simple Trader initialized (max_open_positions={max_open_positions})")
 
     filters_config = config.get('trading.filters', {})
     refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)
     symbol_selector = SymbolSelector(exchange, filters_config)
     logger.info("[OK] Symbol Selector initialized")
-
-    logger.info("Starting recovery process...")
-    recovery_success = await recovery_engine.recover()
-
-    if not recovery_success:
-        logger.error("Recovery failed! Check logs for details.")
 
     telegram_enabled = config.get('telegram.enabled', False)
     telegram_bot = None
@@ -138,8 +115,7 @@ async def main():
                 token=telegram_token,
                 chat_id=telegram_chat_id,
                 event_bus=event_bus,
-                position_manager=position_manager,
-                order_manager=order_manager,
+                db=db,
                 settings_manager=settings_manager,
                 exchange_client=exchange,
                 symbol_selector=symbol_selector
