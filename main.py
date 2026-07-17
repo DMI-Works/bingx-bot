@@ -96,6 +96,9 @@ async def main():
         risk_manager=risk_manager,
     )
 
+    risk_manager.sync_from_positions(trader.open_positions)
+    logger.info(f"[OK] Simple Trader initialized")
+
     filters_config = config.get('trading.filters', {})
     refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)
     symbol_selector = SymbolSelector(exchange, filters_config)

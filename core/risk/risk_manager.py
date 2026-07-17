@@ -26,11 +26,29 @@ class RiskManager:
         self.current_open_positions = 0
         self.open_positions_by_symbol: dict[str, int] = {}
 
-        # Автоматично тримаємо стан у синхроні з реальними подіями відкриття/закриття позицій
         self.event_bus.subscribe(EventType.POSITION_OPENED, self._on_position_opened_event)
         self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed_event)
 
         logger.info("RiskManager initialized")
+
+    def sync_from_positions(self, positions: dict) -> None:
+        """
+        Синхронізує лічильники з реальним станом open_positions трейдера.
+        Викликати ОБОВ'ЯЗКОВО при старті бота (після SimpleTrader._restore_open_positions),
+        інакше лічильники можуть "застрягти" назавжди після рестарту в момент, коли
+        POSITION_CLOSED не встиг долетіти (краш, збій мережі тощо).
+        """
+        self.current_open_positions = len(positions)
+        self.open_positions_by_symbol = {}
+        for pos in positions.values():
+            symbol = pos.get('symbol')
+            if symbol:
+                self.open_positions_by_symbol[symbol] = self.open_positions_by_symbol.get(symbol, 0) + 1
+
+        logger.info(
+            f"RiskManager synced from real positions: {self.current_open_positions} total, "
+            f"by symbol: {self.open_positions_by_symbol}"
+        )
 
     def can_open_position(self, symbol: str, risk_amount: float = 0.0) -> tuple[bool, Optional[str]]:
         if self.current_open_positions >= self.max_open_positions:
@@ -105,6 +123,7 @@ class RiskManager:
         return {
             'current_open_positions': self.current_open_positions,
             'max_open_positions': self.max_open_positions,
+            'open_positions_by_symbol': self.open_positions_by_symbol,
             'consecutive_losses': self.consecutive_losses,
             'max_consecutive_losses': self.max_consecutive_losses,
             'cooldown_active': self._is_cooldown_active(),

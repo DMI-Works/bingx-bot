@@ -266,7 +266,7 @@ class SimpleTrader:
         status = order_data.get('X')
         order_type = order_data.get('o')
         symbol = order_data.get('s')
-        position_side = order_data.get('ps')  # LONG / SHORT
+        position_side = order_data.get('ps')
 
         if status == 'FILLED' and order_type in ('STOP_MARKET', 'TAKE_PROFIT_MARKET', 'MARKET') and order_data.get('ro') == True:
             position_key = f"{symbol}_{position_side}"
@@ -281,13 +281,12 @@ class SimpleTrader:
                 known_bot_order_ids.add(position['sl_order_id'])
 
             closed_by = 'bot' if exchange_order_id in known_bot_order_ids else 'user'
+            realized_pnl = float(order_data.get('rp', 0))  # BingX присилає це прямо в події
 
-            # Видаляємо позицію з трекінгу
             del self.open_positions[position_key]
 
-            logger.info(f"Position closed: {symbol} {position_side}, closed_by={closed_by}")
+            logger.info(f"Position closed: {symbol} {position_side}, closed_by={closed_by}, realized_pnl={realized_pnl:+.4f}")
 
-            # Оновлюємо статус в БД
             try:
                 self.db.update_position_status(
                     order_id=position['order_id'],
@@ -297,14 +296,13 @@ class SimpleTrader:
             except Exception as e:
                 logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
 
-            # Публікуємо подію POSITION_CLOSED
             await self.event_bus.publish(Event(
                 type=EventType.POSITION_CLOSED,
                 data={
                     'symbol': symbol,
                     'side': position_side,
                     'close_price': float(order_data.get('ap', 0)),
-                    'realized_pnl': 0.0,  # Біржа не дає PnL в ORDER_TRADE_UPDATE
+                    'realized_pnl': realized_pnl,
                     'closed_by': closed_by
                 }
             ))
