@@ -137,8 +137,6 @@ async def main():
 
         await symbol_selector.start_refresh_loop(refresh_interval)
 
-    tp_levels_config = config.get('trading.take_profit.levels', [])
-    first_tp_percent = tp_levels_config[0]['percent'] if tp_levels_config else 3.0
     use_atr_risk = config.get('trading.stop_loss.mode', 'fixed_percent') == 'atr'
 
     strategy_config = {
