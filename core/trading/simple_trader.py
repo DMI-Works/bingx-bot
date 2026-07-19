@@ -279,13 +279,45 @@ class SimpleTrader:
             known_bot_order_ids = set(position.get('tp_order_ids', []))
             if position.get('sl_order_id'):
                 known_bot_order_ids.add(position['sl_order_id'])
-
             closed_by = 'bot' if exchange_order_id in known_bot_order_ids else 'user'
-            realized_pnl = float(order_data.get('rp', 0))  # BingX присилає це прямо в події
 
+            trade_id = order_data.get('t')
+            filled_qty = float(order_data.get('q', 0))  # обсяг ЦЬОГО закриваючого ордера
+
+            # накопичуємо ID закриваючих угод — тільки ID, жодних цін/PnL
+            position.setdefault('closing_trade_ids', [])
+            if trade_id is not None:
+                position['closing_trade_ids'].append(trade_id)
+            position.setdefault('closing_orders', [])
+            position['closing_orders'].append({'order_id': exchange_order_id, 'closed_by': closed_by})
+
+            remaining = position.get('remaining_quantity', position.get('quantity', 0)) - filled_qty
+            position['remaining_quantity'] = max(0.0, remaining)
+
+            logger.info(
+                f"Partial/full close fill: {symbol} {position_side}, order={exchange_order_id}, "
+                f"trade_id={trade_id}, filled_qty={filled_qty}, remaining={position['remaining_quantity']:.8f}"
+            )
+
+            # SL завжди закриває решту повністю (STOP_MARKET без closePosition тут не має 'quantity' часткового рівня)
+            is_full_close = order_type == 'STOP_MARKET' or position['remaining_quantity'] <= 1e-8
+
+            try:
+                self.db.update_position_metadata(
+                    order_id=position['order_id'],
+                    metadata=json.dumps(position)
+                )
+            except Exception as e:
+                logger.error(f"Failed to update position metadata (partial close) in DB: {e}", exc_info=True)
+
+            if not is_full_close:
+                # позиція ще частково відкрита — НЕ видаляємо, НЕ закриваємо в БД
+                return
+
+            # позиція реально повністю закрита
             del self.open_positions[position_key]
 
-            logger.info(f"Position closed: {symbol} {position_side}, closed_by={closed_by}, realized_pnl={realized_pnl:+.4f}")
+            logger.info(f"Position fully closed: {symbol} {position_side}, closed_by={closed_by}")
 
             try:
                 self.db.update_position_status(
@@ -302,7 +334,6 @@ class SimpleTrader:
                     'symbol': symbol,
                     'side': position_side,
                     'close_price': float(order_data.get('ap', 0)),
-                    'realized_pnl': realized_pnl,
                     'closed_by': closed_by
                 }
             ))

@@ -451,7 +451,6 @@ class TelegramBot:
         try:
             start_time = self.to_ms(row['created_at'])
             end_time = self.to_ms(row['closed_at'])
-            logger.info(f"Fetched[INFO] start_time, end_time {(start_time, end_time)}")
 
             income_entries = await self.exchange_client.get_income_history(
                 symbol=symbol,
@@ -461,7 +460,6 @@ class TelegramBot:
             )
 
             logger.info(f"Fetched[INFO] {(income_entries)}")
-            logger.info(f"Fetched len [INFO] {len(income_entries)}")
             realized_pnl = sum(float(e.get('income', 0)) for e in income_entries)
         except Exception as e:
             logger.error(f"Failed to fetch income history for {symbol}: {e}")
