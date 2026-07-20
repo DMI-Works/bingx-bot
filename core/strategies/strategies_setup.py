@@ -3,6 +3,8 @@ from .registry import STRATEGY_REGISTRY
 def setup_strategies(event_bus, config, logger):
     enabled_strategies = config.get('strategies.enabled', [])
     strategies = []
+    
+    logger.info(f"[ Enabled STRATEGIES ]: {len(enabled_strategies)}")
 
     for name in enabled_strategies:
         strategy_cls = STRATEGY_REGISTRY.get(name)
