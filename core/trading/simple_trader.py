@@ -343,7 +343,6 @@ class SimpleTrader:
                 # позиція ще частково відкрита — НЕ видаляємо, НЕ закриваємо в БД
                 return
 
-            # позиція реально повністю закрита
             del self.open_positions[position_key]
 
             logger.info(f"Position fully closed: {symbol} {position_side}, closed_by={closed_by}")
