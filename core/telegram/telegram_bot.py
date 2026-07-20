@@ -408,72 +408,6 @@ class TelegramBot:
     async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._show_history_page(update, context, page=0)
 
-    def to_ms(self,value) -> int:
-        """Конвертирует значение из таблицы (str или datetime) в timestamp в миллисекундах (UTC)."""
-        if isinstance(value, str):
-            dt = datetime.fromisoformat(value)
-        else:
-            dt = value
-
-        # Если naive datetime (без tzinfo) — считаем, что это UTC
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-
-        return int(dt.timestamp() * 1000)
-
-    async def _get_or_fetch_position_pnl(self, row) -> tuple:
-        """Повертає (entry_price, realized_pnl). Бере з кешу metadata, або питає біржу і кешує результат."""
-        try:
-            metadata = json.loads(row['metadata']) if row['metadata'] else {}
-        except (TypeError, ValueError):
-            metadata = {}
-
-        if 'cached_entry_price' in metadata and 'cached_realized_pnl' in metadata and metadata['cached_realized_pnl'] != 0:
-            return metadata['cached_entry_price'], metadata['cached_realized_pnl']
-
-        symbol = row['symbol']
-        order_id = row['order_id']
-        entry_price = 0.0
-        realized_pnl = 0.0
-
-        if str(order_id).startswith('manual-'):
-            # позиція відкрита вручну — order_id синтетичний, беремо ціну входу з metadata (збережена з ACCOUNT_UPDATE 'ep')
-            entry_price = float(metadata.get('entry_price') or 0)
-        else:
-            try:
-                order_info = await self.exchange_client.get_order(symbol, str(order_id))
-                if order_info:
-                    entry_price = float(order_info.get('avgPrice', 0))
-            except Exception as e:
-                logger.error(f"Failed to fetch entry order {order_id}: {e}")
-
-        closed_at_raw = row['closed_at']
-        try:
-            start_time = self.to_ms(row['created_at'])
-            end_time = self.to_ms(row['closed_at'])
-
-            income_entries = await self.exchange_client.get_income_history(
-                symbol=symbol,
-                income_type='REALIZED_PNL',
-                start_time=start_time,
-                end_time=end_time
-            )
-
-            logger.info(f"Fetched[INFO] {(income_entries)}")
-            realized_pnl = sum(float(e.get('income', 0)) for e in income_entries)
-        except Exception as e:
-            logger.error(f"Failed to fetch income history for {symbol}: {e}")
-
-        metadata['cached_entry_price'] = entry_price
-        metadata['cached_realized_pnl'] = realized_pnl
-
-        try:
-            self.db.update_position_metadata(str(order_id), json.dumps(metadata))
-        except Exception as e:
-            logger.error(f"Failed to cache pnl metadata: {e}")
-
-        return entry_price, realized_pnl
-
     async def _show_history_page(self, update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
         offset = page * PAGE_SIZE
 
@@ -487,7 +421,41 @@ class TelegramBot:
 
         total_pages = max(1, (total_count + PAGE_SIZE - 1) // PAGE_SIZE)
 
-        # статистика — по ВСІХ закритих позиціях (з кешем, тому повторні виклики дешеві)
+        def parse_metadata(row) -> dict:
+            try:
+                return json.loads(row['metadata']) if row['metadata'] else {}
+            except (TypeError, ValueError):
+                return {}
+
+        def format_sl_tp_lines(metadata: dict, entry_price: float, side: str) -> list:
+            """Формує список рядків SL/TP для картки угоди (кожен рівень — окремий рядок)"""
+            lines = []
+
+            sl_price = metadata.get('stop_loss_price')
+            if sl_price:
+                sl_price = float(sl_price)
+                if entry_price:
+                    sl_percent = (
+                        (entry_price - sl_price) / entry_price * 100 if side == 'LONG'
+                        else (sl_price - entry_price) / entry_price * 100
+                    )
+                    lines.append(f"🔴 SL: <code>${sl_price:.4f}</code> (-{sl_percent:.1f}%)")
+                else:
+                    lines.append(f"🔴 SL: <code>${sl_price:.4f}</code>")
+
+            tp_levels = metadata.get('take_profit_levels') or []
+            if tp_levels:
+                lines.append("🟢 TP:")
+                for i, lvl in enumerate(tp_levels):
+                    tp_price = float(lvl.get('price', 0))
+                    close_pct = lvl.get('close_percent', 0)
+                    prefix = "└" if i == len(tp_levels) - 1 else "  ├"
+                    
+                    lines.append(f"{prefix} <code>${tp_price:.4f}</code> ({close_pct}%)")
+
+            return lines
+
+        # статистика — по ВСІХ закритих позиціях, дані прямо з metadata (без звернень до біржі)
         total_pnl = 0.0
         profitable_count = 0
         losing_count = 0
@@ -495,7 +463,8 @@ class TelegramBot:
         try:
             all_closed = self.db.get_all_closed_positions()
             for row in all_closed:
-                _, pnl = await self._get_or_fetch_position_pnl(row)
+                metadata = parse_metadata(row)
+                pnl = float(metadata.get('cached_realized_pnl', 0.0))
                 total_pnl += pnl
                 if pnl >= 0:
                     profitable_count += 1
@@ -520,7 +489,9 @@ class TelegramBot:
             text += "\n📭 Немає закритих позицій на цій сторінці"
         else:
             for row in rows:
-                entry_price, pnl = await self._get_or_fetch_position_pnl(row)
+                metadata = parse_metadata(row)
+                entry_price = float(metadata.get('cached_entry_price', 0.0))
+                pnl = float(metadata.get('cached_realized_pnl', 0.0))
                 emoji = "🟢" if pnl >= 0 else "🔴"
                 closed_at_raw = row['closed_at']
 
@@ -531,18 +502,19 @@ class TelegramBot:
                 except (ValueError, TypeError):
                     closed_at = str(closed_at_raw)
 
-                try:
-                    metadata = json.loads(row['metadata']) if row['metadata'] else {}
-                except (TypeError, ValueError):
-                    metadata = {}
                 closed_by = metadata.get('closed_by', '?')
+                side = row['side']
 
                 text += f"""
-    {emoji} <b>{row['symbol']}</b> {row['side']}
+    {emoji} <b>{row['symbol']}</b> {side}
     ├ Вхід: <code>${entry_price:.4f}</code>
     ├ Закрито: <code>{closed_at}</code> ({closed_by})
-    └ PnL: <b>${pnl:+.2f}</b>
     """
+                sl_tp_lines = format_sl_tp_lines(metadata, entry_price, side)
+                for line in sl_tp_lines:
+                    text += f"├ {line}\n"
+
+                text += f"└ PnL: <b>${pnl:+.2f}</b>\n"
 
         text += f"\n━━━━━━━━━━━━━━━━━━━━\nСторінка {page + 1} з {total_pages}"
 
