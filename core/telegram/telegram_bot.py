@@ -12,6 +12,8 @@ from typing import Optional
 from ..events import EventBus, Event, EventType
 from ..state import SettingsManager
 
+from core.strategies import TestStrategy
+
 LOCAL_TZ = ZoneInfo("Europe/Kyiv")
 PAGE_SIZE = 5
 
@@ -44,6 +46,9 @@ class TelegramBot:
         self._subscribe_to_events()
         logger.info("TelegramBot initialized")
 
+        self.test_strategy = TestStrategy(event_bus, {'default_symbol': 'BTCUSDT', 'default_price': 65000.0})
+
+
     def _subscribe_to_events(self) -> None:
         self.event_bus.subscribe(EventType.POSITION_OPENED, self._on_position_opened)
         self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
@@ -65,6 +70,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("export_db", self._cmd_export_db))
         self.application.add_handler(CommandHandler("symbols", self._cmd_symbols))
         self.application.add_handler(CommandHandler("history", self._cmd_history))
+        self.application.add_handler(CommandHandler("test_signal", self._cmd_test_signal))
         self.application.add_handler(CallbackQueryHandler(self._handle_callback))
 
 
@@ -411,6 +417,10 @@ class TelegramBot:
 
     async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._show_history_page(update, context, page=0)
+
+    async def _cmd_test_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        signal = await self.test_strategy.trigger(symbol="INDEX-USDT", price=1000.0, side="LONG")
+        await update.message.reply_text(f"Тестовый сигнал отправлен:\n{signal}")
 
     async def _show_history_page(self, update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
         offset = page * PAGE_SIZE

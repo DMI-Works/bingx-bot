@@ -61,13 +61,13 @@ trading:
     enabled: true
     levels:                # используется при stop_loss.mode: fixed_percent
       - percent: 3.0
-        close_percent: 25
-      - percent: 5.0
-        close_percent: 50
-      - percent: 10.0
-        close_percent: 25
-      - percent: 20.0
         close_percent: 100
+      # - percent: 5.0
+      #   close_percent: 50
+      # - percent: 10.0
+      #   close_percent: 25
+      # - percent: 20.0
+      #   close_percent: 100
     atr:                   # используется при stop_loss.mode: atr
       multipliers: [2.0, 3.5]
       close_percents: [50, 50]

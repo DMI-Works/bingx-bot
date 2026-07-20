@@ -12,9 +12,9 @@ from core.exchange import BingXClient
 from core.exchange import SymbolSelector
 from core.state import SettingsManager
 from core.risk import RiskManager
+from core.trading import SimpleTrader
 from core.strategies import setup_strategies
 from core.telegram import TelegramBot
-from core.trading import SimpleTrader
 
 
 def setup_logging(config: ConfigLoader) -> None:
@@ -86,7 +86,7 @@ async def main():
     logger.info("[OK] Settings Manager initialized")
 
     risk_config = config.get('trading.risk')
-    risk_manager = RiskManager(db, event_bus, risk_config)
+    risk_manager = RiskManager(db, event_bus, exchange, risk_config)
     logger.info("[OK] Risk Manager initialized")
 
     trader = SimpleTrader(
@@ -95,9 +95,7 @@ async def main():
         db=db,
         risk_manager=risk_manager,
     )
-
-    risk_manager.sync_from_positions(trader.open_positions)
-    logger.info(f"[OK] Simple Trader initialized")
+    logger.info("[OK] Simple Trader initialized")
 
     filters_config = config.get('trading.filters', {})
     refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)

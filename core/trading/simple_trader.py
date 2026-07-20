@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 
 from ..exchange import BingXClient
+from ..exchange.bingx_client import BingXAPIError
 from ..events import EventBus, Event, EventType
 from ..risk import RiskManager
 from ..database import Database
@@ -98,9 +99,8 @@ class SimpleTrader:
     ) -> bool:
         try:
             positions_info_message = None
-            # Перевірка через RiskManager (ліміти, кулдаун, consecutive losses тощо)
             if self.risk_manager:
-                can_open, reason = self.risk_manager.can_open_position(symbol)
+                can_open, reason = await self.risk_manager.can_open_position(symbol)
                 positions_info_message = reason if reason else "Position can be opened."
 
                 if not can_open:
@@ -109,15 +109,32 @@ class SimpleTrader:
 
             logger.info(f"Opening position: {symbol} {side} {quantity}")
 
-            await self.exchange.set_leverage(symbol, leverage)
+            try:
+                await self.exchange.set_leverage(symbol, leverage, side=side)
+            except BingXAPIError as e:
+                logger.warning(
+                    f"set_leverage returned an error for {symbol} (leverage={leverage}, side={side}): "
+                    f"{e.code} {e.msg}. Continuing with order placement anyway."
+                )
 
             order_side = 'BUY' if side == 'LONG' else 'SELL'
-            exchange_order = await self.exchange.create_order(
-                symbol=symbol,
-                side=order_side,
-                order_type='MARKET',
-                quantity=quantity
-            )
+
+            try:
+                exchange_order = await self.exchange.create_order(
+                    symbol=symbol,
+                    side=order_side,
+                    order_type='MARKET',
+                    quantity=quantity
+                )
+            except BingXAPIError as e:
+                if e.code == 109400 and 'temporarily disabled' in e.msg:
+                    logger.warning(
+                        f"Order rejected by exchange (API orders temporarily disabled) "
+                        f"for {symbol} {side}: {e.msg}"
+                    )
+                else:
+                    logger.error(f"Order rejected by exchange for {symbol} {side}: {e.code} {e.msg}")
+                return False
 
             logger.info(f"Exchange order response: {exchange_order}")
 
@@ -126,9 +143,11 @@ class SimpleTrader:
                 order_id = exchange_order['data']['order'].get('orderId')
             elif 'orderId' in exchange_order:
                 order_id = exchange_order.get('orderId')
+            elif 'data' in exchange_order and 'orderId' in exchange_order['data']:
+                order_id = exchange_order['data'].get('orderId')
 
             if not order_id:
-                logger.error("Failed to get orderId from exchange response")
+                logger.error(f"Order accepted but no orderId found in response: {exchange_order}")
                 return False
 
             # Отримуємо entry_price з відповіді біржі
@@ -227,6 +246,9 @@ class SimpleTrader:
             logger.info(f"Stop loss created: {symbol} @ {stop_loss_price}, orderId={order_id}")
             return order_id
 
+        except BingXAPIError as e:
+            logger.error(f"Failed to create stop loss for {symbol}: {e.code} {e.msg}")
+            return None
         except Exception as e:
             logger.error(f"Failed to create stop loss: {e}")
             return None
@@ -258,6 +280,9 @@ class SimpleTrader:
                 order_ids.append(order_id)
                 logger.info(f"Take profit {i+1} created: {symbol} @ {tp_price}, orderId={order_id}")
 
+            except BingXAPIError as e:
+                logger.error(f"Failed to create take profit {i+1} for {symbol}: {e.code} {e.msg}")
+                order_ids.append(None)
             except Exception as e:
                 logger.error(f"Failed to create take profit {i+1}: {e}")
                 order_ids.append(None)

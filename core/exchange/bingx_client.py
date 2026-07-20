@@ -13,6 +13,15 @@ from ..events import EventBus, Event, EventType
 logger = logging.getLogger(__name__)
 
 
+class BingXAPIError(Exception):
+    def __init__(self, code: int, msg: str, endpoint: str = "", response: Optional[Dict[str, Any]] = None):
+        self.code = code
+        self.msg = msg
+        self.endpoint = endpoint
+        self.response = response or {}
+        super().__init__(f"BingX API error {code} at {endpoint}: {msg}")
+
+
 class BingXClient:
     def __init__(
         self,
@@ -44,6 +53,24 @@ class BingXClient:
         self.subscribed_symbols: set = set()
 
         logger.info(f"BingXClient initialized (testnet={testnet})")
+
+    @staticmethod
+    def _raise_if_error(response: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+        """
+        BingX возвращает HTTP 200 даже при бизнес-ошибках — код лежит в теле.
+        rest_client только логирует такие ошибки, но не бросает исключение
+        (это осознанно, чтобы позволить retry-логике на 100001 отработать).
+        Поэтому на уровне BingXClient мы обязаны сами проверить code перед
+        тем, как считать операцию успешной.
+        """
+        if isinstance(response, dict) and response.get('code') not in (0, None):
+            raise BingXAPIError(
+                code=response.get('code'),
+                msg=response.get('msg', ''),
+                endpoint=endpoint,
+                response=response
+            )
+        return response
 
     async def _handle_ws_message(self, data: Dict[str, Any]) -> None:
         try:
@@ -150,7 +177,7 @@ class BingXClient:
     async def get_account_balance(self) -> Dict[str, Any]:
         try:
             response = await self.rest_client.get('/openApi/swap/v2/user/balance', signed=True)
-            return response
+            return self._raise_if_error(response, '/openApi/swap/v2/user/balance')
         except Exception as e:
             logger.error(f"Failed to get account balance: {e}")
             raise
@@ -161,6 +188,7 @@ class BingXClient:
                 "/openApi/swap/v2/user/positions",
                 signed=True
             )
+            self._raise_if_error(response, '/openApi/swap/v2/user/positions')
 
             return response.get("data", [])
 
@@ -175,6 +203,7 @@ class BingXClient:
                 params['symbol'] = symbol
 
             response = await self.rest_client.get('/openApi/swap/v2/trade/openOrders', params, signed=True)
+            self._raise_if_error(response, '/openApi/swap/v2/trade/openOrders')
             return response.get('data', {}).get('orders', [])
         except Exception as e:
             logger.error(f"Failed to get open orders: {e}")
@@ -188,6 +217,7 @@ class BingXClient:
             }
 
             response = await self.rest_client.get('/openApi/swap/v2/trade/order', params, signed=True)
+            self._raise_if_error(response, '/openApi/swap/v2/trade/order')
             return response.get('data', {}).get('order')
         except Exception as e:
             logger.error(f"Failed to get order {order_id}: {e}")
@@ -228,6 +258,9 @@ class BingXClient:
                 params['stopPrice'] = stop_price
 
             response = await self.rest_client.post('/openApi/swap/v2/trade/order', params)
+            # проверяем code ДО лога "успеха" — раньше тут логировался успех
+            # даже когда биржа вернула ошибку (например, ордера временно отключены)
+            self._raise_if_error(response, '/openApi/swap/v2/trade/order')
             logger.info(f"Order created: {symbol} {side} {quantity}")
             return response
 
@@ -243,6 +276,7 @@ class BingXClient:
             }
 
             response = await self.rest_client.delete('/openApi/swap/v2/trade/order', params)
+            self._raise_if_error(response, '/openApi/swap/v2/trade/order')
             logger.info(f"Order cancelled: {order_id}")
             return response
 
@@ -257,6 +291,7 @@ class BingXClient:
                 params['symbol'] = symbol
 
             response = await self.rest_client.delete('/openApi/swap/v2/trade/allOpenOrders', params)
+            self._raise_if_error(response, '/openApi/swap/v2/trade/allOpenOrders')
             logger.info(f"All orders cancelled" + (f" for {symbol}" if symbol else ""))
             return response
 
@@ -273,9 +308,19 @@ class BingXClient:
             }
 
             response = await self.rest_client.post('/openApi/swap/v2/trade/leverage', params)
+            self._raise_if_error(response, '/openApi/swap/v2/trade/leverage')
             logger.info(f"Leverage set: {symbol} {leverage}x")
             return response
 
+        except BingXAPIError as e:
+            if e.code == 109400 and 'Hedge mode' in e.msg:
+                logger.error(
+                    f"set_leverage failed: account is in Hedge mode, "
+                    f"side='{side}' is invalid there — use 'LONG', 'SHORT' or 'ALL' instead of 'BOTH'"
+                )
+            else:
+                logger.error(f"Failed to set leverage: {e}")
+            raise
         except Exception as e:
             logger.error(f"Failed to set leverage: {e}")
             raise
@@ -283,6 +328,7 @@ class BingXClient:
     async def get_symbol_info(self, symbol: str) -> Dict[str, Any]:
         try:
             response = await self.rest_client.get('/openApi/swap/v2/quote/contracts')
+            self._raise_if_error(response, '/openApi/swap/v2/quote/contracts')
             contracts = response.get('data', [])
 
             for contract in contracts:
@@ -298,6 +344,7 @@ class BingXClient:
     async def get_ticker_price(self, symbol: str) -> float:
         try:
             response = await self.rest_client.get('/openApi/swap/v2/quote/price', {'symbol': symbol})
+            self._raise_if_error(response, '/openApi/swap/v2/quote/price')
             return float(response.get('data', {}).get('price', 0))
 
         except Exception as e:
@@ -311,18 +358,22 @@ class BingXClient:
 
     async def get_listen_key(self) -> str:
         response = await self.rest_client.post('/openApi/user/auth/userDataStream', {})
+        self._raise_if_error(response, '/openApi/user/auth/userDataStream')
         return response.get('listenKey')
 
     async def keep_alive_listen_key(self, listen_key: str) -> None:
-        await self.rest_client.put('/openApi/user/auth/userDataStream', {'listenKey': listen_key})
+        response = await self.rest_client.put('/openApi/user/auth/userDataStream', {'listenKey': listen_key})
+        self._raise_if_error(response, '/openApi/user/auth/userDataStream')
 
     async def close_listen_key(self, listen_key: str) -> None:
-        await self.rest_client.delete('/openApi/user/auth/userDataStream', {'listenKey': listen_key})
+        response = await self.rest_client.delete('/openApi/user/auth/userDataStream', {'listenKey': listen_key})
+        self._raise_if_error(response, '/openApi/user/auth/userDataStream')
 
     async def get_all_tickers(self) -> List[Dict[str, Any]]:
         """24h статистика по всім swap-контрактам (об'єм, ціна, спред)."""
         try:
             response = await self.rest_client.get('/openApi/swap/v2/quote/ticker')
+            self._raise_if_error(response, '/openApi/swap/v2/quote/ticker')
             return response.get('data', [])
         except Exception as e:
             logger.error(f"Failed to get all tickers: {e}")
@@ -332,6 +383,7 @@ class BingXClient:
         """Список всіх доступних swap-контрактів."""
         try:
             response = await self.rest_client.get('/openApi/swap/v2/quote/contracts')
+            self._raise_if_error(response, '/openApi/swap/v2/quote/contracts')
             return response.get('data', [])
         except Exception as e:
             logger.error(f"Failed to get contracts: {e}")
@@ -365,9 +417,10 @@ class BingXClient:
             if limit:
                 params['limit'] = limit
 
-            logger.info(f"get_income_history params: {params}")  # <-- добавили
+            logger.info(f"get_income_history params: {params}")
             response = await self.rest_client.get('/openApi/swap/v2/user/income', params, signed=True)
-            logger.info(f"get_income_history raw response: {response}")  # <-- добавили
+            logger.info(f"get_income_history raw response: {response}")
+            self._raise_if_error(response, '/openApi/swap/v2/user/income')
 
             return response.get('data', [])
         except Exception as e:
