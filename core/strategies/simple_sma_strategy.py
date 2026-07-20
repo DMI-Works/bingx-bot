@@ -2,6 +2,7 @@ import time
 from typing import Optional, List, Dict
 import logging
 
+from .registry import register_strategy
 from .base_strategy import BaseStrategy
 from ..events import EventBus
 
@@ -24,7 +25,7 @@ class Candle:
         self.low = min(self.low, price)
         self.close = price
 
-
+@register_strategy('SimpleMovingAverageStrategy')
 class SimpleMovingAverageStrategy(BaseStrategy):
     def __init__(self, event_bus: EventBus, config: dict):
         super().__init__("SimpleMovingAverageStrategy", event_bus, config)
@@ -63,6 +64,29 @@ class SimpleMovingAverageStrategy(BaseStrategy):
         self.side_history: Dict[str, List[str]] = {}
         self.last_trade_time: Dict[str, float] = {}
 
+    @classmethod
+    def build_config(cls, app_config) -> dict:
+        use_atr_risk = app_config.get('trading.stop_loss.mode', 'fixed_percent') == 'atr'
+        return {
+            'timeframe_seconds': 60,
+            'sma_period': app_config.get('trading.sma_period', 20),
+            'threshold_percent': app_config.get('trading.threshold_percent', 0.3),
+            'confirmation_candles': app_config.get('trading.confirmation_candles', 2),
+            'cooldown_seconds': app_config.get('trading.cooldown_seconds', 300),
+            'position_size': app_config.get('trading.position_size.value', 100),
+            'leverage': app_config.get('trading.leverage', 10),
+
+            'use_atr_risk': use_atr_risk,
+            'atr_period': app_config.get('trading.stop_loss.atr.period', 14),
+            'atr_stop_multiplier': app_config.get('trading.stop_loss.atr.multiplier', 1.5),
+            'atr_tp_multipliers': app_config.get('trading.take_profit.atr.multipliers', [2.0, 3.5]),
+            'tp_close_percents': app_config.get('trading.take_profit.atr.close_percents', [50, 50]),
+
+            'stop_loss_percent': app_config.get('trading.stop_loss.value', 2.0),
+            'take_profit_levels': app_config.get(
+                'trading.take_profit.levels', [{'percent': 3.0, 'close_percent': 100}]
+            ),
+        }
 
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
         now = time.time()
@@ -239,7 +263,7 @@ class SimpleMovingAverageStrategy(BaseStrategy):
             'stop_loss_price': stop_loss_price,
             'take_profit_levels': take_profit_levels,
             'reason': (
-                f'Price {price:.6f} {"above" if is_long else "below"} SMA {sma:.6f} '
-                f'({deviation_percent:+.2f}%), confirmed {self.confirmation_candles} candles, {risk_desc}'
+                f'Ціна {price:.6f} {"вище" if is_long else "нижче"} SMA {sma:.6f} '
+                f'({deviation_percent:+.2f}%), підтверджено {self.confirmation_candles} свічками, {risk_desc}'
             )
         }

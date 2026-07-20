@@ -33,7 +33,6 @@ class EventBus:
             self._subscribers[event_type] = []
 
         self._subscribers[event_type].append(callback)
-        logger.info(f"Subscribed {callback.__name__} to {event_type.value}")
 
     def unsubscribe(self, event_type: EventType, callback: Callable) -> None:
         if event_type in self._subscribers:

@@ -1,3 +1,4 @@
+# strategies/base_strategy.py
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -10,8 +11,13 @@ class BaseStrategy(ABC):
         self.event_bus = event_bus
         self.config = config
         self.enabled = False
-
         self.event_bus.subscribe(EventType.PRICE_UPDATED, self._on_price_update)
+
+    @classmethod
+    @abstractmethod
+    def build_config(cls, app_config) -> dict:
+        """Собирает strategy_config из общего конфига приложения."""
+        raise NotImplementedError
 
     @abstractmethod
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
@@ -20,14 +26,11 @@ class BaseStrategy(ABC):
     async def _on_price_update(self, event: Event) -> None:
         if not self.enabled:
             return
-
         data = event.data[0]
         symbol = data.get('s')
         price = float(data.get('p', 0))
-
         if symbol and price:
             signal = await self.analyze(symbol, price)
-
             if signal:
                 await self.event_bus.publish(Event(
                     type=EventType.SIGNAL_GENERATED,

@@ -12,7 +12,7 @@ from core.exchange import BingXClient
 from core.exchange import SymbolSelector
 from core.state import SettingsManager
 from core.risk import RiskManager
-from core.strategies import SimpleMovingAverageStrategy
+from core.strategies import setup_strategies
 from core.telegram import TelegramBot
 from core.trading import SimpleTrader
 
@@ -137,35 +137,7 @@ async def main():
 
         await symbol_selector.start_refresh_loop(refresh_interval)
 
-    use_atr_risk = config.get('trading.stop_loss.mode', 'fixed_percent') == 'atr'
-
-    strategy_config = {
-        'timeframe_seconds': 60,
-        'sma_period': config.get('trading.sma_period', 20),
-        'threshold_percent': config.get('trading.threshold_percent', 0.3),
-        'confirmation_candles': config.get('trading.confirmation_candles', 2),
-        'cooldown_seconds': config.get('trading.cooldown_seconds', 300),
-        'position_size': config.get('trading.position_size.value', 100),
-        'leverage': config.get('trading.leverage', 10),
-
-        # ATR risk
-        'use_atr_risk': use_atr_risk,
-        'atr_period': config.get('trading.stop_loss.atr.period', 14),
-        'atr_stop_multiplier': config.get('trading.stop_loss.atr.multiplier', 1.5),
-        'atr_tp_multipliers': config.get('trading.take_profit.atr.multipliers', [2.0, 3.5]),
-        'tp_close_percents': config.get('trading.take_profit.atr.close_percents', [50, 50]),
-
-        # Fallback: фиксированные проценты, если ATR выключен
-        'stop_loss_percent': config.get('trading.stop_loss.value', 2.0),
-        'take_profit_levels': config.get('trading.take_profit.levels', [{'percent': 3.0, 'close_percent': 100}]),
-    }
-
-    strategy = SimpleMovingAverageStrategy(event_bus, strategy_config)
-
-    enabled_strategies = config.get('strategies.enabled', [])
-    if 'SimpleMovingAverageStrategy' in enabled_strategies:
-        strategy.enable()
-        logger.info("[OK] SimpleMovingAverageStrategy enabled")
+    strategies = setup_strategies(event_bus, config, logger)
 
     logger.info("=" * 60)
     logger.info("Ruflo Trading Bot is running")

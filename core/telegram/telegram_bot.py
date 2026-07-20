@@ -296,6 +296,7 @@ class TelegramBot:
 Вхід: ${data['entry_price']:.4f}
 Кількість: {data['quantity']}
 Плече: {data['leverage']}x
+[INFO]: {event.data.get('positions_info_message')}
 """
         if data.get('stop_loss_price'):
             text += f"Stop Loss: ${data['stop_loss_price']:.4f}\n"
@@ -314,6 +315,7 @@ class TelegramBot:
 Напрямок: {data['side']}
 Ціна закриття: ${data.get('close_price', 0):.4f}
 Реалізований PnL: ${pnl:.2f}
+[INFO]: {event.data.get('positions_info_message')}
 """
         await self.send_message(text)
 
@@ -323,6 +325,7 @@ class TelegramBot:
 
 Символ: {event.data.get('symbol')}
 Ціна: ${event.data.get('price', 0):.4f}
+[INFO]: {event.data.get('positions_info_message')}
 """
         await self.send_message(text)
 
@@ -333,6 +336,7 @@ class TelegramBot:
 Символ: {event.data.get('symbol')}
 Рівень: {event.data.get('level', 1)}
 Ціна: ${event.data.get('price', 0):.4f}
+[INFO]: {event.data.get('positions_info_message')}
 """
         await self.send_message(text)
 

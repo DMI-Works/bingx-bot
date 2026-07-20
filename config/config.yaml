@@ -91,7 +91,7 @@ trading:
 
 # Strategy Configuration
 strategies:
-  enabled: ['SimpleMovingAverageStrategy']
+  enabled: ['SimpleMovingAverageStrategy', 'RejectionBlockStrategy']
 
 # Database Configuration
 database:

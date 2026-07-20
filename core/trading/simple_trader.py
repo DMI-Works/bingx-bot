@@ -97,9 +97,12 @@ class SimpleTrader:
         take_profit_levels: Optional[list] = None
     ) -> bool:
         try:
+            positions_info_message = None
             # Перевірка через RiskManager (ліміти, кулдаун, consecutive losses тощо)
             if self.risk_manager:
                 can_open, reason = self.risk_manager.can_open_position(symbol)
+                positions_info_message = reason if reason else "Position can be opened."
+
                 if not can_open:
                     logger.warning(f"Risk manager blocked {symbol} {side}: {reason}")
                     return False
@@ -192,7 +195,8 @@ class SimpleTrader:
                     'entry_price': entry_price,
                     'quantity': quantity,
                     'leverage': leverage,
-                    'stop_loss_price': stop_loss_price
+                    'stop_loss_price': stop_loss_price,
+                    'positions_info_message': positions_info_message
                 }
             ))
 
@@ -391,7 +395,8 @@ class SimpleTrader:
                         'entry_price': float(pos.get('ep', 0)),
                         'quantity': abs(pa),
                         'leverage': 0,
-                        'stop_loss_price': None
+                        'stop_loss_price': None,
+                        'positions_info_message': "Позицію відкрито вручну."
                     }
                 ))
 
