@@ -80,8 +80,8 @@ trading:
     opposite_wick_max_ratio: 0.3
     overlap_tolerance_percent: 0.05
     min_body_percent: 0.0
-    stop_loss_buffer_percent: 0.3
-    take_profit_percents: [0.5] # 0.5% цены × 20x = ~10% ROE
+    stop_loss_buffer_percent: 1
+    take_profit_percents: [2] # 1% цены × 20x = ~10% ROE
     tp_close_percents: [100]
     cooldown_seconds: 60
 
