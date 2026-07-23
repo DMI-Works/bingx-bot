@@ -101,7 +101,7 @@ class SimpleTrader:
             positions_info_message = None
             if self.risk_manager:
                 can_open, reason = await self.risk_manager.can_open_position(symbol)
-                positions_info_message = reason if reason else "Position can be opened."
+                positions_info_message = reason if reason else "Позицію відкрито."
 
                 if not can_open:
                     logger.warning(f"Risk manager blocked {symbol} {side}: {reason}")
@@ -215,6 +215,7 @@ class SimpleTrader:
                     'quantity': quantity,
                     'leverage': leverage,
                     'stop_loss_price': stop_loss_price,
+                    'take_profit_levels': take_profit_levels,
                     'positions_info_message': positions_info_message
                 }
             ))

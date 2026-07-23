@@ -302,10 +302,15 @@ class TelegramBot:
 Вхід: ${data['entry_price']:.4f}
 Кількість: {data['quantity']}
 Плече: {data['leverage']}x
-[INFO]: {event.data.get('positions_info_message')}
 """
+        if data.get('take_profit_levels'):
+            for i, tp in enumerate(data.get('take_profit_levels', []), start=1):
+                text += f"{i == 1 and '\nТейк:\n' or ''}  |- {i}: ${tp['price']:.4f} ({tp.get('close_percent', 0)}%)\n"
+
         if data.get('stop_loss_price'):
-            text += f"Stop Loss: ${data['stop_loss_price']:.4f}\n"
+            text += f"\nСтоп:\n |- ${data['stop_loss_price']:.4f}\n"
+
+        text += f"\n[INFO]: {data.get('positions_info_message', 'N/A')}"
 
         await self.send_message(text)
 
