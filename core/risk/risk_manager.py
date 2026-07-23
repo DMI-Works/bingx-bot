@@ -85,10 +85,10 @@ class RiskManager:
             logger.warning(reason)
             return False, reason
 
-        if self.consecutive_losses >= self.max_consecutive_losses:
-            reason = f"Max consecutive losses reached: {self.max_consecutive_losses}"
-            logger.warning(reason)
-            return False, reason
+        # if self.consecutive_losses >= self.max_consecutive_losses:
+        #     reason = f"Max consecutive losses reached: {self.max_consecutive_losses}"
+        #     logger.warning(reason)
+        #     return False, reason
 
         if self.last_trade_time:
             time_since_last_trade = (datetime.utcnow() - self.last_trade_time).total_seconds()
