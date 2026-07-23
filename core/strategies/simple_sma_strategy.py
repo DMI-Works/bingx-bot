@@ -254,6 +254,8 @@ class SimpleMovingAverageStrategy(BaseStrategy):
             f"stop_loss={stop_loss_price:.6f}, take_profit_levels={take_profit_levels}"
         )
 
+        strategy_name = getattr(self, 'name', self.__class__.__name__)
+
         return {
             'action': 'OPEN',
             'symbol': symbol,
@@ -262,6 +264,7 @@ class SimpleMovingAverageStrategy(BaseStrategy):
             'leverage': self.leverage,
             'stop_loss_price': stop_loss_price,
             'take_profit_levels': take_profit_levels,
+            'strategy': strategy_name,
             'reason': (
                 f'Ціна {price:.6f} {"вище" if is_long else "нижче"} SMA {sma:.6f} '
                 f'({deviation_percent:+.2f}%), підтверджено {self.confirmation_candles} свічками, {risk_desc}'

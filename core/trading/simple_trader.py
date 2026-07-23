@@ -65,7 +65,8 @@ class SimpleTrader:
                     'take_profit_levels': metadata.get('take_profit_levels'),
                     'opened_by': metadata.get('opened_by', 'bot'),
                     'sl_order_id': metadata.get('sl_order_id'),
-                    'tp_order_ids': metadata.get('tp_order_ids', [])
+                    'tp_order_ids': metadata.get('tp_order_ids', []),
+                    'strategy': metadata.get('strategy')
                 }
 
             if rows:
@@ -85,7 +86,8 @@ class SimpleTrader:
                 quantity=signal['quantity'],
                 leverage=signal.get('leverage', 10),
                 stop_loss_price=signal.get('stop_loss_price'),
-                take_profit_levels=signal.get('take_profit_levels')
+                take_profit_levels=signal.get('take_profit_levels'),
+                strategy=signal.get('strategy')
             )
 
     async def open_position(
@@ -95,7 +97,8 @@ class SimpleTrader:
         quantity: float,
         leverage: int = 10,
         stop_loss_price: Optional[float] = None,
-        take_profit_levels: Optional[list] = None
+        take_profit_levels: Optional[list] = None,
+        strategy: Optional[str] = None
     ) -> bool:
         try:
             positions_info_message = None
@@ -106,8 +109,13 @@ class SimpleTrader:
                 if not can_open:
                     logger.warning(f"Risk manager blocked {symbol} {side}: {reason}")
                     return False
+            else:
+                positions_info_message = "Позицію відкрито."
 
-            logger.info(f"Opening position: {symbol} {side} {quantity}")
+            if strategy:
+                positions_info_message = f"{positions_info_message} | Стратегія: {strategy}"
+
+            logger.info(f"Opening position: {symbol} {side} {quantity} (strategy={strategy})")
 
             try:
                 await self.exchange.set_leverage(symbol, leverage, side=side)
@@ -168,11 +176,12 @@ class SimpleTrader:
                 'take_profit_levels': take_profit_levels,
                 'opened_by': 'bot',
                 'sl_order_id': None,
-                'tp_order_ids': []
+                'tp_order_ids': [],
+                'strategy': strategy
             }
             self.open_positions[position_key] = position_data
 
-            logger.info(f"Position tracked: orderId={order_id}, {symbol} {side}")
+            logger.info(f"Position tracked: orderId={order_id}, {symbol} {side}, strategy={strategy}")
 
             # Зберігаємо позицію в БД
             try:
@@ -357,13 +366,17 @@ class SimpleTrader:
             except Exception as e:
                 logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
 
+            strategy = position.get('strategy')
+            close_info_message = f"Стратегія: {strategy}" if strategy else None
+
             await self.event_bus.publish(Event(
                 type=EventType.POSITION_CLOSED,
                 data={
                     'symbol': symbol,
                     'side': position_side,
                     'close_price': float(order_data.get('ap', 0)),
-                    'closed_by': closed_by
+                    'closed_by': closed_by,
+                    'positions_info_message': close_info_message
                 }
             ))
 
@@ -394,7 +407,8 @@ class SimpleTrader:
                     'quantity': abs(pa),
                     'opened_by': 'user',
                     'sl_order_id': None,
-                    'tp_order_ids': []
+                    'tp_order_ids': [],
+                    'strategy': None
                 }
                 self.open_positions[position_key] = position_data
                 logger.info(f"Manual position detected and tracked: {symbol} {position_side}")
@@ -441,6 +455,9 @@ class SimpleTrader:
                 except Exception as e:
                     logger.error(f"Failed to update manual position status in DB: {e}", exc_info=True)
 
+                strategy = existing.get('strategy')
+                close_info_message = f"Стратегія: {strategy}" if strategy else None
+
                 # Публікуємо подію POSITION_CLOSED
                 await self.event_bus.publish(Event(
                     type=EventType.POSITION_CLOSED,
@@ -449,6 +466,7 @@ class SimpleTrader:
                         'side': position_side,
                         'close_price': 0.0,
                         'realized_pnl': float(pos.get('cr', 0)),  # 'cr' = closed realized PnL
-                        'closed_by': existing.get('opened_by', 'user')
+                        'closed_by': existing.get('opened_by', 'user'),
+                        'positions_info_message': close_info_message
                     }
                 ))

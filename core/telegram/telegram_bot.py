@@ -326,8 +326,9 @@ class TelegramBot:
 Напрямок: {data['side']}
 Ціна закриття: ${data.get('close_price', 0):.4f}
 Реалізований PnL: ${pnl:.2f}
-[INFO]: {event.data.get('positions_info_message')}
 """
+        text += f"[INFO]: {event.data.get('positions_info_message')}"
+
         await self.send_message(text)
 
     async def _on_stop_loss_triggered(self, event: Event) -> None:

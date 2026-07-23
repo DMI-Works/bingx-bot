@@ -241,6 +241,8 @@ class RejectionBlockStrategy(BaseStrategy):
             f"stop_loss={stop_loss_price:.6f}, take_profit_levels={take_profit_levels}"
         )
 
+        strategy_name = getattr(self, 'name', self.__class__.__name__)
+
         return {
             'action': 'OPEN',
             'symbol': symbol,
@@ -249,6 +251,7 @@ class RejectionBlockStrategy(BaseStrategy):
             'leverage': self.leverage,
             'stop_loss_price': stop_loss_price,
             'take_profit_levels': take_profit_levels,
+            'strategy': strategy_name,
             'reason': (
                 f'Rejection block ({"бичачий" if is_long else "ведмежий"}): '
                 f'мінімум патерну={pattern_candle.low:.6f}, максимум={pattern_candle.high:.6f}, '
