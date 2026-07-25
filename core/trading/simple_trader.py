@@ -276,7 +276,7 @@ class SimpleTrader:
                 order_type='STOP_MARKET',
                 stop_price=stop_loss_price,
                 position_side=position_side,
-                close_position=True
+                quantity=quantity,
             )
 
             order_id = None
@@ -326,7 +326,7 @@ class SimpleTrader:
                         order_type='TAKE_PROFIT_MARKET',
                         stop_price=tp_price,
                         position_side=position_side,
-                        close_position=True
+                        quantity=quantity  
                     )
                 else:
                     # справжній частковий TP (декілька рівнів) — тут quantity
