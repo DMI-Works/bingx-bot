@@ -305,10 +305,10 @@ class TelegramBot:
 """
         if data.get('take_profit_levels'):
             for i, tp in enumerate(data.get('take_profit_levels', []), start=1):
-                text += f"{i == 1 and '\nТейк:\n' or ''}  |- {i}: ${tp['price']:.4f} ({tp.get('close_percent', 0)}%)\n"
+                text += f"{i == 1 and 'Тейк:\n' or ' '}  |- {i}: 💰{tp['price']:.4f} ({tp.get('close_percent', 0)}%)\n"
 
         if data.get('stop_loss_price'):
-            text += f"\nСтоп:\n |- ${data['stop_loss_price']:.4f}\n"
+            text += f"Стоп: ${data['stop_loss_price']:.4f}\n"
 
         text += f"\n[INFO]: {data.get('positions_info_message', 'N/A')}"
 
@@ -353,20 +353,19 @@ class TelegramBot:
         await self.send_message(text)
 
     async def _on_error(self, event: Event) -> None:
-        text = f"""
-⚠️ <b>Помилка</b>
-
-{event.data.get('error', 'Невідома помилка')}
-Контекст: {event.data.get('context', 'N/A')}
-"""
+        context = event.data.get('context')
+        error = event.data.get('error', 'Невідома помилка')
+        text = f"⚠️ <b>Помилка</b>: {context or error}"
+        if context and error:
+            text += f"\n<code>{error}</code>"
         await self.send_message(text)
 
     async def _on_critical_error(self, event: Event) -> None:
-        text = f"""
-🚨 <b>КРИТИЧНА ПОМИЛКА</b>
-
-{event.data.get('error', 'Невідома критична помилка')}
-"""
+        context = event.data.get('context')
+        error = event.data.get('error', 'Невідома критична помилка')
+        text = f"🚨 <b>КРИТИЧНА ПОМИЛКА</b>: {context or error}"
+        if context and error:
+            text += f"\n<code>{error}</code>"
         await self.send_message(text)
 
     

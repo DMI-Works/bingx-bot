@@ -74,6 +74,21 @@ class SimpleTrader:
         except Exception as e:
             logger.error(f"Failed to restore open positions from DB: {e}", exc_info=True)
 
+    async def _notify_error(self, error: str, context: str, critical: bool = False) -> None:
+        """
+        Публікує подію ERROR/CRITICAL_ERROR в event_bus — TelegramBot вже
+        підписаний на обидва типи (_on_error/_on_critical_error) і надішле
+        коротке повідомлення в чат. Раніше ці обробники існували, але їх
+        ніхто не викликав — помилки залишались тільки в лог-файлі.
+        """
+        try:
+            await self.event_bus.publish(Event(
+                type=EventType.CRITICAL_ERROR if critical else EventType.ERROR,
+                data={'error': error, 'context': context}
+            ))
+        except Exception as e:
+            logger.error(f"Failed to publish error notification ({context}): {e}")
+
     async def _handle_signal(self, event: Event) -> None:
         """Обробка сигналу від стратегії"""
         signal = event.data
@@ -136,12 +151,18 @@ class SimpleTrader:
                 )
             except BingXAPIError as e:
                 if e.code == 109400 and 'temporarily disabled' in e.msg:
+                    # це обмеження біржі через волатильність, а не баг —
+                    # не спамимо в Telegram, лога достатньо
                     logger.warning(
                         f"Order rejected by exchange (API orders temporarily disabled) "
                         f"for {symbol} {side}: {e.msg}"
                     )
                 else:
                     logger.error(f"Order rejected by exchange for {symbol} {side}: {e.code} {e.msg}")
+                    await self._notify_error(
+                        error=f"{e.code} {e.msg}",
+                        context=f"Не вдалося відкрити позицію {symbol} {side}"
+                    )
                 return False
 
             logger.info(f"Exchange order response: {exchange_order}")
@@ -177,6 +198,7 @@ class SimpleTrader:
                 'opened_by': 'bot',
                 'sl_order_id': None,
                 'tp_order_ids': [],
+                # ім'я стратегії, яка згенерувала сигнал на відкриття
                 'strategy': strategy
             }
             self.open_positions[position_key] = position_data
@@ -233,6 +255,10 @@ class SimpleTrader:
 
         except Exception as e:
             logger.error(f"Failed to open position: {e}", exc_info=True)
+            await self._notify_error(
+                error=str(e),
+                context=f"Неочікувана помилка при відкритті позиції {symbol} {side}"
+            )
             return False
 
     async def _create_stop_loss(self, symbol: str, side: str, quantity: float, stop_loss_price: float) -> Optional[str]:
@@ -240,13 +266,17 @@ class SimpleTrader:
             close_side = 'SELL' if side == 'LONG' else 'BUY'
             position_side = 'LONG' if side == 'LONG' else 'SHORT'
 
+            # SL завжди закриває позицію повністю — використовуємо closePosition=true
+            # замість quantity, щоб уникнути помилки 110424 (BingX округлює
+            # надісланий quantity під свою precision; якщо округлення йде вгору,
+            # запитуваний обсяг стає більшим за реальний залишок позиції)
             response = await self.exchange.create_order(
                 symbol=symbol,
                 side=close_side,
                 order_type='STOP_MARKET',
-                quantity=quantity,
                 stop_price=stop_loss_price,
-                position_side=position_side
+                position_side=position_side,
+                close_position=True
             )
 
             order_id = None
@@ -258,30 +288,61 @@ class SimpleTrader:
 
         except BingXAPIError as e:
             logger.error(f"Failed to create stop loss for {symbol}: {e.code} {e.msg}")
+            # позиція залишилась БЕЗ захисту — це критично, не просто лог
+            await self._notify_error(
+                error=f"{e.code} {e.msg}",
+                context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
+                critical=True
+            )
             return None
         except Exception as e:
             logger.error(f"Failed to create stop loss: {e}")
+            await self._notify_error(
+                error=str(e),
+                context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
+                critical=True
+            )
             return None
 
 
     async def _create_take_profit_orders(self, symbol: str, side: str, quantity: float, tp_levels: list) -> list:
         order_ids = []
+
+        # якщо це ЄДИНИЙ рівень і він закриває 100% — використовуємо
+        # closePosition=true замість розрахованого quantity, щоб уникнути
+        # помилки 110424 через округлення quantity біржею (див. _create_stop_loss)
+        is_single_full_close = len(tp_levels) == 1 and tp_levels[0].get('close_percent') == 100
+
         for i, tp_level in enumerate(tp_levels):
             try:
                 tp_price = tp_level['price']
-                tp_quantity = quantity * (tp_level['close_percent'] / 100)
-
                 close_side = 'SELL' if side == 'LONG' else 'BUY'
                 position_side = 'LONG' if side == 'LONG' else 'SHORT'
 
-                response = await self.exchange.create_order(
-                    symbol=symbol,
-                    side=close_side,
-                    order_type='TAKE_PROFIT_MARKET',
-                    quantity=tp_quantity,
-                    stop_price=tp_price,
-                    position_side=position_side
-                )
+                if is_single_full_close:
+                    response = await self.exchange.create_order(
+                        symbol=symbol,
+                        side=close_side,
+                        order_type='TAKE_PROFIT_MARKET',
+                        stop_price=tp_price,
+                        position_side=position_side,
+                        close_position=True
+                    )
+                else:
+                    # справжній частковий TP (декілька рівнів) — тут quantity
+                    # обов'язковий, і проблема округлення поки залишається
+                    # актуальною для цього випадку (потрібне округлення під
+                    # precision символу — окрема задача, якщо почнеш
+                    # використовувати кілька рівнів TP замість одного повного)
+                    tp_quantity = quantity * (tp_level['close_percent'] / 100)
+                    response = await self.exchange.create_order(
+                        symbol=symbol,
+                        side=close_side,
+                        order_type='TAKE_PROFIT_MARKET',
+                        quantity=tp_quantity,
+                        stop_price=tp_price,
+                        position_side=position_side
+                    )
 
                 order_id = None
                 if 'data' in response and 'order' in response['data']:
@@ -292,6 +353,10 @@ class SimpleTrader:
 
             except BingXAPIError as e:
                 logger.error(f"Failed to create take profit {i+1} for {symbol}: {e.code} {e.msg}")
+                await self._notify_error(
+                    error=f"{e.code} {e.msg}",
+                    context=f"Не вдалося поставити TP{i+1} для {symbol} (SL, якщо є, залишається активним)"
+                )
                 order_ids.append(None)
             except Exception as e:
                 logger.error(f"Failed to create take profit {i+1}: {e}")
