@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
 import json
 
@@ -102,8 +102,108 @@ class SimpleTrader:
                 leverage=signal.get('leverage', 10),
                 stop_loss_price=signal.get('stop_loss_price'),
                 take_profit_levels=signal.get('take_profit_levels'),
-                strategy=signal.get('strategy')
+                strategy=signal.get('strategy'),
+                # ціна, від якої стратегія рахувала % для SL/TP — потрібна,
+                # щоб перерахувати рівні під фактичну ціну виконання ринкового ордера
+                reference_price=signal.get('reference_price')
             )
+
+    @staticmethod
+    def _parse_fill(order_info: Optional[Dict[str, Any]]):
+        """Безпечно витягує (status, avg_price, executed_qty) з об'єкта ордера біржі."""
+        if not order_info:
+            return None, 0.0, 0.0
+
+        status = order_info.get('status')
+        try:
+            avg_price = float(order_info.get('avgPrice', 0) or 0)
+        except (TypeError, ValueError):
+            avg_price = 0.0
+        try:
+            executed_qty = float(order_info.get('executedQty', 0) or 0)
+        except (TypeError, ValueError):
+            executed_qty = 0.0
+
+        return status, avg_price, executed_qty
+
+    async def _wait_for_confirmed_fill(
+        self,
+        symbol: str,
+        order_id: str,
+        max_attempts: int = 6,
+        delay_seconds: float = 0.3
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Для MARKET-ордера синхронна відповідь create_order часто повертає
+        avgPrice=0 / executedQty=0 — фактичне виконання ще не встигло
+        долетіти до REST-шару біржі. Тому запитуємо ордер окремо через
+        GET /trade/order, поки не отримаємо статус FILLED з реальними
+        avgPrice/executedQty (або не вичерпаємо спроби).
+        """
+        last_order_info = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                order_info = await self.exchange.get_order(symbol, order_id)
+            except Exception as e:
+                logger.warning(f"get_order attempt {attempt} failed for {symbol} order {order_id}: {e}")
+                order_info = None
+
+            if order_info:
+                last_order_info = order_info
+                if attempt == 1:
+                    logger.debug(f"Raw get_order response for {symbol} order {order_id}: {order_info}")
+                status, avg_price, executed_qty = self._parse_fill(order_info)
+
+                if status == 'FILLED' and avg_price > 0 and executed_qty > 0:
+                    logger.info(
+                        f"Confirmed fill for {symbol} order {order_id} on attempt {attempt}: "
+                        f"avgPrice={avg_price}, executedQty={executed_qty}"
+                    )
+                    return order_info
+
+            if attempt < max_attempts:
+                await asyncio.sleep(delay_seconds)
+
+        logger.warning(
+            f"Could not confirm fill for {symbol} order {order_id} after {max_attempts} attempts "
+            f"(last seen: {last_order_info}). Falling back to whatever data is available."
+        )
+        return last_order_info
+
+    async def _fetch_entry_from_positions(self, symbol: str, side: str) -> Optional[Dict[str, float]]:
+        """
+        Fallback-джерело реальної ціни входу: не статус ордера, а фактичний
+        стан позиції на біржі (entryPrice/positionAmt). Використовується,
+        коли get_order() за відведені спроби так і не показав FILLED —
+        позиція вже може бути фізично відкрита, навіть якщо статус ордера
+        це ще не відображає.
+        """
+        try:
+            positions = await self.exchange.get_positions()
+        except Exception as e:
+            logger.warning(f"Failed to fetch positions as entry_price fallback for {symbol}: {e}")
+            return None
+
+        position_side = 'LONG' if side == 'LONG' else 'SHORT'
+        for pos in positions:
+            if pos.get('symbol') != symbol:
+                continue
+            if pos.get('positionSide') != position_side:
+                continue
+            try:
+                entry_price = float(pos.get('entryPrice', 0) or 0)
+                position_amt = abs(float(pos.get('positionAmt', 0) or 0))
+            except (TypeError, ValueError):
+                continue
+            if entry_price > 0 and position_amt > 0:
+                logger.info(
+                    f"Fallback entry_price for {symbol} {side} from positions endpoint: "
+                    f"entryPrice={entry_price}, positionAmt={position_amt}"
+                )
+                return {'entry_price': entry_price, 'quantity': position_amt}
+
+        return None
 
     async def open_position(
         self,
@@ -113,7 +213,8 @@ class SimpleTrader:
         leverage: int = 10,
         stop_loss_price: Optional[float] = None,
         take_profit_levels: Optional[list] = None,
-        strategy: Optional[str] = None
+        strategy: Optional[str] = None,
+        reference_price: Optional[float] = None
     ) -> bool:
         try:
             positions_info_message = None
@@ -179,10 +280,70 @@ class SimpleTrader:
                 logger.error(f"Order accepted but no orderId found in response: {exchange_order}")
                 return False
 
-            # Отримуємо entry_price з відповіді біржі
+            # Спершу пробуємо синхронну відповідь create_order напряму —
+            # на практиці біржа часто вже повертає status=FILLED з реальними
+            # avgPrice/executedQty одразу (без затримки). Опитування (poll)
+            # і позиції — це fallback тільки на випадок, коли синхронна
+            # відповідь цього не дає.
             entry_price = 0.0
+            executed_qty = quantity
+
+            immediate_order_info = None
             if 'data' in exchange_order and 'order' in exchange_order['data']:
-                entry_price = float(exchange_order['data']['order'].get('avgPrice', 0))
+                immediate_order_info = exchange_order['data']['order']
+
+            status, avg_price, parsed_qty = self._parse_fill(immediate_order_info)
+
+            if status == 'FILLED' and avg_price > 0 and parsed_qty > 0:
+                entry_price = avg_price
+                executed_qty = parsed_qty
+                logger.info(
+                    f"Fill confirmed directly from create_order response for {symbol} {side}: "
+                    f"avgPrice={entry_price}, executedQty={executed_qty} (no extra polling needed)"
+                )
+            else:
+                confirmed_order = await self._wait_for_confirmed_fill(symbol, str(order_id))
+                if confirmed_order:
+                    _, confirmed_avg_price, confirmed_qty = self._parse_fill(confirmed_order)
+                    if confirmed_avg_price > 0:
+                        entry_price = confirmed_avg_price
+                    if confirmed_qty > 0:
+                        executed_qty = confirmed_qty
+
+            if entry_price <= 0:
+                fallback = await self._fetch_entry_from_positions(symbol, side)
+                if fallback:
+                    entry_price = fallback['entry_price']
+                    executed_qty = fallback['quantity']
+                else:
+                    logger.warning(
+                        f"Failed to confirm entry_price for {symbol} {side} order {order_id} "
+                        f"(both order status and positions endpoint gave nothing usable) — "
+                        f"SL/TP will be based on unconfirmed price, may be inaccurate"
+                    )
+
+            if executed_qty != quantity:
+                logger.info(
+                    f"Using executedQty={executed_qty} instead of requested quantity={quantity} "
+                    f"for {symbol} {side} SL/TP sizing"
+                )
+
+            # Якщо стратегія передала reference_price (ціну, від якої рахувала % для SL/TP),
+            # перераховуємо рівні під фактичну ціну виконання ринкового ордера —
+            # інакше SL/TP залишаться прив'язані до "старої" ціни сигналу, а не до реального входу
+            if reference_price and entry_price and reference_price > 0:
+                scale = entry_price / reference_price
+                if stop_loss_price:
+                    stop_loss_price = stop_loss_price * scale
+                if take_profit_levels:
+                    take_profit_levels = [
+                        {**lvl, 'price': lvl['price'] * scale}
+                        for lvl in take_profit_levels
+                    ]
+                logger.info(
+                    f"Rescaled SL/TP for {symbol} {side}: reference_price={reference_price}, "
+                    f"entry_price={entry_price}, scale={scale:.6f}"
+                )
 
             # Зберігаємо позицію в пам'яті
             position_key = f"{symbol}_{side}"
@@ -190,7 +351,7 @@ class SimpleTrader:
                 'order_id': str(order_id),
                 'symbol': symbol,
                 'side': side,
-                'quantity': quantity,
+                'quantity': executed_qty,
                 'entry_price': entry_price,
                 'leverage': leverage,
                 'stop_loss_price': stop_loss_price,
@@ -217,14 +378,16 @@ class SimpleTrader:
             except Exception as e:
                 logger.error(f"Failed to save position to DB: {e}", exc_info=True)
 
-            # Створюємо стоп/тейк ордери
+            # Створюємо стоп/тейк ордери — використовуємо реально виконаний обсяг
+            # (executed_qty), а не запитаний quantity, щоб уникнути розсинхрону
+            # з реальним залишком позиції на біржі
             if stop_loss_price:
-                sl_order_id = await self._create_stop_loss(symbol, side, quantity, stop_loss_price)
+                sl_order_id = await self._create_stop_loss(symbol, side, executed_qty, stop_loss_price)
                 if sl_order_id:
                     self.open_positions[position_key]['sl_order_id'] = str(sl_order_id)
 
             if take_profit_levels:
-                tp_order_ids = await self._create_take_profit_orders(symbol, side, quantity, take_profit_levels)
+                tp_order_ids = await self._create_take_profit_orders(symbol, side, executed_qty, take_profit_levels)
                 self.open_positions[position_key]['tp_order_ids'] = [str(tid) for tid in tp_order_ids if tid]
 
             # Оновлюємо metadata в БД з sl_order_id/tp_order_ids
@@ -262,22 +425,40 @@ class SimpleTrader:
             return False
 
     async def _create_stop_loss(self, symbol: str, side: str, quantity: float, stop_loss_price: float) -> Optional[str]:
-        try:
-            close_side = 'SELL' if side == 'LONG' else 'BUY'
-            position_side = 'LONG' if side == 'LONG' else 'SHORT'
+        close_side = 'SELL' if side == 'LONG' else 'BUY'
+        position_side = 'LONG' if side == 'LONG' else 'SHORT'
 
-            # SL завжди закриває позицію повністю — використовуємо closePosition=true
-            # замість quantity, щоб уникнути помилки 110424 (BingX округлює
-            # надісланий quantity під свою precision; якщо округлення йде вгору,
-            # запитуваний обсяг стає більшим за реальний залишок позиції)
-            response = await self.exchange.create_order(
+        # SL завжди закриває позицію повністю. Невеликий safety margin (0.1%)
+        # захищає від помилки 110424 на межі округлення: BingX округлює
+        # надісланий quantity під свою precision, і якщо округлення йде вгору,
+        # запитуваний обсяг стає більшим за реальний залишок позиції.
+        safe_quantity = quantity * 0.999
+
+        async def _attempt(qty: float):
+            return await self.exchange.create_order(
                 symbol=symbol,
                 side=close_side,
                 order_type='STOP_MARKET',
                 stop_price=stop_loss_price,
                 position_side=position_side,
-                quantity=quantity,
+                quantity=qty,
             )
+
+        try:
+            try:
+                response = await _attempt(safe_quantity)
+            except BingXAPIError as e:
+                if e.code == 110424:
+                    # навіть з margin впираємось у "must be less than available" —
+                    # один retry з ще меншим обсягом
+                    retry_quantity = safe_quantity * 0.999
+                    logger.warning(
+                        f"SL create hit 110424 for {symbol} with quantity={safe_quantity}, "
+                        f"retrying once with quantity={retry_quantity}"
+                    )
+                    response = await _attempt(retry_quantity)
+                else:
+                    raise
 
             order_id = None
             if 'data' in response and 'order' in response['data']:
@@ -320,14 +501,32 @@ class SimpleTrader:
                 position_side = 'LONG' if side == 'LONG' else 'SHORT'
 
                 if is_single_full_close:
-                    response = await self.exchange.create_order(
-                        symbol=symbol,
-                        side=close_side,
-                        order_type='TAKE_PROFIT_MARKET',
-                        stop_price=tp_price,
-                        position_side=position_side,
-                        quantity=quantity  
-                    )
+                    # той самий safety margin (0.1%), що і для SL повного закриття —
+                    # захист від 110424 на межі округлення quantity біржею
+                    safe_quantity = quantity * 0.999
+
+                    async def _attempt(qty: float):
+                        return await self.exchange.create_order(
+                            symbol=symbol,
+                            side=close_side,
+                            order_type='TAKE_PROFIT_MARKET',
+                            stop_price=tp_price,
+                            position_side=position_side,
+                            quantity=qty
+                        )
+
+                    try:
+                        response = await _attempt(safe_quantity)
+                    except BingXAPIError as e:
+                        if e.code == 110424:
+                            retry_quantity = safe_quantity * 0.999
+                            logger.warning(
+                                f"TP create hit 110424 for {symbol} with quantity={safe_quantity}, "
+                                f"retrying once with quantity={retry_quantity}"
+                            )
+                            response = await _attempt(retry_quantity)
+                        else:
+                            raise
                 else:
                     # справжній частковий TP (декілька рівнів) — тут quantity
                     # обов'язковий, і проблема округлення поки залишається

@@ -74,14 +74,26 @@ class RejectionBlockStrategy(BaseStrategy):
         # минимальный размер тела свечи в % от цены (фильтр от свечей-игл на пустом объёме)
         self.min_body_percent = config.get('min_body_percent', 0.0)
 
-        # --- риск/цели ---
-        self.stop_loss_buffer_percent = config.get('stop_loss_buffer_percent', 0.2)
-        self.take_profit_percents = config.get('take_profit_percents', [2.0, 3.0])
-        self.tp_close_percents = config.get('tp_close_percents', [50, 50])
-
-        # --- позиция ---
+        # --- позиция и плечо ---
+        # leverage нужен ДО расчёта риска, поэтому читаем его здесь, а не ниже
         self.position_size = config.get('position_size', 100)
         self.leverage = config.get('leverage', 10)
+
+        # Значения из конфига — это ROE% (как на бирже), конвертируем в % цены
+        stop_loss_roe_percent = config.get('stop_loss_buffer_percent', 0.2)
+        take_profit_roe_percents = config.get('take_profit_percents', [2.0, 3.0])
+
+        self.stop_loss_buffer_percent = stop_loss_roe_percent / self.leverage
+        self.take_profit_percents = [p / self.leverage for p in take_profit_roe_percents]
+
+        self.tp_close_percents = config.get('tp_close_percents', [50, 50])
+
+        logger.info(
+            f"RejectionBlockStrategy risk config: leverage={self.leverage}x, "
+            f"SL={stop_loss_roe_percent}% ROE -> {self.stop_loss_buffer_percent:.8f}% price, "
+            f"TP={take_profit_roe_percents}% ROE -> "
+            f"{[round(p, 8) for p in self.take_profit_percents]}% price"
+        )
 
         # --- кулдаун ---
         self.cooldown_seconds = config.get('cooldown_seconds', 300)
@@ -221,9 +233,9 @@ class RejectionBlockStrategy(BaseStrategy):
         is_long = side == 'LONG'
 
         if is_long:
-            stop_loss_price = pattern_candle.low * (1 - self.stop_loss_buffer_percent / 100)
+            stop_loss_price = price * (1 - self.stop_loss_buffer_percent / 100)
         else:
-            stop_loss_price = pattern_candle.high * (1 + self.stop_loss_buffer_percent / 100)
+            stop_loss_price = price * (1 + self.stop_loss_buffer_percent / 100)
 
         take_profit_levels = [
             {
@@ -236,9 +248,14 @@ class RejectionBlockStrategy(BaseStrategy):
             for i, pct in enumerate(self.take_profit_percents)
         ]
 
+        sl_roe_percent = self.stop_loss_buffer_percent * self.leverage
+        tp_roe_percents = [round(pct * self.leverage, 8) for pct in self.take_profit_percents]
+
         logger.info(
             f"[{symbol}] BUILD SIGNAL: side={side}, entry={price:.6f}, "
-            f"stop_loss={stop_loss_price:.6f}, take_profit_levels={take_profit_levels}"
+            f"stop_loss={stop_loss_price:.6f} "
+            f"({self.stop_loss_buffer_percent:.8f}% price = {sl_roe_percent:.2f}% ROE), "
+            f"take_profit_levels={take_profit_levels} (ROE%={tp_roe_percents})"
         )
 
         strategy_name = getattr(self, 'name', self.__class__.__name__)
@@ -252,6 +269,7 @@ class RejectionBlockStrategy(BaseStrategy):
             'stop_loss_price': stop_loss_price,
             'take_profit_levels': take_profit_levels,
             'strategy': strategy_name,
+            'reference_price': price,
             'reason': (
                 f'Rejection block ({"бичачий" if is_long else "ведмежий"}): '
                 f'мінімум патерну={pattern_candle.low:.6f}, максимум={pattern_candle.high:.6f}, '
