@@ -847,27 +847,39 @@ class SimpleTrader:
                 entry_price = existing.get('entry_price')
                 quantity = existing.get('quantity')
 
-                # невеликий буфер назад (60с), щоб гарантовано захопити запис
-                # доходу для щойно закритої позиції навіть з урахуванням затримки
-                # ВАЖЛИВО: datetime.utcnow().timestamp() тут НЕ підходить — .timestamp()
-                # у naive datetime інтерпретує його як ЛОКАЛЬНИЙ час, а не UTC, тому
-                # на сервері з таймзоною, відмінною від UTC, since_ms "їде" на величину
-                # офсету (напр. +3 години) і вікно запиту стає невірним.
-                # time.time() завжди повертає справжній UTC epoch незалежно від таймзони.
-                now_ms = int(time.time() * 1000)
-                since_ms = now_ms - 60_000
-                until_ms = now_ms + 5_000
-                income_pnl = await self._fetch_realized_pnl_from_income(symbol, since_ms, until_ms)
+                income_pnl = None
+                if self.exchange.testnet:
+                    # Демо/VST-акаунт BingX не наповнює /user/income записами
+                    # REALIZED_PNL (перевірено емпірично: коректне часове вікно,
+                    # api повертає code=0 але data=None щоразу) — не витрачаємо
+                    # 4 спроби і ~2с на кожне закриття, одразу йдемо на fallback
+                    logger.info(
+                        f"Skipping income-history lookup for {symbol} on testnet/demo "
+                        f"(not populated there) — using ACCOUNT_UPDATE 'cr' directly"
+                    )
+                else:
+                    # невеликий буфер назад (60с), щоб гарантовано захопити запис
+                    # доходу для щойно закритої позиції навіть з урахуванням затримки
+                    # ВАЖЛИВО: datetime.utcnow().timestamp() тут НЕ підходить — .timestamp()
+                    # у naive datetime інтерпретує його як ЛОКАЛЬНИЙ час, а не UTC, тому
+                    # на сервері з таймзоною, відмінною від UTC, since_ms "їде" на величину
+                    # офсету (напр. +3 години) і вікно запиту стає невірним.
+                    # time.time() завжди повертає справжній UTC epoch незалежно від таймзони.
+                    now_ms = int(time.time() * 1000)
+                    since_ms = now_ms - 60_000
+                    until_ms = now_ms + 5_000
+                    income_pnl = await self._fetch_realized_pnl_from_income(symbol, since_ms, until_ms)
 
                 if income_pnl is not None:
                     realized_pnl = income_pnl
                 else:
                     # fallback до менш точного джерела, якщо income history недоступна
                     realized_pnl = float(pos.get('cr', 0) or 0)
-                    logger.warning(
-                        f"Falling back to ACCOUNT_UPDATE 'cr' for {symbol} realized_pnl "
-                        f"(may not match exchange-displayed close PnL exactly)"
-                    )
+                    if not self.exchange.testnet:
+                        logger.warning(
+                            f"Falling back to ACCOUNT_UPDATE 'cr' for {symbol} realized_pnl "
+                            f"(may not match exchange-displayed close PnL exactly)"
+                        )
 
                 # close_price виводимо математично з entry_price/quantity/realized_pnl,
                 # а не з поточної ціни тікера (яка на момент запиту вже може відрізнятись
