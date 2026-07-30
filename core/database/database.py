@@ -19,6 +19,7 @@ class Database:
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
+        self._migrate_positions_table()
         logger.info(f"Database initialized: {self.db_path}")
 
     def _create_tables(self) -> None:
@@ -36,7 +37,10 @@ class Database:
             )
         """)
 
-        # Active positions table - мінімальні дані для tracking
+        # Active positions table - мінімальні дані для tracking.
+        # close_price/realized_pnl/roe_percent — окремі колонки (не metadata JSON),
+        # щоб звіти/статистика/повідомлення могли надійно читати їх напряму,
+        # а не залежати від того, чи хтось коректно записав ці значення в JSON.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS positions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,12 +50,39 @@ class Database:
                 status TEXT NOT NULL,
                 created_at TIMESTAMP NOT NULL,
                 closed_at TIMESTAMP,
+                close_price REAL,
+                realized_pnl REAL,
+                roe_percent REAL,
                 metadata TEXT
             )
         """)
 
         self.conn.commit()
         logger.info("Database tables created/verified")
+
+    def _migrate_positions_table(self) -> None:
+        """
+        Для БД, створених до появи close_price/realized_pnl/roe_percent,
+        CREATE TABLE IF NOT EXISTS новий стовпець не додасть — таблиця
+        вже існує зі старою схемою. Тому перевіряємо PRAGMA table_info
+        і додаємо відсутні колонки вручну, не чіпаючи наявні дані.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("PRAGMA table_info(positions)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations = {
+            'close_price': 'ALTER TABLE positions ADD COLUMN close_price REAL',
+            'realized_pnl': 'ALTER TABLE positions ADD COLUMN realized_pnl REAL',
+            'roe_percent': 'ALTER TABLE positions ADD COLUMN roe_percent REAL',
+        }
+
+        for column, ddl in migrations.items():
+            if column not in existing_columns:
+                logger.info(f"Migrating positions table: adding missing column '{column}'")
+                cursor.execute(ddl)
+
+        self.conn.commit()
 
     def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
         cursor = self.conn.cursor()
@@ -86,20 +117,44 @@ class Database:
         """, (order_id, symbol, side, status, datetime.utcnow(), metadata))
         return cursor.lastrowid
 
-    def update_position_status(self, order_id: str, status: str, closed_at: datetime = None) -> None:
-        """Оновлює статус позиції"""
-        if closed_at:
-            self.execute("""
-                UPDATE positions
-                SET status = ?, closed_at = ?
-                WHERE order_id = ?
-            """, (status, closed_at, order_id))
-        else:
-            self.execute("""
-                UPDATE positions
-                SET status = ?
-                WHERE order_id = ?
-            """, (status, order_id))
+    def update_position_status(
+        self,
+        order_id: str,
+        status: str,
+        closed_at: datetime = None,
+        close_price: Optional[float] = None,
+        realized_pnl: Optional[float] = None,
+        roe_percent: Optional[float] = None
+    ) -> None:
+        """
+        Оновлює статус позиції. close_price/realized_pnl/roe_percent —
+        опціональні: якщо не передані, відповідні колонки не чіпаються
+        (щоб, наприклад, проміжний виклик update_position_status без цих
+        даних не затер вже записані значення значенням NULL).
+        """
+        set_clauses = ["status = ?"]
+        params: list = [status]
+
+        if closed_at is not None:
+            set_clauses.append("closed_at = ?")
+            params.append(closed_at)
+        if close_price is not None:
+            set_clauses.append("close_price = ?")
+            params.append(close_price)
+        if realized_pnl is not None:
+            set_clauses.append("realized_pnl = ?")
+            params.append(realized_pnl)
+        if roe_percent is not None:
+            set_clauses.append("roe_percent = ?")
+            params.append(roe_percent)
+
+        params.append(order_id)
+
+        self.execute(f"""
+            UPDATE positions
+            SET {', '.join(set_clauses)}
+            WHERE order_id = ?
+        """, tuple(params))
 
     def get_active_positions(self) -> List[sqlite3.Row]:
         """Повертає всі активні позиції"""

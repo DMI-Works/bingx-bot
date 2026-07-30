@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Optional, Dict, Any
 from datetime import datetime
 import json
@@ -311,6 +312,9 @@ class SimpleTrader:
                         executed_qty = confirmed_qty
 
             if entry_price <= 0:
+                # get_order() за відведені спроби не показав FILLED з ціною —
+                # пробуємо ще раз через фактичний стан позиції на біржі,
+                # перш ніж здаватись і рахувати SL/TP "наосліп"
                 fallback = await self._fetch_entry_from_positions(symbol, side)
                 if fallback:
                     entry_price = fallback['entry_price']
@@ -382,7 +386,7 @@ class SimpleTrader:
             # (executed_qty), а не запитаний quantity, щоб уникнути розсинхрону
             # з реальним залишком позиції на біржі
             if stop_loss_price:
-                sl_order_id = await self._create_stop_loss(symbol, side, executed_qty, stop_loss_price)
+                sl_order_id = await self._create_stop_loss(symbol, side, executed_qty, stop_loss_price, entry_price)
                 if sl_order_id:
                     self.open_positions[position_key]['sl_order_id'] = str(sl_order_id)
 
@@ -424,7 +428,14 @@ class SimpleTrader:
             )
             return False
 
-    async def _create_stop_loss(self, symbol: str, side: str, quantity: float, stop_loss_price: float) -> Optional[str]:
+    async def _create_stop_loss(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        stop_loss_price: float,
+        entry_price: Optional[float] = None
+    ) -> Optional[str]:
         close_side = 'SELL' if side == 'LONG' else 'BUY'
         position_side = 'LONG' if side == 'LONG' else 'SHORT'
 
@@ -432,58 +443,90 @@ class SimpleTrader:
         # захищає від помилки 110424 на межі округлення: BingX округлює
         # надісланий quantity під свою precision, і якщо округлення йде вгору,
         # запитуваний обсяг стає більшим за реальний залишок позиції.
-        safe_quantity = quantity * 0.999
+        current_qty = quantity * 0.999
+        current_stop_price = stop_loss_price
 
-        async def _attempt(qty: float):
-            return await self.exchange.create_order(
-                symbol=symbol,
-                side=close_side,
-                order_type='STOP_MARKET',
-                stop_price=stop_loss_price,
-                position_side=position_side,
-                quantity=qty,
-            )
+        # % буфер SL відносно ціни входу — потрібен, щоб при "переякоренні"
+        # (див. нижче) зберегти той самий відсотковий відступ, а не абсолютну ціну
+        buffer_percent = None
+        if entry_price and entry_price > 0 and stop_loss_price:
+            buffer_percent = abs(entry_price - stop_loss_price) / entry_price
 
-        try:
+        max_attempts = 3
+        last_error: Optional[BingXAPIError] = None
+
+        for attempt in range(1, max_attempts + 1):
             try:
-                response = await _attempt(safe_quantity)
+                response = await self.exchange.create_order(
+                    symbol=symbol,
+                    side=close_side,
+                    order_type='STOP_MARKET',
+                    stop_price=current_stop_price,
+                    position_side=position_side,
+                    quantity=current_qty,
+                )
+
+                order_id = None
+                if 'data' in response and 'order' in response['data']:
+                    order_id = response['data']['order'].get('orderId')
+
+                logger.info(f"Stop loss created: {symbol} @ {current_stop_price}, orderId={order_id}")
+                return order_id
+
             except BingXAPIError as e:
-                if e.code == 110424:
-                    # навіть з margin впираємось у "must be less than available" —
-                    # один retry з ще меншим обсягом
-                    retry_quantity = safe_quantity * 0.999
+                last_error = e
+
+                if e.code == 110424 and attempt < max_attempts:
+                    # впираємось у "must be less than available" на межі округлення —
+                    # зменшуємо обсяг ще трохи і пробуємо ще раз
+                    current_qty = current_qty * 0.999
                     logger.warning(
-                        f"SL create hit 110424 for {symbol} with quantity={safe_quantity}, "
-                        f"retrying once with quantity={retry_quantity}"
+                        f"SL create hit 110424 for {symbol}, retrying (attempt {attempt+1}) "
+                        f"with quantity={current_qty}"
                     )
-                    response = await _attempt(retry_quantity)
-                else:
-                    raise
+                    continue
 
-            order_id = None
-            if 'data' in response and 'order' in response['data']:
-                order_id = response['data']['order'].get('orderId')
+                if 'current price' in (e.msg or '').lower() and buffer_percent is not None and attempt < max_attempts:
+                    # ціна встигла пройти наш SL, поки запит летів до біржі (типово
+                    # для вузького % буфера на волатильних/тонких парах) —
+                    # переякорюємо SL до актуальної ринкової ціни з тим самим % буфером
+                    try:
+                        live_price = await self.exchange.get_ticker_price(symbol)
+                        new_stop_price = (
+                            live_price * (1 - buffer_percent) if side == 'LONG'
+                            else live_price * (1 + buffer_percent)
+                        )
+                        logger.warning(
+                            f"SL for {symbol} rejected as stale (price already passed target "
+                            f"{current_stop_price}). Re-anchoring to live price {live_price} -> "
+                            f"new stop={new_stop_price}, retrying (attempt {attempt+1})"
+                        )
+                        current_stop_price = new_stop_price
+                        continue
+                    except Exception as fetch_err:
+                        logger.error(f"Failed to fetch live price to re-anchor SL for {symbol}: {fetch_err}")
+                        break
 
-            logger.info(f"Stop loss created: {symbol} @ {stop_loss_price}, orderId={order_id}")
-            return order_id
+                # інша помилка, або спроби вичерпані — далі не ретраїмо
+                break
 
-        except BingXAPIError as e:
-            logger.error(f"Failed to create stop loss for {symbol}: {e.code} {e.msg}")
-            # позиція залишилась БЕЗ захисту — це критично, не просто лог
-            await self._notify_error(
-                error=f"{e.code} {e.msg}",
-                context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
-                critical=True
-            )
-            return None
-        except Exception as e:
-            logger.error(f"Failed to create stop loss: {e}")
-            await self._notify_error(
-                error=str(e),
-                context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
-                critical=True
-            )
-            return None
+            except Exception as e:
+                logger.error(f"Failed to create stop loss: {e}")
+                await self._notify_error(
+                    error=str(e),
+                    context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
+                    critical=True
+                )
+                return None
+
+        # усі спроби вичерпані
+        logger.error(f"Failed to create stop loss for {symbol}: {last_error.code if last_error else '?'} {last_error.msg if last_error else ''}")
+        await self._notify_error(
+            error=f"{last_error.code} {last_error.msg}" if last_error else "unknown error",
+            context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
+            critical=True
+        )
+        return None
 
 
     async def _create_take_profit_orders(self, symbol: str, side: str, quantity: float, tp_levels: list) -> list:
@@ -563,6 +606,26 @@ class SimpleTrader:
 
         return order_ids
 
+    @staticmethod
+    def _calc_roe_percent(position: dict, realized_pnl: float) -> Optional[float]:
+        """
+        ROE% = PnL відносно маржі, використаної на відкриття (entry_price * quantity / leverage) —
+        так само, як біржа рахує ROE% в інтерфейсі. Повертає None, якщо бракує
+        даних для розрахунку (замість того щоб мовчки підставити 0).
+        """
+        entry_price = position.get('entry_price')
+        quantity = position.get('quantity')
+        leverage = position.get('leverage') or 1
+
+        if not entry_price or not quantity or entry_price <= 0 or quantity <= 0:
+            return None
+
+        margin = (entry_price * quantity) / leverage
+        if margin <= 0:
+            return None
+
+        return (realized_pnl / margin) * 100
+
     async def _handle_order_update(self, event: Event) -> None:
         order_data = event.data.get('o', {})
         exchange_order_id = str(order_data.get('i'))
@@ -586,6 +649,9 @@ class SimpleTrader:
 
             trade_id = order_data.get('t')
             filled_qty = float(order_data.get('q', 0))  # обсяг ЦЬОГО закриваючого ордера
+            # 'rp' — реалізований PnL САМЕ цього закриваючого fill'а (не кумулятивний
+            # за всю позицію), тому накопичуємо його по всіх часткових закриттях
+            trade_realized_pnl = float(order_data.get('rp', 0) or 0)
 
             # накопичуємо ID закриваючих угод — тільки ID, жодних цін/PnL
             position.setdefault('closing_trade_ids', [])
@@ -594,12 +660,15 @@ class SimpleTrader:
             position.setdefault('closing_orders', [])
             position['closing_orders'].append({'order_id': exchange_order_id, 'closed_by': closed_by})
 
+            position['realized_pnl_accum'] = position.get('realized_pnl_accum', 0.0) + trade_realized_pnl
+
             remaining = position.get('remaining_quantity', position.get('quantity', 0)) - filled_qty
             position['remaining_quantity'] = max(0.0, remaining)
 
             logger.info(
                 f"Partial/full close fill: {symbol} {position_side}, order={exchange_order_id}, "
-                f"trade_id={trade_id}, filled_qty={filled_qty}, remaining={position['remaining_quantity']:.8f}"
+                f"trade_id={trade_id}, filled_qty={filled_qty}, trade_pnl={trade_realized_pnl}, "
+                f"remaining={position['remaining_quantity']:.8f}"
             )
 
             # SL завжди закриває решту повністю (STOP_MARKET без closePosition тут не має 'quantity' часткового рівня)
@@ -621,11 +690,18 @@ class SimpleTrader:
 
             logger.info(f"Position fully closed: {symbol} {position_side}, closed_by={closed_by}")
 
+            close_price = float(order_data.get('ap', 0) or 0)
+            realized_pnl = position.get('realized_pnl_accum', 0.0)
+            roe_percent = self._calc_roe_percent(position, realized_pnl)
+
             try:
                 self.db.update_position_status(
                     order_id=position['order_id'],
                     status='CLOSED',
-                    closed_at=datetime.utcnow()
+                    closed_at=datetime.utcnow(),
+                    close_price=close_price,
+                    realized_pnl=realized_pnl,
+                    roe_percent=roe_percent
                 )
             except Exception as e:
                 logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
@@ -638,12 +714,71 @@ class SimpleTrader:
                 data={
                     'symbol': symbol,
                     'side': position_side,
-                    'close_price': float(order_data.get('ap', 0)),
+                    'close_price': close_price,
+                    'realized_pnl': realized_pnl,
+                    'roe_percent': roe_percent,
                     'closed_by': closed_by,
                     'positions_info_message': close_info_message
                 }
             ))
 
+
+    async def _fetch_realized_pnl_from_income(
+        self,
+        symbol: str,
+        since_ms: int,
+        until_ms: Optional[int] = None,
+        max_attempts: int = 4,
+        delay_seconds: float = 0.5
+    ) -> Optional[float]:
+        """
+        'cr' у ACCOUNT_UPDATE — це кумулятивний realized PnL по позиції і, як
+        показує практика, НЕ збігається з тим "П/У при закритті", яке показує
+        біржа в інтерфейсі (розбіжність — комісія). get_income_history —
+        авторитетне джерело: тип REALIZED_PNL дає саме торговий PnL, який
+        відповідає відображенню на біржі. Підсумовуємо всі REALIZED_PNL
+        записи з моменту since_ms (на випадок кількох часткових закриттів).
+
+        until_ms передаємо явно (а не покладаємось на дефолт біржі) — деякі
+        реалізації API поводяться непередбачувано з незамкненим діапазоном.
+        """
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # end_time на кожній спробі — трохи "зараз" (з невеликим запасом
+                # вперед), а не фіксоване значення з першої спроби
+                request_end = until_ms if until_ms is not None else int(time.time() * 1000) + 5000
+                entries = await self.exchange.get_income_history(
+                    symbol=symbol,
+                    income_type='REALIZED_PNL',
+                    start_time=since_ms,
+                    end_time=request_end,
+                    limit=20
+                )
+            except Exception as e:
+                logger.warning(f"get_income_history attempt {attempt} failed for {symbol}: {e}")
+                entries = None
+
+            if entries:
+                total = 0.0
+                found = False
+                for entry in entries:
+                    try:
+                        total += float(entry.get('income', 0) or 0)
+                        found = True
+                    except (TypeError, ValueError):
+                        continue
+                if found:
+                    logger.info(
+                        f"Realized PnL from income history for {symbol}: {total} "
+                        f"({len(entries)} entries since {since_ms})"
+                    )
+                    return total
+
+            if attempt < max_attempts:
+                await asyncio.sleep(delay_seconds)
+
+        logger.warning(f"No REALIZED_PNL income entries found for {symbol} since {since_ms}")
+        return None
 
     async def _handle_account_update(self, event: Event) -> None:
         """Ловить ручні дії на біржі, які не пройшли через ORDER_TRADE_UPDATE обробник (safety net)"""
@@ -662,7 +797,7 @@ class SimpleTrader:
 
             if pa != 0 and not existing:
                 # Позиція відкрита вручну на біржі — бот про неї не знав
-                manual_order_id = f"manual-{symbol}-{position_side}-{int(datetime.utcnow().timestamp())}"
+                manual_order_id = f"manual-{symbol}-{position_side}-{int(time.time())}"
                 position_data = {
                     'order_id': manual_order_id,
                     'symbol': symbol,
@@ -709,12 +844,57 @@ class SimpleTrader:
 
                 logger.info(f"Position closed (detected via account update): {symbol} {position_side}")
 
+                entry_price = existing.get('entry_price')
+                quantity = existing.get('quantity')
+
+                # невеликий буфер назад (60с), щоб гарантовано захопити запис
+                # доходу для щойно закритої позиції навіть з урахуванням затримки
+                # ВАЖЛИВО: datetime.utcnow().timestamp() тут НЕ підходить — .timestamp()
+                # у naive datetime інтерпретує його як ЛОКАЛЬНИЙ час, а не UTC, тому
+                # на сервері з таймзоною, відмінною від UTC, since_ms "їде" на величину
+                # офсету (напр. +3 години) і вікно запиту стає невірним.
+                # time.time() завжди повертає справжній UTC epoch незалежно від таймзони.
+                now_ms = int(time.time() * 1000)
+                since_ms = now_ms - 60_000
+                until_ms = now_ms + 5_000
+                income_pnl = await self._fetch_realized_pnl_from_income(symbol, since_ms, until_ms)
+
+                if income_pnl is not None:
+                    realized_pnl = income_pnl
+                else:
+                    # fallback до менш точного джерела, якщо income history недоступна
+                    realized_pnl = float(pos.get('cr', 0) or 0)
+                    logger.warning(
+                        f"Falling back to ACCOUNT_UPDATE 'cr' for {symbol} realized_pnl "
+                        f"(may not match exchange-displayed close PnL exactly)"
+                    )
+
+                # close_price виводимо математично з entry_price/quantity/realized_pnl,
+                # а не з поточної ціни тікера (яка на момент запиту вже може відрізнятись
+                # від фактичної ціни виконання закриваючого ордера)
+                close_price = 0.0
+                if entry_price and quantity and quantity > 0:
+                    if position_side == 'LONG':
+                        close_price = entry_price + (realized_pnl / quantity)
+                    else:
+                        close_price = entry_price - (realized_pnl / quantity)
+                else:
+                    try:
+                        close_price = await self.exchange.get_ticker_price(symbol)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch close_price ticker for {symbol}: {e}")
+
+                roe_percent = self._calc_roe_percent(existing, realized_pnl)
+
                 # Оновлюємо статус в БД
                 try:
                     self.db.update_position_status(
                         order_id=existing['order_id'],
                         status='CLOSED',
-                        closed_at=datetime.utcnow()
+                        closed_at=datetime.utcnow(),
+                        close_price=close_price,
+                        realized_pnl=realized_pnl,
+                        roe_percent=roe_percent
                     )
                 except Exception as e:
                     logger.error(f"Failed to update manual position status in DB: {e}", exc_info=True)
@@ -728,8 +908,9 @@ class SimpleTrader:
                     data={
                         'symbol': symbol,
                         'side': position_side,
-                        'close_price': 0.0,
-                        'realized_pnl': float(pos.get('cr', 0)),  # 'cr' = closed realized PnL
+                        'close_price': close_price,
+                        'realized_pnl': realized_pnl,
+                        'roe_percent': roe_percent,
                         'closed_by': existing.get('opened_by', 'user'),
                         'positions_info_message': close_info_message
                     }
