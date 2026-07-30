@@ -31,9 +31,9 @@ class RestClient:
         # server_time = local_time + self._time_offset_ms
         self._time_offset_ms: int = 0
         self._time_offset_synced_at: float = 0.0
-        self._time_offset_ttl_seconds: int = 300  # пересинхронизация раз в 5 минут
+        self._time_offset_ttl_seconds: int = 300  # пересинхронизація раз в 5 минут
         self._time_synced_once: bool = False  # флаг: была ли хоть одна успешная синхронизация
-        self._sync_lock = asyncio.Lock()  # чтобы несколько параллельных запросов не синкались одновременно
+        self._sync_lock = asyncio.Lock()  # чтобы несколько параллельных запросов не синкались одночасно
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -159,6 +159,10 @@ class RestClient:
                         async with session.delete(full_url, headers=headers) as response:
                             result = await response.json()
                             response.raise_for_status()
+                    elif method == 'PUT':
+                        async with session.put(full_url, headers=headers) as response:
+                            result = await response.json()
+                            response.raise_for_status()
                     else:
                         raise ValueError(f"Unsupported HTTP method: {method}")
 
@@ -206,6 +210,9 @@ class RestClient:
 
     async def delete(self, endpoint: str, params: Optional[Dict[str, Any]] = None, signed: bool = True) -> Dict[str, Any]:
         return await self._request('DELETE', endpoint, params, signed)
+
+    async def put(self, endpoint: str, params: Optional[Dict[str, Any]] = None, signed: bool = True) -> Dict[str, Any]:
+        return await self._request('PUT', endpoint, params, signed)
 
     async def close(self) -> None:
         if self.session and not self.session.closed:
