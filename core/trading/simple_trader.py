@@ -718,6 +718,11 @@ class SimpleTrader:
                     'realized_pnl': realized_pnl,
                     'roe_percent': roe_percent,
                     'closed_by': closed_by,
+                    'order_id': position.get('order_id'),
+                    'entry_price': position.get('entry_price'),
+                    'quantity': position.get('quantity'),
+                    'leverage': position.get('leverage'),
+                    'strategy': strategy,
                     'positions_info_message': close_info_message
                 }
             ))
@@ -924,6 +929,11 @@ class SimpleTrader:
                         'realized_pnl': realized_pnl,
                         'roe_percent': roe_percent,
                         'closed_by': existing.get('opened_by', 'user'),
+                        'order_id': existing.get('order_id'),
+                        'entry_price': existing.get('entry_price'),
+                        'quantity': existing.get('quantity'),
+                        'leverage': existing.get('leverage'),
+                        'strategy': strategy,
                         'positions_info_message': close_info_message
                     }
                 ))

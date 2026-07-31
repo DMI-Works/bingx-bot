@@ -316,20 +316,41 @@ class TelegramBot:
 
     async def _on_position_closed(self, event: Event) -> None:
         data = event.data
-        pnl = data.get('realized_pnl', 0)
-        emoji = "🟢" if pnl > 0 else "🔴"
+        pnl = data.get('realized_pnl', 0) or 0
+        emoji = "🟢" if pnl >= 0 else "🔴"
 
-        text = f"""
-{emoji} <b>Позицію закрито</b>
+        symbol = data.get('symbol', 'N/A')
+        side = data.get('side', 'N/A')
+        close_price = data.get('close_price', 0) or 0
+        entry_price = data.get('entry_price')
+        quantity = data.get('quantity')
+        leverage = data.get('leverage')
+        order_id = data.get('order_id')
+        closed_by = data.get('closed_by')  # 'bot' / 'user'
+        roe = data.get('roe_percent')
 
-Символ: {data['symbol']}
-Напрямок: {data['side']}
-Ціна закриття: ${data.get('close_price', 0):.4f}
-Реалізований PnL: ${pnl:.2f}
-"""
-        text += f"[INFO]: {event.data.get('positions_info_message')}"
+        close_action = "Закрито лонг" if side == "LONG" else "Закрито шорт"
 
-        await self.send_message(text)
+        lines = [f"{emoji} <b>Позицію закрито</b>", ""]
+        lines.append(f"Символ: <b>{symbol}</b>")
+        lines.append(f"Дія: {close_action}" + (f" ({'бот' if closed_by == 'bot' else 'вручну'})" if closed_by else ""))
+        if leverage:
+            lines.append(f"Плече: {leverage}x")
+        if quantity:
+            lines.append(f"Кількість: {quantity}")
+        if entry_price:
+            lines.append(f"Середня ціна входу: <code>${float(entry_price):.4f}</code>")
+        lines.append(f"Ціна закриття: <code>${float(close_price):.4f}</code>")
+        lines.append(f"П/У при закритті: <b>${pnl:+.2f}</b>")
+        if roe is not None:
+            lines.append(f"Доходність (ROE): <b>{roe:+.2f}%</b>")
+        if order_id:
+            lines.append(f"№ ордера: <code>{order_id}</code>")
+
+        lines.append("")
+        lines.append(f"[INFO]: {data.get('positions_info_message', 'N/A')}")
+
+        await self.send_message("\n".join(lines))
 
     async def _on_stop_loss_triggered(self, event: Event) -> None:
         text = f"""
@@ -482,8 +503,7 @@ class TelegramBot:
         try:
             all_closed = self.db.get_all_closed_positions()
             for row in all_closed:
-                metadata = parse_metadata(row)
-                pnl = float(metadata.get('cached_realized_pnl', 0.0))
+                pnl = float(row['realized_pnl']) if row['realized_pnl'] is not None else 0.0
                 total_pnl += pnl
                 if pnl >= 0:
                     profitable_count += 1
@@ -509,8 +529,15 @@ class TelegramBot:
         else:
             for row in rows:
                 metadata = parse_metadata(row)
-                entry_price = float(metadata.get('cached_entry_price', 0.0))
-                pnl = float(metadata.get('cached_realized_pnl', 0.0))
+                entry_price = metadata.get('entry_price') or 0.0
+                quantity = metadata.get('quantity')
+                leverage = metadata.get('leverage')
+                order_id = row['order_id']
+
+                pnl = row['realized_pnl'] if row['realized_pnl'] is not None else 0.0
+                roe = row['roe_percent']
+                close_price = row['close_price'] if row['close_price'] is not None else 0.0
+
                 emoji = "🟢" if pnl >= 0 else "🔴"
                 closed_at_raw = row['closed_at']
 
@@ -521,18 +548,25 @@ class TelegramBot:
                 except (ValueError, TypeError):
                     closed_at = str(closed_at_raw)
 
-                closed_by = metadata.get('closed_by', '?')
+                closed_by = metadata.get('closed_by') or (metadata.get('opened_by', '?'))
                 side = row['side']
 
                 text += f"""
-    {emoji} <b>{row['symbol']}</b> {side}
-    ├ Вхід: <code>${entry_price:.4f}</code>
-    ├ Закрито: <code>{closed_at}</code> ({closed_by})
-    """
+            {emoji} <b>{row['symbol']}</b> {side}{f" {leverage}x" if leverage else ""}
+            ├ Вхід: <code>${entry_price:.4f}</code>
+            ├ Закрито: <code>${close_price:.4f}</code>
+            """
+                if quantity:
+                    text += f"├ Кількість: <code>{quantity}</code>\n"
+                text += f"├ Час: <code>{closed_at}</code> ({closed_by})\n"
+
                 sl_tp_lines = format_sl_tp_lines(metadata, entry_price, side)
                 for line in sl_tp_lines:
                     text += f"├ {line}\n"
 
+                if roe is not None:
+                    text += f"├ ROE: <b>{roe:+.2f}%</b>\n"
+                text += f"├ № ордера: <code>{order_id}</code>\n"
                 text += f"└ PnL: <b>${pnl:+.2f}</b>\n"
 
         text += f"\n━━━━━━━━━━━━━━━━━━━━\nСторінка {page + 1} з {total_pages}"
