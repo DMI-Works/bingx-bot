@@ -295,14 +295,17 @@ class TelegramBot:
         data = event.data
 
         text = f"""
-✅ <b>Позицію відкрито</b>
+    ✅ <b>Позицію відкрито</b>
 
-Символ: {data['symbol']}
-Напрямок: {data['side']}
-Вхід: ${data['entry_price']:.4f}
-Кількість: {data['quantity']}
-Плече: {data['leverage']}x
-"""
+    Символ: {data['symbol']}
+    Напрямок: {data['side']}
+    Вхід: ${data['entry_price']:.4f}
+    Кількість: {data['quantity']}
+    Плече: {data['leverage']}x
+    """
+        if data.get('margin_usdt') is not None:
+            text += f"Маржа: ${float(data['margin_usdt']):.2f}\n"
+
         if data.get('take_profit_levels'):
             for i, tp in enumerate(data.get('take_profit_levels', []), start=1):
                 text += f"{i == 1 and 'Тейк:\n' or ' '}  |- {i}: 💰{tp['price']:.4f} ({tp.get('close_percent', 0)}%)\n"
@@ -328,6 +331,9 @@ class TelegramBot:
         order_id = data.get('order_id')
         closed_by = data.get('closed_by')  # 'bot' / 'user'
         roe = data.get('roe_percent')
+        margin_usdt = data.get('margin_usdt')
+        commission_usdt = data.get('commission_usdt')
+        net_pnl = data.get('net_pnl')
 
         close_action = "Закрито лонг" if side == "LONG" else "Закрито шорт"
 
@@ -341,9 +347,16 @@ class TelegramBot:
         if entry_price:
             lines.append(f"Середня ціна входу: <code>${float(entry_price):.4f}</code>")
         lines.append(f"Ціна закриття: <code>${float(close_price):.4f}</code>")
-        lines.append(f"П/У при закритті: <b>${pnl:+.2f}</b>")
+        if margin_usdt is not None:
+            lines.append(f"Маржа: <code>${float(margin_usdt):.2f}</code>")
+        lines.append(f"П/У при закритті USDT: <b>${pnl:+.2f}</b>")
         if roe is not None:
             lines.append(f"Доходність (ROE): <b>{roe:+.2f}%</b>")
+        if commission_usdt is not None:
+            lines.append(f"Комісія: <code>${float(commission_usdt):.4f}</code>")
+        if net_pnl is not None:
+            net_emoji = "🟢" if net_pnl >= 0 else "🔴"
+            lines.append(f"{net_emoji} Чистий PnL: <b>${float(net_pnl):+.2f}</b>")
         if order_id:
             lines.append(f"№ ордера: <code>{order_id}</code>")
 
@@ -497,6 +510,8 @@ class TelegramBot:
 
         # статистика — по ВСІХ закритих позиціях, дані прямо з metadata (без звернень до біржі)
         total_pnl = 0.0
+        total_net_pnl = 0.0
+        total_commission = 0.0
         profitable_count = 0
         losing_count = 0
 
@@ -504,25 +519,30 @@ class TelegramBot:
             all_closed = self.db.get_all_closed_positions()
             for row in all_closed:
                 pnl = float(row['realized_pnl']) if row['realized_pnl'] is not None else 0.0
+                net = row['net_pnl'] if 'net_pnl' in row.keys() and row['net_pnl'] is not None else pnl
+                comm = float(row['commission_usdt']) if 'commission_usdt' in row.keys() and row['commission_usdt'] is not None else 0.0
                 total_pnl += pnl
-                if pnl >= 0:
+                total_net_pnl += net
+                total_commission += comm
+                if net >= 0:
                     profitable_count += 1
                 else:
                     losing_count += 1
         except Exception as e:
             logger.error(f"Failed to compute stats: {e}", exc_info=True)
 
-        summary_emoji = "🟢" if total_pnl >= 0 else "🔴"
+        summary_emoji = "🟢" if total_net_pnl >= 0 else "🔴"
         text = f"""
-    <b>📊 Історія угод</b>
+        <b>📊 Історія угод</b>
 
-    {summary_emoji} Загальний PnL: <b>${total_pnl:+.2f}</b>
-    🟢 Прибуткових: {profitable_count}
-    🔴 Збиткових: {losing_count}
-    Всього угод: {total_count}
+        {summary_emoji} Чистий PnL: <b>${total_net_pnl:+.2f}</b> (без комісії: ${total_pnl:+.2f})
+        💸 Комісія сплачено: ${total_commission:.2f}
+        🟢 Прибуткових: {profitable_count}
+        🔴 Збиткових: {losing_count}
+        Всього угод: {total_count}
 
-    ━━━━━━━━━━━━━━━━━━━━
-    """
+        ━━━━━━━━━━━━━━━━━━━━
+        """
 
         if not rows:
             text += "\n📭 Немає закритих позицій на цій сторінці"
@@ -537,19 +557,12 @@ class TelegramBot:
                 pnl = row['realized_pnl'] if row['realized_pnl'] is not None else 0.0
                 roe = row['roe_percent']
                 close_price = row['close_price'] if row['close_price'] is not None else 0.0
+                margin_usdt = row['margin_usdt'] if 'margin_usdt' in row.keys() else None
+                commission_usdt = row['commission_usdt'] if 'commission_usdt' in row.keys() else None
+                net_pnl = row['net_pnl'] if 'net_pnl' in row.keys() else None
 
                 emoji = "🟢" if pnl >= 0 else "🔴"
-                closed_at_raw = row['closed_at']
-
-                try:
-                    closed_at_utc = datetime.fromisoformat(str(closed_at_raw)).replace(tzinfo=ZoneInfo("UTC"))
-                    closed_at_local = closed_at_utc.astimezone(LOCAL_TZ)
-                    closed_at = closed_at_local.strftime('%d.%m %H:%M')
-                except (ValueError, TypeError):
-                    closed_at = str(closed_at_raw)
-
-                closed_by = metadata.get('closed_by') or (metadata.get('opened_by', '?'))
-                side = row['side']
+                ...
 
                 text += f"""
             {emoji} <b>{row['symbol']}</b> {side}{f" {leverage}x" if leverage else ""}
@@ -558,6 +571,8 @@ class TelegramBot:
             """
                 if quantity:
                     text += f"├ Кількість: <code>{quantity}</code>\n"
+                if margin_usdt is not None:
+                    text += f"├ Маржа: <code>${float(margin_usdt):.2f}</code>\n"
                 text += f"├ Час: <code>{closed_at}</code> ({closed_by})\n"
 
                 sl_tp_lines = format_sl_tp_lines(metadata, entry_price, side)
@@ -566,8 +581,13 @@ class TelegramBot:
 
                 if roe is not None:
                     text += f"├ ROE: <b>{roe:+.2f}%</b>\n"
+                if commission_usdt is not None:
+                    text += f"├ Комісія: <code>${float(commission_usdt):.4f}</code>\n"
                 text += f"├ № ордера: <code>{order_id}</code>\n"
-                text += f"└ PnL: <b>${pnl:+.2f}</b>\n"
+                text += f"└ PnL: <b>${pnl:+.2f}</b>"
+                if net_pnl is not None:
+                    text += f" (чистий: ${float(net_pnl):+.2f})"
+                text += "\n"
 
         text += f"\n━━━━━━━━━━━━━━━━━━━━\nСторінка {page + 1} з {total_pages}"
 

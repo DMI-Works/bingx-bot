@@ -67,7 +67,14 @@ class SimpleTrader:
                     'opened_by': metadata.get('opened_by', 'bot'),
                     'sl_order_id': metadata.get('sl_order_id'),
                     'tp_order_ids': metadata.get('tp_order_ids', []),
-                    'strategy': metadata.get('strategy')
+                    'sl_client_order_id': metadata.get('sl_client_order_id'),
+                    'tp_client_order_ids': metadata.get('tp_client_order_ids', []),
+                    'strategy': metadata.get('strategy'),
+                    'realized_pnl_accum': metadata.get('realized_pnl_accum', 0.0),
+                    'commission_accum': metadata.get('commission_accum', 0.0),
+                    'remaining_quantity': metadata.get('remaining_quantity'),
+                    'closing_trade_ids': metadata.get('closing_trade_ids', []),
+                    'closing_orders': metadata.get('closing_orders', []),
                 }
 
             if rows:
@@ -363,8 +370,12 @@ class SimpleTrader:
                 'opened_by': 'bot',
                 'sl_order_id': None,
                 'tp_order_ids': [],
+                'sl_client_order_id': None,
+                'tp_client_order_ids': [],
                 # ім'я стратегії, яка згенерувала сигнал на відкриття
-                'strategy': strategy
+                'strategy': strategy,
+                'realized_pnl_accum': 0.0,
+                'commission_accum': 0.0,
             }
             self.open_positions[position_key] = position_data
 
@@ -386,13 +397,22 @@ class SimpleTrader:
             # (executed_qty), а не запитаний quantity, щоб уникнути розсинхрону
             # з реальним залишком позиції на біржі
             if stop_loss_price:
-                sl_order_id = await self._create_stop_loss(symbol, side, executed_qty, stop_loss_price, entry_price)
+                sl_order_id, sl_client_order_id = await self._create_stop_loss(
+                    symbol, side, executed_qty, stop_loss_price, entry_price
+                )
                 if sl_order_id:
                     self.open_positions[position_key]['sl_order_id'] = str(sl_order_id)
+                if sl_client_order_id:
+                    self.open_positions[position_key]['sl_client_order_id'] = sl_client_order_id
 
             if take_profit_levels:
-                tp_order_ids = await self._create_take_profit_orders(symbol, side, executed_qty, take_profit_levels)
-                self.open_positions[position_key]['tp_order_ids'] = [str(tid) for tid in tp_order_ids if tid]
+                tp_results = await self._create_take_profit_orders(symbol, side, executed_qty, take_profit_levels)
+                self.open_positions[position_key]['tp_order_ids'] = [
+                    str(r['order_id']) for r in tp_results if r.get('order_id')
+                ]
+                self.open_positions[position_key]['tp_client_order_ids'] = [
+                    r['client_order_id'] for r in tp_results if r.get('client_order_id')
+                ]
 
             # Оновлюємо metadata в БД з sl_order_id/tp_order_ids
             try:
@@ -402,6 +422,8 @@ class SimpleTrader:
                 )
             except Exception as e:
                 logger.error(f"Failed to update position metadata in DB: {e}", exc_info=True)
+
+            margin_usdt = self._calc_margin_usdt(self.open_positions[position_key])
 
             # Публікуємо подію POSITION_OPENED
             await self.event_bus.publish(Event(
@@ -414,6 +436,7 @@ class SimpleTrader:
                     'leverage': leverage,
                     'stop_loss_price': stop_loss_price,
                     'take_profit_levels': take_profit_levels,
+                    'margin_usdt': margin_usdt,
                     'positions_info_message': positions_info_message
                 }
             ))
@@ -435,7 +458,23 @@ class SimpleTrader:
         quantity: float,
         stop_loss_price: float,
         entry_price: Optional[float] = None
-    ) -> Optional[str]:
+    ) -> tuple:
+        """
+        Повертає (order_id, client_order_id).
+
+        client_order_id генеруємо самі і передаємо в create_order —
+        це ЄДИНИЙ надійний спосіб пізніше розпізнати "цей filled-ордер —
+        наш SL", тому що для умовних (STOP_MARKET/TAKE_PROFIT_MARKET) ордерів
+        orderId, який повертається при РОЗМІЩЕННІ (planned order id), і orderId,
+        який приходить в стрімі при фактичному ВИКОНАННІ (execution id),
+        на біржах цього типу (BingX/Binance-style) можуть НЕ збігатися.
+        clientOrderId, який ми самі задаємо, біржа зобов'язана повернути
+        незмінним в обох випадках — тому саме на нього і матчимо закриття.
+
+        Параметр client_order_id тут відповідає однойменному аргументу
+        BingXClient.create_order(), який відправляється біржі як
+        'clientOrderID' і повертається в ORDER_TRADE_UPDATE як поле 'c'.
+        """
         close_side = 'SELL' if side == 'LONG' else 'BUY'
         position_side = 'LONG' if side == 'LONG' else 'SHORT'
 
@@ -452,6 +491,10 @@ class SimpleTrader:
         if entry_price and entry_price > 0 and stop_loss_price:
             buffer_percent = abs(entry_price - stop_loss_price) / entry_price
 
+        # Генеруємо один раз — навіть якщо доведеться ретраїти запит (той самий
+        # логічний SL), client_order_id має лишатись тим самим для матчингу
+        client_order_id = f"sl-{symbol}-{position_side}-{int(time.time() * 1000)}"
+
         max_attempts = 3
         last_error: Optional[BingXAPIError] = None
 
@@ -464,14 +507,18 @@ class SimpleTrader:
                     stop_price=current_stop_price,
                     position_side=position_side,
                     quantity=current_qty,
+                    client_order_id=client_order_id,  
                 )
 
                 order_id = None
                 if 'data' in response and 'order' in response['data']:
                     order_id = response['data']['order'].get('orderId')
 
-                logger.info(f"Stop loss created: {symbol} @ {current_stop_price}, orderId={order_id}")
-                return order_id
+                logger.info(
+                    f"Stop loss created: {symbol} @ {current_stop_price}, "
+                    f"orderId={order_id}, clientOrderId={client_order_id}"
+                )
+                return order_id, client_order_id
 
             except BingXAPIError as e:
                 last_error = e
@@ -517,7 +564,7 @@ class SimpleTrader:
                     context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
                     critical=True
                 )
-                return None
+                return None, None
 
         # усі спроби вичерпані
         logger.error(f"Failed to create stop loss for {symbol}: {last_error.code if last_error else '?'} {last_error.msg if last_error else ''}")
@@ -526,11 +573,15 @@ class SimpleTrader:
             context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
             critical=True
         )
-        return None
+        return None, None
 
 
     async def _create_take_profit_orders(self, symbol: str, side: str, quantity: float, tp_levels: list) -> list:
-        order_ids = []
+        """
+        Повертає список {'order_id': ..., 'client_order_id': ...} по кожному рівню TP.
+        Див. докстрінг _create_stop_loss щодо того, навіщо потрібен client_order_id.
+        """
+        results = []
 
         # якщо це ЄДИНИЙ рівень і він закриває 100% — використовуємо
         # closePosition=true замість розрахованого quantity, щоб уникнути
@@ -538,6 +589,7 @@ class SimpleTrader:
         is_single_full_close = len(tp_levels) == 1 and tp_levels[0].get('close_percent') == 100
 
         for i, tp_level in enumerate(tp_levels):
+            client_order_id = f"tp{i+1}-{symbol}-{side}-{int(time.time() * 1000)}"
             try:
                 tp_price = tp_level['price']
                 close_side = 'SELL' if side == 'LONG' else 'BUY'
@@ -545,7 +597,7 @@ class SimpleTrader:
 
                 if is_single_full_close:
                     # той самий safety margin (0.1%), що і для SL повного закриття —
-                    # захист від 110424 на межі округлення quantity біржею
+                    # захист від 110424 на межі округлення quantity биржею
                     safe_quantity = quantity * 0.999
 
                     async def _attempt(qty: float):
@@ -555,7 +607,8 @@ class SimpleTrader:
                             order_type='TAKE_PROFIT_MARKET',
                             stop_price=tp_price,
                             position_side=position_side,
-                            quantity=qty
+                            quantity=qty,
+                            client_order_id=client_order_id
                         )
 
                     try:
@@ -583,15 +636,19 @@ class SimpleTrader:
                         order_type='TAKE_PROFIT_MARKET',
                         quantity=tp_quantity,
                         stop_price=tp_price,
-                        position_side=position_side
+                        position_side=position_side,
+                        client_order_id=client_order_id
                     )
 
                 order_id = None
                 if 'data' in response and 'order' in response['data']:
                     order_id = response['data']['order'].get('orderId')
 
-                order_ids.append(order_id)
-                logger.info(f"Take profit {i+1} created: {symbol} @ {tp_price}, orderId={order_id}")
+                results.append({'order_id': order_id, 'client_order_id': client_order_id})
+                logger.info(
+                    f"Take profit {i+1} created: {symbol} @ {tp_price}, "
+                    f"orderId={order_id}, clientOrderId={client_order_id}"
+                )
 
             except BingXAPIError as e:
                 logger.error(f"Failed to create take profit {i+1} for {symbol}: {e.code} {e.msg}")
@@ -599,12 +656,12 @@ class SimpleTrader:
                     error=f"{e.code} {e.msg}",
                     context=f"Не вдалося поставити TP{i+1} для {symbol} (SL, якщо є, залишається активним)"
                 )
-                order_ids.append(None)
+                results.append({'order_id': None, 'client_order_id': None})
             except Exception as e:
                 logger.error(f"Failed to create take profit {i+1}: {e}")
-                order_ids.append(None)
+                results.append({'order_id': None, 'client_order_id': None})
 
-        return order_ids
+        return results
 
     @staticmethod
     def _calc_roe_percent(position: dict, realized_pnl: float) -> Optional[float]:
@@ -619,6 +676,18 @@ class SimpleTrader:
 
         if not entry_price or not quantity or entry_price <= 0 or quantity <= 0:
             return None
+        # leverage може прилетіти з конфігу як щось не-числове (наприклад
+        # кортеж через баговану кому в конфізі стратегії) — краще явно
+        # впасти в None, ніж кидати неопрацьований TypeError і губити
+        # публікацію POSITION_CLOSED цілком
+        try:
+            leverage = float(leverage)
+        except (TypeError, ValueError):
+            logger.error(f"Invalid leverage value in position data, cannot calc ROE%: {leverage!r}")
+            return None
+
+        if leverage <= 0:
+            return None
 
         margin = (entry_price * quantity) / leverage
         if margin <= 0:
@@ -626,9 +695,28 @@ class SimpleTrader:
 
         return (realized_pnl / margin) * 100
 
+    @staticmethod
+    def _calc_margin_usdt(position: dict) -> Optional[float]:
+        """Скільки USDT реально було вкладено (маржа) — потрібно для статистики в $."""
+        entry_price = position.get('entry_price')
+        quantity = position.get('quantity')
+        leverage = position.get('leverage') or 1
+
+        if not entry_price or not quantity or entry_price <= 0 or quantity <= 0:
+            return None
+        try:
+            leverage = float(leverage)
+        except (TypeError, ValueError):
+            return None
+        if leverage <= 0:
+            return None
+
+        return (entry_price * quantity) / leverage
+
     async def _handle_order_update(self, event: Event) -> None:
         order_data = event.data.get('o', {})
         exchange_order_id = str(order_data.get('i'))
+        client_order_id = order_data.get('c')  # clientOrderId — те, що ми самі задали при створенні SL/TP
         status = order_data.get('X')
         order_type = order_data.get('o')
         symbol = order_data.get('s')
@@ -642,33 +730,63 @@ class SimpleTrader:
                 logger.debug(f"No open position tracked for {symbol} {position_side}, skipping")
                 return
 
-            known_bot_order_ids = set(position.get('tp_order_ids', []))
+            # Матчимо ПЕРШ ЗА ВСЕ по clientOrderId — це надійний ідентифікатор,
+            # який ми самі згенерували і передали біржі при створенні SL/TP.
+            # Матч по exchange orderId лишаємо як fallback (для сумісності зі
+            # старими позиціями, збереженими до цього фіксу, де client_order_id
+            # ще не зберігався).
+            known_bot_client_order_ids = set(position.get('tp_client_order_ids', []) or [])
+            if position.get('sl_client_order_id'):
+                known_bot_client_order_ids.add(position['sl_client_order_id'])
+
+            known_bot_order_ids = set(position.get('tp_order_ids', []) or [])
             if position.get('sl_order_id'):
                 known_bot_order_ids.add(position['sl_order_id'])
-            closed_by = 'bot' if exchange_order_id in known_bot_order_ids else 'user'
+
+            if client_order_id and client_order_id in known_bot_client_order_ids:
+                closed_by = 'bot'
+            elif exchange_order_id in known_bot_order_ids:
+                closed_by = 'bot'
+            else:
+                closed_by = 'user'
 
             trade_id = order_data.get('t')
-            filled_qty = float(order_data.get('q', 0))  # обсяг ЦЬОГО закриваючого ордера
+            # 'q' — це початковий розмір ОРДЕРА (order quantity), не факт
+            # виконання цього конкретного fill'а. Для матчингу обсягу
+            # закриття потрібне поле 'l' (last executed quantity) —
+            # інакше remaining_quantity/is_full_close рахуються неправильно
+            # при часткових закриттях.
+            filled_qty = float(order_data.get('l', 0) or order_data.get('q', 0) or 0)
             # 'rp' — реалізований PnL САМЕ цього закриваючого fill'а (не кумулятивний
             # за всю позицію), тому накопичуємо його по всіх часткових закриттях
             trade_realized_pnl = float(order_data.get('rp', 0) or 0)
+            commission = float(order_data.get('n', 0) or 0)
+            commission_asset = order_data.get('N')
 
             # накопичуємо ID закриваючих угод — тільки ID, жодних цін/PnL
             position.setdefault('closing_trade_ids', [])
             if trade_id is not None:
                 position['closing_trade_ids'].append(trade_id)
             position.setdefault('closing_orders', [])
-            position['closing_orders'].append({'order_id': exchange_order_id, 'closed_by': closed_by})
+            position['closing_orders'].append({
+                'order_id': exchange_order_id,
+                'client_order_id': client_order_id,
+                'closed_by': closed_by
+            })
 
             position['realized_pnl_accum'] = position.get('realized_pnl_accum', 0.0) + trade_realized_pnl
+            position['commission_accum'] = position.get('commission_accum', 0.0) + commission
+            if commission_asset:
+                position['commission_asset'] = commission_asset
 
             remaining = position.get('remaining_quantity', position.get('quantity', 0)) - filled_qty
             position['remaining_quantity'] = max(0.0, remaining)
 
             logger.info(
                 f"Partial/full close fill: {symbol} {position_side}, order={exchange_order_id}, "
-                f"trade_id={trade_id}, filled_qty={filled_qty}, trade_pnl={trade_realized_pnl}, "
-                f"remaining={position['remaining_quantity']:.8f}"
+                f"client_order_id={client_order_id}, trade_id={trade_id}, filled_qty={filled_qty}, "
+                f"trade_pnl={trade_realized_pnl}, commission={commission}, "
+                f"remaining={position['remaining_quantity']:.8f}, closed_by={closed_by}"
             )
 
             # SL завжди закриває решту повністю (STOP_MARKET без closePosition тут не має 'quantity' часткового рівня)
@@ -692,7 +810,14 @@ class SimpleTrader:
 
             close_price = float(order_data.get('ap', 0) or 0)
             realized_pnl = position.get('realized_pnl_accum', 0.0)
-            roe_percent = self._calc_roe_percent(position, realized_pnl)
+            commission_total = position.get('commission_accum', 0.0)
+            net_pnl = realized_pnl - commission_total
+            margin_usdt = self._calc_margin_usdt(position)
+            try:
+                roe_percent = self._calc_roe_percent(position, realized_pnl)
+            except Exception as e:
+                logger.error(f"Failed to calc ROE% for {symbol} {position_side}: {e}", exc_info=True)
+                roe_percent = None
 
             try:
                 self.db.update_position_status(
@@ -701,7 +826,10 @@ class SimpleTrader:
                     closed_at=datetime.utcnow(),
                     close_price=close_price,
                     realized_pnl=realized_pnl,
-                    roe_percent=roe_percent
+                    roe_percent=roe_percent,
+                    commission_usdt=commission_total,
+                    net_pnl=net_pnl,
+                    margin_usdt=margin_usdt,
                 )
             except Exception as e:
                 logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
@@ -716,6 +844,9 @@ class SimpleTrader:
                     'side': position_side,
                     'close_price': close_price,
                     'realized_pnl': realized_pnl,
+                    'commission_usdt': commission_total,
+                    'net_pnl': net_pnl,
+                    'margin_usdt': margin_usdt,
                     'roe_percent': roe_percent,
                     'closed_by': closed_by,
                     'order_id': position.get('order_id'),
@@ -726,64 +857,6 @@ class SimpleTrader:
                     'positions_info_message': close_info_message
                 }
             ))
-
-
-    async def _fetch_realized_pnl_from_income(
-        self,
-        symbol: str,
-        since_ms: int,
-        until_ms: Optional[int] = None,
-        max_attempts: int = 4,
-        delay_seconds: float = 0.5
-    ) -> Optional[float]:
-        """
-        'cr' у ACCOUNT_UPDATE — це кумулятивний realized PnL по позиції і, як
-        показує практика, НЕ збігається з тим "П/У при закритті", яке показує
-        біржа в інтерфейсі (розбіжність — комісія). get_income_history —
-        авторитетне джерело: тип REALIZED_PNL дає саме торговий PnL, який
-        відповідає відображенню на біржі. Підсумовуємо всі REALIZED_PNL
-        записи з моменту since_ms (на випадок кількох часткових закриттів).
-
-        until_ms передаємо явно (а не покладаємось на дефолт біржі) — деякі
-        реалізації API поводяться непередбачувано з незамкненим діапазоном.
-        """
-        for attempt in range(1, max_attempts + 1):
-            try:
-                # end_time на кожній спробі — трохи "зараз" (з невеликим запасом
-                # вперед), а не фіксоване значення з першої спроби
-                request_end = until_ms if until_ms is not None else int(time.time() * 1000) + 5000
-                entries = await self.exchange.get_income_history(
-                    symbol=symbol,
-                    income_type='REALIZED_PNL',
-                    start_time=since_ms,
-                    end_time=request_end,
-                    limit=20
-                )
-            except Exception as e:
-                logger.warning(f"get_income_history attempt {attempt} failed for {symbol}: {e}")
-                entries = None
-
-            if entries:
-                total = 0.0
-                found = False
-                for entry in entries:
-                    try:
-                        total += float(entry.get('income', 0) or 0)
-                        found = True
-                    except (TypeError, ValueError):
-                        continue
-                if found:
-                    logger.info(
-                        f"Realized PnL from income history for {symbol}: {total} "
-                        f"({len(entries)} entries since {since_ms})"
-                    )
-                    return total
-
-            if attempt < max_attempts:
-                await asyncio.sleep(delay_seconds)
-
-        logger.warning(f"No REALIZED_PNL income entries found for {symbol} since {since_ms}")
-        return None
 
     async def _handle_account_update(self, event: Event) -> None:
         """Ловить ручні дії на біржі, які не пройшли через ORDER_TRADE_UPDATE обробник (safety net)"""
@@ -812,7 +885,11 @@ class SimpleTrader:
                     'opened_by': 'user',
                     'sl_order_id': None,
                     'tp_order_ids': [],
-                    'strategy': None
+                    'sl_client_order_id': None,
+                    'tp_client_order_ids': [],
+                    'strategy': None,
+                    'realized_pnl_accum': 0.0,
+                    'commission_accum': 0.0,
                 }
                 self.open_positions[position_key] = position_data
                 logger.info(f"Manual position detected and tracked: {symbol} {position_side}")
@@ -829,6 +906,8 @@ class SimpleTrader:
                 except Exception as e:
                     logger.error(f"Failed to save manual position to DB: {e}", exc_info=True)
 
+                margin_usdt = self._calc_margin_usdt(position_data)
+
                 # Публікуємо подію POSITION_OPENED
                 await self.event_bus.publish(Event(
                     type=EventType.POSITION_OPENED,
@@ -839,6 +918,7 @@ class SimpleTrader:
                         'quantity': abs(pa),
                         'leverage': 0,
                         'stop_loss_price': None,
+                        'margin_usdt': margin_usdt,
                         'positions_info_message': "Позицію відкрито вручну."
                     }
                 ))
@@ -852,41 +932,32 @@ class SimpleTrader:
                 entry_price = existing.get('entry_price')
                 quantity = existing.get('quantity')
 
-                income_pnl = None
-                if self.exchange.testnet:
-                    # Демо/VST-акаунт BingX не наповнює /user/income записами
-                    # REALIZED_PNL (перевірено емпірично: коректне часове вікно,
-                    # api повертає code=0 але data=None щоразу) — не витрачаємо
-                    # 4 спроби і ~2с на кожне закриття, одразу йдемо на fallback
-                    logger.info(
-                        f"Skipping income-history lookup for {symbol} on testnet/demo "
-                        f"(not populated there) — using ACCOUNT_UPDATE 'cr' directly"
-                    )
-                else:
-                    # невеликий буфер назад (60с), щоб гарантовано захопити запис
-                    # доходу для щойно закритої позиції навіть з урахуванням затримки
-                    # ВАЖЛИВО: datetime.utcnow().timestamp() тут НЕ підходить — .timestamp()
-                    # у naive datetime інтерпретує його як ЛОКАЛЬНИЙ час, а не UTC, тому
-                    # на сервері з таймзоною, відмінною від UTC, since_ms "їде" на величину
-                    # офсету (напр. +3 години) і вікно запиту стає невірним.
-                    # time.time() завжди повертає справжній UTC epoch незалежно від таймзони.
-                    now_ms = int(time.time() * 1000)
-                    since_ms = now_ms - 60_000
-                    until_ms = now_ms + 5_000
-                    income_pnl = await self._fetch_realized_pnl_from_income(symbol, since_ms, until_ms)
+                # Те, що вже накопичено з попередніх часткових закриттів (TP/SL),
+                # які пройшли через ORDER_TRADE_UPDATE (_handle_order_update).
+                # Раніше ці значення ігнорувались і realized_pnl рахувався
+                # "з нуля" по цьому останньому закриттю — через це підсумковий
+                # PnL губив прибуток/збиток від попередніх часткових TP/SL
+                # закриттів. Тепер просто додаємо PnL останнього закриття
+                # до вже накопиченого.
+                already_accumulated_pnl = existing.get('realized_pnl_accum', 0.0)
+                already_accumulated_commission = existing.get('commission_accum', 0.0)
 
-                if income_pnl is not None:
-                    realized_pnl = income_pnl
-                else:
-                    # fallback до менш точного джерела, якщо income history недоступна
-                    realized_pnl = float(pos.get('cr', 0) or 0)
-                    if not self.exchange.testnet:
-                        logger.warning(
-                            f"Falling back to ACCOUNT_UPDATE 'cr' for {symbol} realized_pnl "
-                            f"(may not match exchange-displayed close PnL exactly)"
-                        )
+                # 'cr' в ACCOUNT_UPDATE — це PnL САМЕ цього (останнього) закриття,
+                # яке не пройшло через ORDER_TRADE_UPDATE (напр. ручне закриття
+                # залишку позиції на біржі)
+                last_fill_pnl = float(pos.get('cr', 0) or 0)
+                realized_pnl = already_accumulated_pnl + last_fill_pnl
 
-                # close_price виводимо математично з entry_price/quantity/realized_pnl,
+                commission_total = already_accumulated_commission
+                net_pnl = realized_pnl - commission_total
+                margin_usdt = self._calc_margin_usdt(existing)
+                try:
+                    roe_percent = self._calc_roe_percent(existing, realized_pnl)
+                except Exception as e:
+                    logger.error(f"Failed to calc ROE% for {symbol} {position_side}: {e}", exc_info=True)
+                    roe_percent = None
+
+                # close_price виводимо математично з entry_price/quantity/сукупного realized_pnl,
                 # а не з поточної ціни тікера (яка на момент запиту вже може відрізнятись
                 # від фактичної ціни виконання закриваючого ордера)
                 close_price = 0.0
@@ -901,8 +972,6 @@ class SimpleTrader:
                     except Exception as e:
                         logger.warning(f"Failed to fetch close_price ticker for {symbol}: {e}")
 
-                roe_percent = self._calc_roe_percent(existing, realized_pnl)
-
                 # Оновлюємо статус в БД
                 try:
                     self.db.update_position_status(
@@ -911,7 +980,10 @@ class SimpleTrader:
                         closed_at=datetime.utcnow(),
                         close_price=close_price,
                         realized_pnl=realized_pnl,
-                        roe_percent=roe_percent
+                        roe_percent=roe_percent,
+                        commission_usdt=commission_total,
+                        net_pnl=net_pnl,
+                        margin_usdt=margin_usdt,
                     )
                 except Exception as e:
                     logger.error(f"Failed to update manual position status in DB: {e}", exc_info=True)
@@ -927,6 +999,9 @@ class SimpleTrader:
                         'side': position_side,
                         'close_price': close_price,
                         'realized_pnl': realized_pnl,
+                        'commission_usdt': commission_total,
+                        'net_pnl': net_pnl,
+                        'margin_usdt': margin_usdt,
                         'roe_percent': roe_percent,
                         'closed_by': existing.get('opened_by', 'user'),
                         'order_id': existing.get('order_id'),

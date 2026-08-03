@@ -235,8 +235,20 @@ class BingXClient:
         price: Optional[float] = None,
         stop_price: Optional[float] = None,
         reduce_only: bool = False,
-        position_side: Optional[str] = None
+        position_side: Optional[str] = None,
+        client_order_id: Optional[str] = None
     ) -> Dict[str, Any]:
+        """
+        client_order_id: власний ідентифікатор ордера, який ми задаємо самі і
+        передаємо біржі як параметр 'clientOrderID' (саме так, з великими
+        "ID" в кінці — це поле BingX повертає в raw-відповіді і в
+        ORDER_TRADE_UPDATE стрімі як 'c'). Це ЄДИНИЙ надійний спосіб пізніше
+        розпізнати "цей ордер — наш SL/TP", тому що для умовних ордерів
+        (STOP_MARKET/TAKE_PROFIT_MARKET) orderId, який повертається при
+        РОЗМІЩЕННІ, і orderId, який приходить в стрімі при фактичному
+        ВИКОНАННІ, можуть НЕ збігатися — а clientOrderID біржа зобов'язана
+        повернути незмінним в обох випадках.
+        """
 
         try:
             params = {
@@ -259,12 +271,17 @@ class BingXClient:
                 params['price'] = price
             if stop_price:
                 params['stopPrice'] = stop_price
+            if client_order_id:
+                params['clientOrderID'] = client_order_id
 
             response = await self.rest_client.post('/openApi/swap/v2/trade/order', params)
             # проверяем code ДО лога "успеха" — раньше тут логировался успех
             # даже когда биржа вернула ошибку (например, ордера временно отключены)
             self._raise_if_error(response, '/openApi/swap/v2/trade/order')
-            logger.info(f"Order created: {symbol} {side} {quantity}")
+            logger.info(
+                f"Order created: {symbol} {side} {quantity}"
+                + (f" clientOrderID={client_order_id}" if client_order_id else "")
+            )
             return response
 
         except Exception as e:

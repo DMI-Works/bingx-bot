@@ -266,6 +266,7 @@ class SimpleMovingAverageStrategy(BaseStrategy):
             'stop_loss_price': stop_loss_price,
             'take_profit_levels': take_profit_levels,
             'strategy': strategy_name,
+            'reference_price': price,
             'reason': (
                 f'Ціна {price:.6f} {"вище" if is_long else "нижче"} SMA {sma:.6f} '
                 f'({deviation_percent:+.2f}%), підтверджено {self.confirmation_candles} свічками, {risk_desc}'

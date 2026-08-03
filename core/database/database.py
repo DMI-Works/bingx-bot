@@ -38,9 +38,10 @@ class Database:
         """)
 
         # Active positions table - мінімальні дані для tracking.
-        # close_price/realized_pnl/roe_percent — окремі колонки (не metadata JSON),
-        # щоб звіти/статистика/повідомлення могли надійно читати їх напряму,
-        # а не залежати від того, чи хтось коректно записав ці значення в JSON.
+        # close_price/realized_pnl/roe_percent/margin_usdt/commission_usdt/net_pnl —
+        # окремі колонки (не metadata JSON), щоб звіти/статистика/повідомлення
+        # могли надійно читати їх напряму, а не залежати від того, чи хтось
+        # коректно записав ці значення в JSON.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS positions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,6 +54,9 @@ class Database:
                 close_price REAL,
                 realized_pnl REAL,
                 roe_percent REAL,
+                margin_usdt REAL,
+                commission_usdt REAL,
+                net_pnl REAL,
                 metadata TEXT
             )
         """)
@@ -62,10 +66,10 @@ class Database:
 
     def _migrate_positions_table(self) -> None:
         """
-        Для БД, створених до появи close_price/realized_pnl/roe_percent,
-        CREATE TABLE IF NOT EXISTS новий стовпець не додасть — таблиця
-        вже існує зі старою схемою. Тому перевіряємо PRAGMA table_info
-        і додаємо відсутні колонки вручну, не чіпаючи наявні дані.
+        Для БД, створених до появи нових колонок, CREATE TABLE IF NOT EXISTS
+        новий стовпець не додасть — таблиця вже існує зі старою схемою.
+        Тому перевіряємо PRAGMA table_info і додаємо відсутні колонки
+        вручну, не чіпаючи наявні дані.
         """
         cursor = self.conn.cursor()
         cursor.execute("PRAGMA table_info(positions)")
@@ -75,6 +79,13 @@ class Database:
             'close_price': 'ALTER TABLE positions ADD COLUMN close_price REAL',
             'realized_pnl': 'ALTER TABLE positions ADD COLUMN realized_pnl REAL',
             'roe_percent': 'ALTER TABLE positions ADD COLUMN roe_percent REAL',
+            # маржа в USDT (скільки реально вкладено при відкритті) — потрібна
+            # для агрегованої статистики в доларах, а не тільки в % ROE
+            'margin_usdt': 'ALTER TABLE positions ADD COLUMN margin_usdt REAL',
+            # сумарна комісія за вхід + вихід (в USDT)
+            'commission_usdt': 'ALTER TABLE positions ADD COLUMN commission_usdt REAL',
+            # чистий результат: realized_pnl - commission_usdt, як показує біржа
+            'net_pnl': 'ALTER TABLE positions ADD COLUMN net_pnl REAL',
         }
 
         for column, ddl in migrations.items():
@@ -124,13 +135,16 @@ class Database:
         closed_at: datetime = None,
         close_price: Optional[float] = None,
         realized_pnl: Optional[float] = None,
-        roe_percent: Optional[float] = None
+        roe_percent: Optional[float] = None,
+        margin_usdt: Optional[float] = None,
+        commission_usdt: Optional[float] = None,
+        net_pnl: Optional[float] = None
     ) -> None:
         """
-        Оновлює статус позиції. close_price/realized_pnl/roe_percent —
-        опціональні: якщо не передані, відповідні колонки не чіпаються
-        (щоб, наприклад, проміжний виклик update_position_status без цих
-        даних не затер вже записані значення значенням NULL).
+        Оновлює статус позиції. Усі метрики — опціональні: якщо не передані,
+        відповідні колонки не чіпаються (щоб, наприклад, проміжний виклик
+        update_position_status без цих даних не затер вже записані значення
+        значенням NULL).
         """
         set_clauses = ["status = ?"]
         params: list = [status]
@@ -147,6 +161,15 @@ class Database:
         if roe_percent is not None:
             set_clauses.append("roe_percent = ?")
             params.append(roe_percent)
+        if margin_usdt is not None:
+            set_clauses.append("margin_usdt = ?")
+            params.append(margin_usdt)
+        if commission_usdt is not None:
+            set_clauses.append("commission_usdt = ?")
+            params.append(commission_usdt)
+        if net_pnl is not None:
+            set_clauses.append("net_pnl = ?")
+            params.append(net_pnl)
 
         params.append(order_id)
 
@@ -183,6 +206,29 @@ class Database:
     def get_closed_positions_count(self) -> int:
         row = self.fetch_one("SELECT COUNT(*) as cnt FROM positions WHERE status = 'CLOSED'")
         return row['cnt'] if row else 0
+
+    def get_stats_summary(self) -> dict:
+        """
+        Агрегована статистика по закритих позиціях в доларах — саме те, чого
+        не вистачало при аналізі тільки по roe_percent: скільки всього
+        вкладено (маржа), скільки заробили/втратили чисто (net_pnl),
+        скільки пішло на комісію.
+        """
+        row = self.fetch_one("""
+            SELECT
+                COUNT(*) as total_trades,
+                SUM(margin_usdt) as total_margin_usdt,
+                SUM(realized_pnl) as total_realized_pnl,
+                SUM(commission_usdt) as total_commission_usdt,
+                SUM(net_pnl) as total_net_pnl,
+                SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
+                SUM(CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END) as losing_trades
+            FROM positions
+            WHERE status = 'CLOSED'
+        """)
+        if not row:
+            return {}
+        return dict(row)
 
     def close(self) -> None:
         if self.conn:
