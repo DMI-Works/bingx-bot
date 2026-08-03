@@ -74,19 +74,22 @@ class BingXClient:
 
     async def _handle_ws_message(self, data: Dict[str, Any]) -> None:
         try:
-            if 'e' in data:
-                event_type = data['e']
+            event_type = data.get("e")
 
-                if event_type == 'ACCOUNT_UPDATE':
-                    await self._handle_account_update(data)
-                elif event_type == 'ORDER_TRADE_UPDATE':
-                    await self._handle_order_update(data)
+            # Обрабатываем только события, которые нам нужны
+            if event_type == "ACCOUNT_UPDATE":
+                logger.info(f"[WS] ACCOUNT_UPDATE: {data}")
+                await self._handle_account_update(data)
+                return
 
-            elif 'dataType' in data:
-                data_type = data['dataType']
+            if event_type == "ORDER_TRADE_UPDATE":
+                await self._handle_order_update(data)
+                return
 
-                if data_type.endswith('@trade'):
-                    await self._handle_price_update(data)
+            # Рыночные данные
+            data_type = data.get("dataType")
+            if data_type and data_type.endswith("@trade"):
+                await self._handle_price_update(data)
 
         except Exception as e:
             logger.error(f"Error handling WebSocket message: {e}", exc_info=True)

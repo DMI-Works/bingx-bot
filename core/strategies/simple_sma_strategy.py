@@ -53,7 +53,7 @@ class SimpleMovingAverageStrategy(BaseStrategy):
 
         # --- риск / размер позиции ---
         self.position_size = config.get('position_size', 100)
-        self.leverage = config.get('trading.default_leverage', 10),
+        self.leverage = config.get('trading.default_leverage', 10)
 
 
         # --- кулдаун ---
