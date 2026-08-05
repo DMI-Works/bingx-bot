@@ -288,37 +288,6 @@ class BingXClient:
             logger.error(f"Failed to create order: {e}")
             raise
 
-    async def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
-        try:
-            params = {
-                'symbol': symbol,
-                'orderId': order_id
-            }
-
-            response = await self.rest_client.delete('/openApi/swap/v2/trade/order', params)
-            self._raise_if_error(response, '/openApi/swap/v2/trade/order')
-            logger.info(f"Order cancelled: {order_id}")
-            return response
-
-        except Exception as e:
-            logger.error(f"Failed to cancel order: {e}")
-            raise
-
-    async def cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        try:
-            params = {}
-            if symbol:
-                params['symbol'] = symbol
-
-            response = await self.rest_client.delete('/openApi/swap/v2/trade/allOpenOrders', params)
-            self._raise_if_error(response, '/openApi/swap/v2/trade/allOpenOrders')
-            logger.info(f"All orders cancelled" + (f" for {symbol}" if symbol else ""))
-            return response
-
-        except Exception as e:
-            logger.error(f"Failed to cancel all orders: {e}")
-            raise
-
     async def set_leverage(self, symbol: str, leverage: int, side: str = "BOTH") -> Dict[str, Any]:
         try:
             params = {
@@ -345,22 +314,6 @@ class BingXClient:
             logger.error(f"Failed to set leverage: {e}")
             raise
 
-    async def get_symbol_info(self, symbol: str) -> Dict[str, Any]:
-        try:
-            response = await self.rest_client.get('/openApi/swap/v2/quote/contracts')
-            self._raise_if_error(response, '/openApi/swap/v2/quote/contracts')
-            contracts = response.get('data', [])
-
-            for contract in contracts:
-                if contract.get('symbol') == symbol:
-                    return contract
-
-            raise ValueError(f"Symbol {symbol} not found")
-
-        except Exception as e:
-            logger.error(f"Failed to get symbol info: {e}")
-            raise
-
     async def get_ticker_price(self, symbol: str) -> float:
         try:
             response = await self.rest_client.get('/openApi/swap/v2/quote/price', {'symbol': symbol})
@@ -385,10 +338,6 @@ class BingXClient:
         response = await self.rest_client.put('/openApi/user/auth/userDataStream', {'listenKey': listen_key})
         self._raise_if_error(response, '/openApi/user/auth/userDataStream')
 
-    async def close_listen_key(self, listen_key: str) -> None:
-        response = await self.rest_client.delete('/openApi/user/auth/userDataStream', {'listenKey': listen_key})
-        self._raise_if_error(response, '/openApi/user/auth/userDataStream')
-
     async def get_all_tickers(self) -> List[Dict[str, Any]]:
         """24h статистика по всім swap-контрактам (об'єм, ціна, спред)."""
         try:
@@ -399,50 +348,7 @@ class BingXClient:
             logger.error(f"Failed to get all tickers: {e}")
             raise
 
-    async def get_all_contracts(self) -> List[Dict[str, Any]]:
-        """Список всіх доступних swap-контрактів."""
-        try:
-            response = await self.rest_client.get('/openApi/swap/v2/quote/contracts')
-            self._raise_if_error(response, '/openApi/swap/v2/quote/contracts')
-            return response.get('data', [])
-        except Exception as e:
-            logger.error(f"Failed to get contracts: {e}")
-            raise
-
     async def unsubscribe_trades(self, symbol: str) -> None:
         if self.ws_client:
             await self.ws_client.unsubscribe(f"{symbol}@trade", symbol)
             self.subscribed_symbols.discard(symbol)
-
-    
-    async def get_income_history(
-        self,
-        symbol: Optional[str] = None,
-        income_type: Optional[str] = None,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-        limit: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """Історія доходу (реалізований PnL, комісії, фандинг) — авторитетне джерело з боку біржі."""
-        try:
-            params = {}
-            if symbol:
-                params['symbol'] = symbol
-            if income_type:
-                params['incomeType'] = income_type
-            if start_time:
-                params['startTime'] = start_time
-            if end_time:
-                params['endTime'] = end_time
-            if limit:
-                params['limit'] = limit
-
-            logger.info(f"get_income_history params: {params}")
-            response = await self.rest_client.get('/openApi/swap/v2/user/income', params, signed=True)
-            logger.info(f"get_income_history raw response: {response}")
-            self._raise_if_error(response, '/openApi/swap/v2/user/income')
-
-            return response.get('data', [])
-        except Exception as e:
-            logger.error(f"Failed to get income history: {e}")
-            raise

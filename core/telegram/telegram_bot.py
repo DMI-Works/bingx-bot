@@ -553,6 +553,7 @@ class TelegramBot:
                 quantity = metadata.get('quantity')
                 leverage = metadata.get('leverage')
                 order_id = row['order_id']
+                side = row['side']
 
                 pnl = row['realized_pnl'] if row['realized_pnl'] is not None else 0.0
                 roe = row['roe_percent']
@@ -562,7 +563,16 @@ class TelegramBot:
                 net_pnl = row['net_pnl'] if 'net_pnl' in row.keys() else None
 
                 emoji = "🟢" if pnl >= 0 else "🔴"
-                ...
+
+                closed_at_raw = row['closed_at']
+                try:
+                    closed_at_utc = datetime.fromisoformat(str(closed_at_raw)).replace(tzinfo=ZoneInfo("UTC"))
+                    closed_at_local = closed_at_utc.astimezone(LOCAL_TZ)
+                    closed_at = closed_at_local.strftime('%d.%m %H:%M')
+                except (ValueError, TypeError):
+                    closed_at = str(closed_at_raw)
+
+                closed_by = metadata.get('closed_by', '?')
 
                 text += f"""
             {emoji} <b>{row['symbol']}</b> {side}{f" {leverage}x" if leverage else ""}
