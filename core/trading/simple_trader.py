@@ -493,8 +493,7 @@ class SimpleTrader:
 
         # Генеруємо один раз — навіть якщо доведеться ретраїти запит (той самий
         # логічний SL), client_order_id має лишатись тим самим для матчингу
-        client_order_id = f"sl-{symbol}-{position_side}-{int(time.time() * 1000)}"
-
+        client_order_id = f"sl-{int(time.time() * 1000)}"
         max_attempts = 3
         last_error: Optional[BingXAPIError] = None
 
@@ -584,12 +583,12 @@ class SimpleTrader:
         results = []
 
         # якщо це ЄДИНИЙ рівень і він закриває 100% — використовуємо
-        # closePosition=true замість розрахованого quantity, щоб уникнути
         # помилки 110424 через округлення quantity біржею (див. _create_stop_loss)
         is_single_full_close = len(tp_levels) == 1 and tp_levels[0].get('close_percent') == 100
 
+        logger.info(f"Creating {len(tp_levels)} take profit orders for {symbol} {side} (single_full_close={is_single_full_close})")
         for i, tp_level in enumerate(tp_levels):
-            client_order_id = f"tp{i+1}-{symbol}-{side}-{int(time.time() * 1000)}"
+            client_order_id = f"tp{i+1}-{int(time.time() * 1000)}"
             try:
                 tp_price = tp_level['price']
                 close_side = 'SELL' if side == 'LONG' else 'BUY'
