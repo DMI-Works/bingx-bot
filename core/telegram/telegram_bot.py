@@ -208,8 +208,8 @@ class TelegramBot:
 
                 text += f"""
 {side_emoji} <b>{symbol}</b> {position_side} {leverage}x
-├ Вхід: <code>${entry_price:.8f}</code>
-├ Поточна: <code>${mark_price:.8f}</code>
+├ Вхід: <code>${entry_price:.6f}</code>
+├ Поточна: <code>${mark_price:.6f}</code>
 ├ Кількість: <code>{abs(position_amt)}</code>
 ├ Маржа: <code>${isolated_margin:.2f}</code>
 ├ {pnl_emoji} PnL: <b>${unrealized_pnl:+.2f}</b>
@@ -302,16 +302,16 @@ class TelegramBot:
 
         if data.get('take_profit_levels'):
             for i, tp in enumerate(data.get('take_profit_levels', []), start=1):
-                text += f"{i == 1 and 'Тейк:\n' or ' '}  |- {i}: 💰{tp['price']:.8f} ({tp.get('close_percent', 0)}%)\n"
+                text += f"{i == 1 and 'Тейк:\n' or ' '}  |- {i}: 💰{tp['price']:.6f} ({tp.get('close_percent', 0)}%)\n"
 
         if data.get('stop_loss_price'):
-            text += f"Стоп: ${data['stop_loss_price']:.8f}\n"
+            text += f"Стоп: ${data['stop_loss_price']:.6f}\n"
 
         text += f"\n[INFO]: {data.get('positions_info_message', 'N/A')}"
 
         tp_levels = data.get('take_profit_levels') or []
         tp_summary = f"{len(tp_levels)} рівні" if len(tp_levels) > 1 else (
-            f"{tp_levels[0]['price']:.8f}" if tp_levels else None
+            f"{tp_levels[0]['price']:.6f}" if tp_levels else None
         )
 
         photo_buf = generate_pnl_card(
@@ -376,7 +376,7 @@ class TelegramBot:
 🛑 <b>Спрацював стоп-лосс</b>
 
 Символ: {event.data.get('symbol')}
-Ціна: ${event.data.get('price', 0):.8f}
+Ціна: ${event.data.get('price', 0):.6f}
 [INFO]: {event.data.get('positions_info_message')}
 """
         await self.send_message(text)
@@ -387,7 +387,7 @@ class TelegramBot:
 
 Символ: {event.data.get('symbol')}
 Рівень: {event.data.get('level', 1)}
-Ціна: ${event.data.get('price', 0):.8f}
+Ціна: ${event.data.get('price', 0):.6f}
 [INFO]: {event.data.get('positions_info_message')}
 """
         await self.send_message(text)
@@ -498,9 +498,9 @@ class TelegramBot:
                         (entry_price - sl_price) / entry_price * 100 if side == 'LONG'
                         else (sl_price - entry_price) / entry_price * 100
                     )
-                    lines.append(f"🔴 SL: <code>${sl_price:.8f}</code> (-{sl_percent:.1f}%)")
+                    lines.append(f"🔴 SL: <code>${sl_price:.6f}</code> (-{sl_percent:.1f}%)")
                 else:
-                    lines.append(f"🔴 SL: <code>${sl_price:.8f}</code>")
+                    lines.append(f"🔴 SL: <code>${sl_price:.6f}</code>")
 
             tp_levels = metadata.get('take_profit_levels') or []
             if tp_levels:
@@ -510,7 +510,7 @@ class TelegramBot:
                     close_pct = lvl.get('close_percent', 0)
                     prefix = "└" if i == len(tp_levels) - 1 else "  ├"
                     
-                    lines.append(f"{prefix} <code>${tp_price:.8f}</code> ({close_pct}%)")
+                    lines.append(f"{prefix} <code>${tp_price:.6f}</code> ({close_pct}%)")
 
             return lines
 
@@ -582,8 +582,8 @@ class TelegramBot:
 
                 text += f"""
             {emoji} <b>{row['symbol']}</b> {side}{f" {leverage}x" if leverage else ""}
-            ├ Вхід: <code>${entry_price:.8f}</code>
-            ├ Закрито: <code>${close_price:.8f}</code>
+            ├ Вхід: <code>${entry_price:.6f}</code>
+            ├ Закрито: <code>${close_price:.6f}</code>
             """
                 if quantity:
                     text += f"├ Кількість: <code>{quantity}</code>\n"
@@ -598,7 +598,7 @@ class TelegramBot:
                 if roe is not None:
                     text += f"├ ROE: <b>{roe:+.2f}%</b>\n"
                 if commission_usdt is not None:
-                    text += f"├ Комісія: <code>${float(commission_usdt):.8f}</code>\n"
+                    text += f"├ Комісія: <code>${float(commission_usdt):.6f}</code>\n"
                 text += f"├ № ордера: <code>{order_id}</code>\n"
                 text += f"└ PnL: <b>${pnl:+.2f}</b>"
                 if net_pnl is not None:

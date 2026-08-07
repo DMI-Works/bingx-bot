@@ -72,7 +72,7 @@ class SimpleTrader:
                     'strategy': metadata.get('strategy'),
                     'realized_pnl_accum': metadata.get('realized_pnl_accum', 0.0),
                     'commission_accum': metadata.get('commission_accum', 0.0),
-                    'remaining_quantity': metadata.get('remaining_quantity'),
+                    'remaining_quantity': metadata.get('remaining_quantity') or metadata.get('quantity', 0),
                     'closing_trade_ids': metadata.get('closing_trade_ids', []),
                     'closing_orders': metadata.get('closing_orders', []),
                 }
@@ -713,6 +713,9 @@ class SimpleTrader:
         return (entry_price * quantity) / leverage
 
     async def _handle_order_update(self, event: Event) -> None:
+
+        logger.info(f"[DEBUG] Close ORDER_TRADE_UPDATE event: {event.data}")
+
         order_data = event.data.get('o', {})
         exchange_order_id = str(order_data.get('i'))
         client_order_id = order_data.get('c')  # clientOrderId — те, що ми самі задали при створенні SL/TP
@@ -768,7 +771,10 @@ class SimpleTrader:
             if commission_asset:
                 position['commission_asset'] = commission_asset
 
-            remaining = position.get('remaining_quantity', position.get('quantity', 0)) - filled_qty
+            remaining_quantity = position.get('remaining_quantity')
+            if remaining_quantity is None:
+                remaining_quantity = position.get('quantity', 0)
+            remaining = remaining_quantity - filled_qty
             position['remaining_quantity'] = max(0.0, remaining)
 
             logger.info(
@@ -913,6 +919,15 @@ class SimpleTrader:
                 ))
 
             elif pa == 0 and existing:
+                if existing.get('opened_by') != 'user':
+                    # эта позиция бота — закрытие уже (или вот-вот) обработает
+                    # _handle_order_update по ORDER_TRADE_UPDATE, не дублируем
+                    logger.debug(
+                        f"Skipping account-update close for bot position {symbol} {position_side} "
+                        f"— expecting ORDER_TRADE_UPDATE to handle it"
+                    )
+                    return
+
                 # Позиція закрита на біржі
                 del self.open_positions[position_key]
 
