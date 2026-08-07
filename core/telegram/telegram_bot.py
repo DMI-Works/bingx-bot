@@ -11,7 +11,7 @@ from typing import Optional
 
 from ..events import EventBus, Event, EventType
 from ..state import SettingsManager
-from ..diagnostics import generate_pnl_card
+from ..diagnostics import generate_pnl_card, generate_stats_card
 
 from core.strategies import TestStrategy
 
@@ -464,6 +464,50 @@ class TelegramBot:
     async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._show_history_page(update, context, page=0)
 
+    def _build_stats_card(self):
+        """Агрегує всі закриті угоди в картку статистики (PnL по монетах, +/-, разом)."""
+        try:
+            all_closed = self.db.get_all_closed_positions()
+        except Exception as e:
+            logger.error(f"Failed to fetch closed positions for stats card: {e}", exc_info=True)
+            return None
+
+        total_trades = 0
+        profitable_count = 0
+        losing_count = 0
+        total_pnl = 0.0
+        symbol_pnl: dict = {}
+
+        for row in all_closed:
+            net = row['net_pnl'] if 'net_pnl' in row.keys() and row['net_pnl'] is not None else float(row['realized_pnl'] or 0.0)
+            pnl = net  # net_pnl вже враховує комісію
+
+            symbol = row['symbol']
+            total_trades += 1
+            total_pnl += pnl
+            symbol_pnl[symbol] = symbol_pnl.get(symbol, 0.0) + pnl
+
+            if pnl >= 0:
+                profitable_count += 1
+            else:
+                losing_count += 1
+
+        if total_trades == 0:
+            return None
+
+        try:
+            return generate_stats_card(
+                total_trades=total_trades,
+                profitable_count=profitable_count,
+                losing_count=losing_count,
+                total_pnl=total_pnl,
+                symbol_pnl=list(symbol_pnl.items()),
+                generated_at=datetime.now(LOCAL_TZ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate stats card: {e}", exc_info=True)
+            return None
+
     async def _cmd_test_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         signal = await self.test_strategy.trigger(symbol="INDEX-USDT", price=1000.0, side="LONG")
         await update.message.reply_text(f"Тестовый сигнал отправлен:\n{signal}")
@@ -480,6 +524,14 @@ class TelegramBot:
             return
 
         total_pages = max(1, (total_count + PAGE_SIZE - 1) // PAGE_SIZE)
+
+        if page == 0:
+            stats_buf = self._build_stats_card()
+            if stats_buf:
+                try:
+                    await self.application.bot.send_photo(chat_id=self.chat_id, photo=stats_buf)
+                except Exception as e:
+                    logger.error(f"Failed to send stats card: {e}", exc_info=True)
 
         def parse_metadata(row) -> dict:
             try:
@@ -515,41 +567,7 @@ class TelegramBot:
 
             return lines
 
-        # статистика — по ВСІХ закритих позиціях, дані прямо з metadata (без звернень до біржі)
-        total_pnl = 0.0
-        total_net_pnl = 0.0
-        total_commission = 0.0
-        profitable_count = 0
-        losing_count = 0
-
-        try:
-            all_closed = self.db.get_all_closed_positions()
-            for row in all_closed:
-                pnl = float(row['realized_pnl']) if row['realized_pnl'] is not None else 0.0
-                net = row['net_pnl'] if 'net_pnl' in row.keys() and row['net_pnl'] is not None else pnl
-                comm = float(row['commission_usdt']) if 'commission_usdt' in row.keys() and row['commission_usdt'] is not None else 0.0
-                total_pnl += pnl
-                total_net_pnl += net
-                total_commission += comm
-                if net >= 0:
-                    profitable_count += 1
-                else:
-                    losing_count += 1
-        except Exception as e:
-            logger.error(f"Failed to compute stats: {e}", exc_info=True)
-
-        summary_emoji = "🟢" if total_net_pnl >= 0 else "🔴"
-        text = f"""
-        <b>📊 Історія угод</b>
-
-        {summary_emoji} Чистий PnL: <b>${total_net_pnl:+.2f}</b> (без комісії: ${total_pnl:+.2f})
-        💸 Комісія сплачено: ${total_commission:.2f}
-        🟢 Прибуткових: {profitable_count}
-        🔴 Збиткових: {losing_count}
-        Всього угод: {total_count}
-
-        ━━━━━━━━━━━━━━━━━━━━
-        """
+        text = "<b>📜 Історія угод</b>\n━━━━━━━━━━━━━━━━━━━━\n"
 
         if not rows:
             text += "\n📭 Немає закритих позицій на цій сторінці"
