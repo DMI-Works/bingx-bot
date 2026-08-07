@@ -112,8 +112,8 @@ def generate_pnl_card(
     pad = 40
     y = 36
 
-    f_label = _font(500, 20)
-    top_label = "Позицію відкрито" if is_opened else "Реалізовані PnL"
+    f_label = _font(500, 22)
+    top_label = "Позицію відкрито" if is_opened else "Позицію закрито"
     draw.text((pad, y), top_label, font=f_label, fill=TEXT_MUTED)
     y += 40
 

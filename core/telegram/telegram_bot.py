@@ -323,10 +323,8 @@ class TelegramBot:
             margin_usdt=data.get('margin_usdt'),
             stop_loss_price=data.get('stop_loss_price'),
             take_profit_summary=tp_summary,
-            account_label="N/A",
+            account_label="User Account",
             closed_at=datetime.now(LOCAL_TZ),
-            referral_code="N/A",
-            logo_path="N/A",
             logo_crop_center=(0.5, 0.28),
         )
 
@@ -359,8 +357,6 @@ class TelegramBot:
             close_price=data.get('close_price') or 0.0,
             account_label="N/A",
             closed_at=datetime.now(LOCAL_TZ),
-            referral_code="N/A",
-            logo_path="N/A",
             logo_crop_center=(0.5, 0.28),
         )
 
