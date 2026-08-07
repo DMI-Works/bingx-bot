@@ -11,6 +11,7 @@ from typing import Optional
 
 from ..events import EventBus, Event, EventType
 from ..state import SettingsManager
+from ..diagnostics import generate_pnl_card
 
 from core.strategies import TestStrategy
 
@@ -207,8 +208,8 @@ class TelegramBot:
 
                 text += f"""
 {side_emoji} <b>{symbol}</b> {position_side} {leverage}x
-├ Вхід: <code>${entry_price:.4f}</code>
-├ Поточна: <code>${mark_price:.4f}</code>
+├ Вхід: <code>${entry_price:.8f}</code>
+├ Поточна: <code>${mark_price:.8f}</code>
 ├ Кількість: <code>{abs(position_amt)}</code>
 ├ Маржа: <code>${isolated_margin:.2f}</code>
 ├ {pnl_emoji} PnL: <b>${unrealized_pnl:+.2f}</b>
@@ -297,80 +298,85 @@ class TelegramBot:
         text = f"""
     ✅ <b>Позицію відкрито</b>
 
-    Символ: {data['symbol']}
-    Напрямок: {data['side']}
-    Вхід: ${data['entry_price']:.4f}
-    Кількість: {data['quantity']}
-    Плече: {data['leverage']}x
     """
-        if data.get('margin_usdt') is not None:
-            text += f"Маржа: ${float(data['margin_usdt']):.2f}\n"
 
         if data.get('take_profit_levels'):
             for i, tp in enumerate(data.get('take_profit_levels', []), start=1):
-                text += f"{i == 1 and 'Тейк:\n' or ' '}  |- {i}: 💰{tp['price']:.4f} ({tp.get('close_percent', 0)}%)\n"
+                text += f"{i == 1 and 'Тейк:\n' or ' '}  |- {i}: 💰{tp['price']:.8f} ({tp.get('close_percent', 0)}%)\n"
 
         if data.get('stop_loss_price'):
-            text += f"Стоп: ${data['stop_loss_price']:.4f}\n"
+            text += f"Стоп: ${data['stop_loss_price']:.8f}\n"
 
         text += f"\n[INFO]: {data.get('positions_info_message', 'N/A')}"
 
-        await self.send_message(text)
+        tp_levels = data.get('take_profit_levels') or []
+        tp_summary = f"{len(tp_levels)} рівні" if len(tp_levels) > 1 else (
+            f"{tp_levels[0]['price']:.8f}" if tp_levels else None
+        )
+
+        photo_buf = generate_pnl_card(
+            symbol=data.get('symbol', 'N/A'),
+            side=data.get('side', 'N/A'),
+            leverage=data.get('leverage') or 1,
+            card_type="opened",
+            entry_price=data.get('entry_price') or 0.0,
+            margin_usdt=data.get('margin_usdt'),
+            stop_loss_price=data.get('stop_loss_price'),
+            take_profit_summary=tp_summary,
+            account_label="N/A",
+            closed_at=datetime.now(LOCAL_TZ),
+            referral_code="N/A",
+            logo_path="N/A",
+            logo_crop_center=(0.5, 0.28),
+        )
+
+        await self.application.bot.send_photo(
+            chat_id=self.chat_id,
+            photo=photo_buf,
+            caption=text,
+            parse_mode='HTML'
+        )
 
     async def _on_position_closed(self, event: Event) -> None:
         data = event.data
-        pnl = data.get('realized_pnl', 0) or 0
-        emoji = "🟢" if pnl >= 0 else "🔴"
 
         symbol = data.get('symbol', 'N/A')
         side = data.get('side', 'N/A')
-        close_price = data.get('close_price', 0) or 0
-        entry_price = data.get('entry_price')
-        quantity = data.get('quantity')
-        leverage = data.get('leverage')
-        order_id = data.get('order_id')
-        closed_by = data.get('closed_by')  # 'bot' / 'user'
-        roe = data.get('roe_percent')
-        margin_usdt = data.get('margin_usdt')
-        commission_usdt = data.get('commission_usdt')
-        net_pnl = data.get('net_pnl')
+        leverage = data.get('leverage') or 1
+        roe = data.get('roe_percent') or 0.0
+        entry_price = data.get('entry_price') or 0.0
+        close_price = data.get('close_price') or 0.0
 
-        close_action = "Закрито лонг" if side == "LONG" else "Закрито шорт"
+        caption = f"[INFO]: {data.get('positions_info_message', 'N/A')}"
 
-        lines = [f"{emoji} <b>Позицію закрито</b>", ""]
-        lines.append(f"Символ: <b>{symbol}</b>")
-        lines.append(f"Дія: {close_action}" + (f" ({'бот' if closed_by == 'bot' else 'вручну'})" if closed_by else ""))
-        if leverage:
-            lines.append(f"Плече: {leverage}x")
-        if quantity:
-            lines.append(f"Кількість: {quantity}")
-        if entry_price:
-            lines.append(f"Середня ціна входу: <code>${float(entry_price):.4f}</code>")
-        lines.append(f"Ціна закриття: <code>${float(close_price):.4f}</code>")
-        if margin_usdt is not None:
-            lines.append(f"Маржа: <code>${float(margin_usdt):.2f}</code>")
-        lines.append(f"П/У при закритті USDT: <b>${pnl:+.2f}</b>")
-        if roe is not None:
-            lines.append(f"Доходність (ROE): <b>{roe:+.2f}%</b>")
-        if commission_usdt is not None:
-            lines.append(f"Комісія: <code>${float(commission_usdt):.4f}</code>")
-        if net_pnl is not None:
-            net_emoji = "🟢" if net_pnl >= 0 else "🔴"
-            lines.append(f"{net_emoji} Чистий PnL: <b>${float(net_pnl):+.2f}</b>")
-        if order_id:
-            lines.append(f"№ ордера: <code>{order_id}</code>")
+        photo_buf = generate_pnl_card(
+            symbol=data.get('symbol', 'N/A'),
+            side=data.get('side', 'N/A'),
+            leverage=data.get('leverage') or 1,
+            card_type="closed",
+            roe_percent=data.get('roe_percent') or 0.0,
+            entry_price=data.get('entry_price') or 0.0,
+            close_price=data.get('close_price') or 0.0,
+            account_label="N/A",
+            closed_at=datetime.now(LOCAL_TZ),
+            referral_code="N/A",
+            logo_path="N/A",
+            logo_crop_center=(0.5, 0.28),
+        )
 
-        lines.append("")
-        lines.append(f"[INFO]: {data.get('positions_info_message', 'N/A')}")
-
-        await self.send_message("\n".join(lines))
+        await self.application.bot.send_photo(
+            chat_id=self.chat_id,
+            photo=photo_buf,
+            caption=caption,
+            parse_mode='HTML'
+        )
 
     async def _on_stop_loss_triggered(self, event: Event) -> None:
         text = f"""
 🛑 <b>Спрацював стоп-лосс</b>
 
 Символ: {event.data.get('symbol')}
-Ціна: ${event.data.get('price', 0):.4f}
+Ціна: ${event.data.get('price', 0):.8f}
 [INFO]: {event.data.get('positions_info_message')}
 """
         await self.send_message(text)
@@ -381,7 +387,7 @@ class TelegramBot:
 
 Символ: {event.data.get('symbol')}
 Рівень: {event.data.get('level', 1)}
-Ціна: ${event.data.get('price', 0):.4f}
+Ціна: ${event.data.get('price', 0):.8f}
 [INFO]: {event.data.get('positions_info_message')}
 """
         await self.send_message(text)
@@ -492,9 +498,9 @@ class TelegramBot:
                         (entry_price - sl_price) / entry_price * 100 if side == 'LONG'
                         else (sl_price - entry_price) / entry_price * 100
                     )
-                    lines.append(f"🔴 SL: <code>${sl_price:.4f}</code> (-{sl_percent:.1f}%)")
+                    lines.append(f"🔴 SL: <code>${sl_price:.8f}</code> (-{sl_percent:.1f}%)")
                 else:
-                    lines.append(f"🔴 SL: <code>${sl_price:.4f}</code>")
+                    lines.append(f"🔴 SL: <code>${sl_price:.8f}</code>")
 
             tp_levels = metadata.get('take_profit_levels') or []
             if tp_levels:
@@ -504,7 +510,7 @@ class TelegramBot:
                     close_pct = lvl.get('close_percent', 0)
                     prefix = "└" if i == len(tp_levels) - 1 else "  ├"
                     
-                    lines.append(f"{prefix} <code>${tp_price:.4f}</code> ({close_pct}%)")
+                    lines.append(f"{prefix} <code>${tp_price:.8f}</code> ({close_pct}%)")
 
             return lines
 
@@ -576,8 +582,8 @@ class TelegramBot:
 
                 text += f"""
             {emoji} <b>{row['symbol']}</b> {side}{f" {leverage}x" if leverage else ""}
-            ├ Вхід: <code>${entry_price:.4f}</code>
-            ├ Закрито: <code>${close_price:.4f}</code>
+            ├ Вхід: <code>${entry_price:.8f}</code>
+            ├ Закрито: <code>${close_price:.8f}</code>
             """
                 if quantity:
                     text += f"├ Кількість: <code>{quantity}</code>\n"
@@ -592,7 +598,7 @@ class TelegramBot:
                 if roe is not None:
                     text += f"├ ROE: <b>{roe:+.2f}%</b>\n"
                 if commission_usdt is not None:
-                    text += f"├ Комісія: <code>${float(commission_usdt):.4f}</code>\n"
+                    text += f"├ Комісія: <code>${float(commission_usdt):.8f}</code>\n"
                 text += f"├ № ордера: <code>{order_id}</code>\n"
                 text += f"└ PnL: <b>${pnl:+.2f}</b>"
                 if net_pnl is not None:

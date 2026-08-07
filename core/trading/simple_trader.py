@@ -729,11 +729,6 @@ class SimpleTrader:
                 logger.debug(f"No open position tracked for {symbol} {position_side}, skipping")
                 return
 
-            # Матчимо ПЕРШ ЗА ВСЕ по clientOrderId — це надійний ідентифікатор,
-            # який ми самі згенерували і передали біржі при створенні SL/TP.
-            # Матч по exchange orderId лишаємо як fallback (для сумісності зі
-            # старими позиціями, збереженими до цього фіксу, де client_order_id
-            # ще не зберігався).
             known_bot_client_order_ids = set(position.get('tp_client_order_ids', []) or [])
             if position.get('sl_client_order_id'):
                 known_bot_client_order_ids.add(position['sl_client_order_id'])
@@ -750,14 +745,9 @@ class SimpleTrader:
                 closed_by = 'user'
 
             trade_id = order_data.get('t')
-            # 'q' — це початковий розмір ОРДЕРА (order quantity), не факт
-            # виконання цього конкретного fill'а. Для матчингу обсягу
-            # закриття потрібне поле 'l' (last executed quantity) —
-            # інакше remaining_quantity/is_full_close рахуються неправильно
-            # при часткових закриттях.
+
             filled_qty = float(order_data.get('l', 0) or order_data.get('q', 0) or 0)
-            # 'rp' — реалізований PnL САМЕ цього закриваючого fill'а (не кумулятивний
-            # за всю позицію), тому накопичуємо його по всіх часткових закриттях
+
             trade_realized_pnl = float(order_data.get('rp', 0) or 0)
             commission = float(order_data.get('n', 0) or 0)
             commission_asset = order_data.get('N')
