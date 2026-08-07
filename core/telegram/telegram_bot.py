@@ -295,21 +295,24 @@ class TelegramBot:
     async def _on_position_opened(self, event: Event) -> None:
         data = event.data
 
-        text = f"""
-    ✅ <b>Позицію відкрито</b>
+        tp_levels = data.get('take_profit_levels') or []
 
-    """
+        lines = ["✅ <b>Позицію відкрито</b>", ""]
 
-        if data.get('take_profit_levels'):
-            for i, tp in enumerate(data.get('take_profit_levels', []), start=1):
-                text += f"{i == 1 and 'Тейк:\n' or ' '}  |- {i}: 💰{tp['price']:.6f} ({tp.get('close_percent', 0)}%)\n"
+        if tp_levels:
+            lines.append("Тейк:")
+            for i, tp in enumerate(tp_levels, start=1):
+                prefix = "└" if i == len(tp_levels) else "  ├"
+                lines.append(f"{prefix} {i}: 💰{tp['price']:.6f} ({tp.get('close_percent', 0)}%)")
 
         if data.get('stop_loss_price'):
-            text += f"Стоп: ${data['stop_loss_price']:.6f}\n"
+            lines.append(f"Стоп: ${data['stop_loss_price']:.6f}")
 
-        text += f"\n[INFO]: {data.get('positions_info_message', 'N/A')}"
+        lines.append("")
+        lines.append(f"[INFO]: {data.get('positions_info_message', 'N/A')}")
 
-        tp_levels = data.get('take_profit_levels') or []
+        text = "\n".join(lines)
+
         tp_summary = f"{len(tp_levels)} рівні" if len(tp_levels) > 1 else (
             f"{tp_levels[0]['price']:.6f}" if tp_levels else None
         )
@@ -344,17 +347,19 @@ class TelegramBot:
         roe = data.get('roe_percent') or 0.0
         entry_price = data.get('entry_price') or 0.0
         close_price = data.get('close_price') or 0.0
+        net_pnl = data.get('net_pnl')
 
         caption = f"[INFO]: {data.get('positions_info_message', 'N/A')}"
 
         photo_buf = generate_pnl_card(
-            symbol=data.get('symbol', 'N/A'),
-            side=data.get('side', 'N/A'),
-            leverage=data.get('leverage') or 1,
+            symbol=symbol,
+            side=side,
+            leverage=leverage,
             card_type="closed",
-            roe_percent=data.get('roe_percent') or 0.0,
-            entry_price=data.get('entry_price') or 0.0,
-            close_price=data.get('close_price') or 0.0,
+            roe_percent=roe,
+            net_pnl=net_pnl,
+            entry_price=entry_price,
+            close_price=close_price,
             account_label="N/A",
             closed_at=datetime.now(LOCAL_TZ),
             logo_crop_center=(0.5, 0.28),

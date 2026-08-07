@@ -76,6 +76,7 @@ def generate_pnl_card(
     account_label: str,
     card_type: str = "closed",
     roe_percent: Optional[float] = None,
+    net_pnl: Optional[float] = None,
     entry_price: Optional[float] = None,
     close_price: Optional[float] = None,
     margin_usdt: Optional[float] = None,
@@ -179,6 +180,13 @@ def generate_pnl_card(
         f_roi = _font(800, 56)
         roi_text = f"{(roe_percent or 0.0):+.2f}%"
         draw.text((pad, y), roi_text, font=f_roi, fill=accent)
+
+        if net_pnl is not None:
+            roi_w = draw.textlength(roi_text, font=f_roi)
+            f_pnl = _font(700, 28)
+            pnl_text = f"{net_pnl:+.2f} USDT"
+            draw.text((pad + roi_w + 16, y + 22), pnl_text, font=f_pnl, fill=accent)
+
         y += 78
 
         close_str = f"{close_price:.{price_decimals}f}" if close_price else "—"
@@ -245,6 +253,7 @@ def generate_pnl_card(
 #         leverage=20,
 #         card_type="closed",
 #         roe_percent=-2.36,
+#         net_pnl=-1.18,
 #         entry_price=0.008138,
 #         close_price=0.008148,
 #         account_label="mi***s@gmail...",
