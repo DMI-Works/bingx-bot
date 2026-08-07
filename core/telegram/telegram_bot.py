@@ -348,6 +348,9 @@ class TelegramBot:
         entry_price = data.get('entry_price') or 0.0
         close_price = data.get('close_price') or 0.0
         net_pnl = data.get('net_pnl')
+        commission_usdt = data.get('commission_usdt') or 0.0
+
+        net_pnl = net_pnl - commission_usdt if net_pnl is not None else None
 
         caption = f"[INFO]: {data.get('positions_info_message', 'N/A')}"
 
