@@ -461,39 +461,20 @@ class SimpleTrader:
         entry_price: Optional[float] = None
     ) -> tuple:
         """
-        Повертає (order_id, client_order_id).
-
-        client_order_id генеруємо самі і передаємо в create_order —
-        це ЄДИНИЙ надійний спосіб пізніше розпізнати "цей filled-ордер —
-        наш SL", тому що для умовних (STOP_MARKET/TAKE_PROFIT_MARKET) ордерів
-        orderId, який повертається при РОЗМІЩЕННІ (planned order id), і orderId,
-        який приходить в стрімі при фактичному ВИКОНАННІ (execution id),
-        на біржах цього типу (BingX/Binance-style) можуть НЕ збігатися.
-        clientOrderId, який ми самі задаємо, біржа зобов'язана повернути
-        незмінним в обох випадках — тому саме на нього і матчимо закриття.
-
-        Параметр client_order_id тут відповідає однойменному аргументу
-        BingXClient.create_order(), який відправляється біржі як
-        'clientOrderID' і повертається в ORDER_TRADE_UPDATE як поле 'c'.
+        SL всегда закрывает позицию целиком, поэтому используем closePosition=true
+        вместо quantity — биржа сама заквадратит позицию по факту срабатывания,
+        без хвостов и без ошибок округления (110424). quantity здесь больше не нужен
+        и не используется в запросе.
         """
         close_side = 'SELL' if side == 'LONG' else 'BUY'
         position_side = 'LONG' if side == 'LONG' else 'SHORT'
 
-        # SL завжди закриває позицію повністю. Невеликий safety margin (0.1%)
-        # захищає від помилки 110424 на межі округлення: BingX округлює
-        # надісланий quantity під свою precision, і якщо округлення йде вгору,
-        # запитуваний обсяг стає більшим за реальний залишок позиції.
-        current_qty = quantity * 0.999
         current_stop_price = stop_loss_price
 
-        # % буфер SL відносно ціни входу — потрібен, щоб при "переякоренні"
-        # (див. нижче) зберегти той самий відсотковий відступ, а не абсолютну ціну
         buffer_percent = None
         if entry_price and entry_price > 0 and stop_loss_price:
             buffer_percent = abs(entry_price - stop_loss_price) / entry_price
 
-        # Генеруємо один раз — навіть якщо доведеться ретраїти запит (той самий
-        # логічний SL), client_order_id має лишатись тим самим для матчингу
         client_order_id = f"sl-{int(time.time() * 1000)}"
         max_attempts = 3
         last_error: Optional[BingXAPIError] = None
@@ -502,12 +483,13 @@ class SimpleTrader:
             try:
                 response = await self.exchange.create_order(
                     symbol=symbol,
+                    quantity=quantity,
                     side=close_side,
                     order_type='STOP_MARKET',
                     stop_price=current_stop_price,
                     position_side=position_side,
-                    quantity=current_qty,
-                    client_order_id=client_order_id,  
+                    close_position=True,  
+                    client_order_id=client_order_id,
                 )
 
                 order_id = None
@@ -516,27 +498,14 @@ class SimpleTrader:
 
                 logger.info(
                     f"Stop loss created: {symbol} @ {current_stop_price}, "
-                    f"orderId={order_id}, clientOrderId={client_order_id}"
+                    f"orderId={order_id}, clientOrderId={client_order_id}, closePosition=true"
                 )
                 return order_id, client_order_id
 
             except BingXAPIError as e:
                 last_error = e
 
-                if e.code == 110424 and attempt < max_attempts:
-                    # впираємось у "must be less than available" на межі округлення —
-                    # зменшуємо обсяг ще трохи і пробуємо ще раз
-                    current_qty = current_qty * 0.999
-                    logger.warning(
-                        f"SL create hit 110424 for {symbol}, retrying (attempt {attempt+1}) "
-                        f"with quantity={current_qty}"
-                    )
-                    continue
-
                 if 'current price' in (e.msg or '').lower() and buffer_percent is not None and attempt < max_attempts:
-                    # ціна встигла пройти наш SL, поки запит летів до біржі (типово
-                    # для вузького % буфера на волатильних/тонких парах) —
-                    # переякорюємо SL до актуальної ринкової ціни з тим самим % буфером
                     try:
                         live_price = await self.exchange.get_ticker_price(symbol)
                         new_stop_price = (
@@ -554,7 +523,6 @@ class SimpleTrader:
                         logger.error(f"Failed to fetch live price to re-anchor SL for {symbol}: {fetch_err}")
                         break
 
-                # інша помилка, або спроби вичерпані — далі не ретраїмо
                 break
 
             except Exception as e:
@@ -566,7 +534,6 @@ class SimpleTrader:
                 )
                 return None, None
 
-        # усі спроби вичерпані
         logger.error(f"Failed to create stop loss for {symbol}: {last_error.code if last_error else '?'} {last_error.msg if last_error else ''}")
         await self._notify_error(
             error=f"{last_error.code} {last_error.msg}" if last_error else "unknown error",
@@ -579,56 +546,40 @@ class SimpleTrader:
     async def _create_take_profit_orders(self, symbol: str, side: str, quantity: float, tp_levels: list) -> list:
         """
         Повертає список {'order_id': ..., 'client_order_id': ...} по кожному рівню TP.
-        Див. докстрінг _create_stop_loss щодо того, навіщо потрібен client_order_id.
+
+        Останній рівень TP завжди закривається через closePosition=true —
+        незалежно від того, скільки % він мав закрити за розрахунком. Це прибирає
+        хвости, що накопичуються з округлення quantity біржею на попередніх
+        часткових рівнях: замість закриття по розрахунковому quantity, останній
+        ордер квадратить фактичний залишок позиції на біржі в момент спрацювання.
+        Проміжні (не останні) рівні й далі закриваються точним quantity, бо
+        closePosition=true на них закрив би позицію повністю, зламавши інші рівні.
         """
         results = []
+        last_index = len(tp_levels) - 1
 
-        # якщо це ЄДИНИЙ рівень і він закриває 100% — використовуємо
-        # помилки 110424 через округлення quantity біржею (див. _create_stop_loss)
-        is_single_full_close = len(tp_levels) == 1 and tp_levels[0].get('close_percent') == 100
-
-        logger.info(f"Creating {len(tp_levels)} take profit orders for {symbol} {side} (single_full_close={is_single_full_close})")
+        logger.info(f"Creating {len(tp_levels)} take profit orders for {symbol} {side}")
         for i, tp_level in enumerate(tp_levels):
             client_order_id = f"tp{i+1}-{int(time.time() * 1000)}"
+            is_last_level = (i == last_index)
+
             try:
                 tp_price = tp_level['price']
                 close_side = 'SELL' if side == 'LONG' else 'BUY'
                 position_side = 'LONG' if side == 'LONG' else 'SHORT'
 
-                if is_single_full_close:
-                    # той самий safety margin (0.1%), що і для SL повного закриття —
-                    # захист від 110424 на межі округлення quantity биржею
-                    safe_quantity = quantity * 0.999
-
-                    async def _attempt(qty: float):
-                        return await self.exchange.create_order(
-                            symbol=symbol,
-                            side=close_side,
-                            order_type='TAKE_PROFIT_MARKET',
-                            stop_price=tp_price,
-                            position_side=position_side,
-                            quantity=qty,
-                            client_order_id=client_order_id
-                        )
-
-                    try:
-                        response = await _attempt(safe_quantity)
-                    except BingXAPIError as e:
-                        if e.code == 110424:
-                            retry_quantity = safe_quantity * 0.999
-                            logger.warning(
-                                f"TP create hit 110424 for {symbol} with quantity={safe_quantity}, "
-                                f"retrying once with quantity={retry_quantity}"
-                            )
-                            response = await _attempt(retry_quantity)
-                        else:
-                            raise
+                if is_last_level:
+                    response = await self.exchange.create_order(
+                        symbol=symbol,
+                        side=close_side,
+                        order_type='TAKE_PROFIT_MARKET',
+                        quantity=quantity,
+                        stop_price=tp_price,
+                        position_side=position_side,
+                        close_position=True,
+                        client_order_id=client_order_id
+                    )
                 else:
-                    # справжній частковий TP (декілька рівнів) — тут quantity
-                    # обов'язковий, і проблема округлення поки залишається
-                    # актуальною для цього випадку (потрібне округлення під
-                    # precision символу — окрема задача, якщо почнеш
-                    # використовувати кілька рівнів TP замість одного повного)
                     tp_quantity = quantity * (tp_level['close_percent'] / 100)
                     response = await self.exchange.create_order(
                         symbol=symbol,
@@ -646,8 +597,8 @@ class SimpleTrader:
 
                 results.append({'order_id': order_id, 'client_order_id': client_order_id})
                 logger.info(
-                    f"Take profit {i+1} created: {symbol} @ {tp_price}, "
-                    f"orderId={order_id}, clientOrderId={client_order_id}"
+                    f"Take profit {i+1}{'(final, closePosition=true)' if is_last_level else ''} created: "
+                    f"{symbol} @ {tp_price}, orderId={order_id}, clientOrderId={client_order_id}"
                 )
 
             except BingXAPIError as e:
