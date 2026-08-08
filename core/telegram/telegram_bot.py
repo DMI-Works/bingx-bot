@@ -11,9 +11,11 @@ from typing import Optional
 
 from ..events import EventBus, Event, EventType
 from ..state import SettingsManager
+from ..database import StrategySettingsStore
 from ..diagnostics import generate_pnl_card, generate_stats_card
 
-from core.strategies import TestStrategy
+from .settings_menu import SettingsMenu, StrategySchema, ParamSpec
+
 
 LOCAL_TZ = ZoneInfo("Europe/Kyiv")
 PAGE_SIZE = 5
@@ -47,7 +49,31 @@ class TelegramBot:
         self._subscribe_to_events()
         logger.info("TelegramBot initialized")
 
-        self.test_strategy = TestStrategy(event_bus, {'default_symbol': 'BTCUSDT', 'default_price': 65000.0})
+        # --- Меню налаштувань стратегій (settings_menu.py) ---
+        # Авто-режим: список стратегій і тип кожного параметра (bool/число/текст)
+        # меню бере прямо з БД (StrategySettingsStore). Нічого декларувати тут
+        # не треба - достатньо, щоб десь у коді, де ви створюєте реальні
+        # стратегії, викликався strategy_settings_store.seed_defaults(...).
+        #
+        # Якщо для якогось параметра конкретної стратегії потрібен явний
+        # список варіантів (choice) замість вільного вводу - додайте оверрайд
+        # у self.strategy_schemas, наприклад:
+        #
+        #   self.strategy_schemas = {
+        #       "MyStrategy": StrategySchema(
+        #           title="Моя стратегія",
+        #           params=[
+        #               ParamSpec(key="mode", label="Режим", kind="choice",
+        #                         choices=["conservative", "aggressive"]),
+        #           ],
+        #       ),
+        #   }
+        #
+        # Решта параметрів цієї ж стратегії (не перелічені в params вручну)
+        # і всі інші стратегії однаково підхоплюються автоматично.
+        self.strategy_settings_store = StrategySettingsStore(self.db)
+        self.strategy_schemas: dict = {}  # ручні оверрайди за потреби, див. коментар вище
+        self.settings_menu = SettingsMenu(self.strategy_settings_store, self.strategy_schemas)
 
 
     def _subscribe_to_events(self) -> None:
@@ -71,7 +97,13 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("export_db", self._cmd_export_db))
         self.application.add_handler(CommandHandler("symbols", self._cmd_symbols))
         self.application.add_handler(CommandHandler("history", self._cmd_history))
-        self.application.add_handler(CommandHandler("test_signal", self._cmd_test_signal))
+
+        # ВАЖЛИВО: реєструємо меню налаштувань РАНІШЕ загального CallbackQueryHandler.
+        # PTB виконує лише перший хендлер у групі, чий check_update спрацював -
+        # якщо спочатку зареєструвати _handle_callback (він без pattern і ловить
+        # усе підряд), callback'и "sm:..." від меню налаштувань до нього просто
+        # не дійдуть.
+        self.settings_menu.register(self.application)
         self.application.add_handler(CallbackQueryHandler(self._handle_callback))
 
 
@@ -236,6 +268,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔄 Перемкнути торгівлю", callback_data="toggle_trading")],
             [InlineKeyboardButton("📋 Підписані символи", callback_data="symbols")],
             [InlineKeyboardButton("🛡️ Налаштування ризику", callback_data="risk_settings")],
+            [InlineKeyboardButton("🧪 Параметри стратегій", callback_data=self.settings_menu.root_callback())],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
         ]
 
@@ -507,10 +540,6 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to generate stats card: {e}", exc_info=True)
             return None
-
-    async def _cmd_test_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        signal = await self.test_strategy.trigger(symbol="INDEX-USDT", price=1000.0, side="LONG")
-        await update.message.reply_text(f"Тестовый сигнал отправлен:\n{signal}")
 
     async def _show_history_page(self, update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
         offset = page * PAGE_SIZE

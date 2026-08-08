@@ -6,7 +6,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from config import ConfigLoader
-from core.database import Database
+from core.database import Database, StrategySettingsStore
 from core.events import EventBus
 from core.exchange import BingXClient
 from core.exchange import SymbolSelector
@@ -135,7 +135,11 @@ async def main():
 
         await symbol_selector.start_refresh_loop(refresh_interval)
 
-    strategies = setup_strategies(event_bus, config, logger)
+    strategy_settings = StrategySettingsStore(db)
+    logger.info("[OK] Strategy Settings Store initialized")
+
+    # strategies = setup_strategies(event_bus, config, logger)
+    strategies = setup_strategies(event_bus, config, logger, strategy_settings)
 
     logger.info("=" * 60)
     logger.info("Ruflo Trading Bot is running")

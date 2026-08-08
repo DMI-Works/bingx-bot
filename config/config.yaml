@@ -7,40 +7,29 @@ exchange:
   api_secret: "${BINGX_API_SECRET}"
   testnet: true
 
-  # WebSocket Configuration
   websocket:
     enabled: true
     reconnect_interval: 5
     ping_interval: 20
     max_reconnect_attempts: 10
 
-  # REST Configuration (fallback)
   rest:
     timeout: 30
     max_retries: 3
     retry_delay: 1
 
-# Trading Configuration
+# Trading Configuration — тільки базові / глобальні налаштування.
+# Параметри конкретних стратегій (sma_period, stop_loss, take_profit,
+# rejection_block, position_size, leverage і т.д.) тепер зберігаються
+# в БД (таблиця strategy_settings) — див. core/strategies/defaults.py
+# для заводських значень і core/database/strategy_settings.py для API
+# читання/редагування/скидання.
 trading:
   enabled: true
   direction: "both"  # long, short, both
 
-  # Strategy-level params (used by SimpleMovingAverageStrategy)
-  sma_period: 20
-  threshold_percent: 1.0
-  confirmation_candles: 2
-  cooldown_seconds: 3
-
-  # Position Sizing
-  position_size:
-    mode: "fixed_usd"  # fixed_usd, percent_balance, fixed_risk
-    value: 100
-
-  # Leverage
-  default_leverage: 20
-  leverage_by_symbol: {}
-
-  # Risk Management
+  # Risk Management — акаунт-рівневий, застосовується до всіх стратегій
+  # одразу (не per-strategy), тому лишається тут
   risk:
     max_open_positions: 3
     max_positions_per_symbol: 1
@@ -48,46 +37,9 @@ trading:
     max_consecutive_losses: 3
     cooldown_after_trade_seconds: 60
 
-  # Stop Loss
-  stop_loss:
-    mode: "fixed_percent"  # fixed_percent, atr, structural, local_extremum
-    value: 2.0             # используется при mode: fixed_percent
-    atr:                   # используется при mode: atr
-      period: 0
-      multiplier: 1.5
-
-  # Take Profit
-  take_profit:
-    enabled: true
-    levels:                # используется при stop_loss.mode: fixed_percent
-      - percent: 3.0
-        close_percent: 100
-      # - percent: 5.0
-      #   close_percent: 50
-      # - percent: 10.0
-      #   close_percent: 25
-      # - percent: 20.0
-      #   close_percent: 100
-    atr:                   # используется при stop_loss.mode: atr
-      multipliers: [2.0, 3.5]
-      close_percents: [50, 50]
-
-  # RejectionBlockStrategy take profit settings
-  rejection_block:
-    timeframe_seconds: 60
-    wick_to_body_ratio: 2.0
-    min_wick_ratio: 0.6
-    opposite_wick_max_ratio: 0.3
-    overlap_tolerance_percent: 0.05
-    min_body_percent: 0.0
-    stop_loss_buffer_percent: 5
-    take_profit_percents: [5, 10] 
-    tp_close_percents: [50, 50]
-    cooldown_seconds: 60
-
-  # Filters
+  # Filters — відбір монет для торгівлі, не залежить від стратегії
   filters:
-    whitelist_symbols: [ "BSB-USDT","CLO-USDT", "VINE-USDT", "DEXE-USDT", "BEAT-USDT", "XPIN-USDT"]
+    whitelist_symbols: ["BSB-USDT", "CLO-USDT", "VINE-USDT", "DEXE-USDT", "BEAT-USDT", "XPIN-USDT"]
     blacklist_symbols: []
     max_symbols: 7
     min_price: {}
@@ -95,14 +47,15 @@ trading:
     min_volume_24h: 1000000
     max_spread_percent: 0.5
     min_atr: 0
+    refresh_interval_seconds: 3600
 
-  # Time Filters
   time_filters:
     enabled: false
     allowed_hours: []
     timezone: "UTC"
 
-# Strategy Configuration
+# Strategy Configuration — лише перелік, які стратегії запускати.
+# Їхні параметри — в БД.
 strategies:
   enabled: ['SimpleMovingAverageStrategy', 'RejectionBlockStrategy']
 
@@ -115,7 +68,7 @@ database:
 logging:
   level: "INFO"
   file: "logs/trading_bot.log"
-  max_bytes: 10485760  # 10MB
+  max_bytes: 10485760
   backup_count: 5
 
 # Telegram Configuration
@@ -124,7 +77,6 @@ telegram:
   bot_token: "${TELEGRAM_BOT_TOKEN}"
   chat_id: "${TELEGRAM_CHAT_ID}"
 
-  # Notifications
   notifications:
     position_opened: true
     position_closed: true
