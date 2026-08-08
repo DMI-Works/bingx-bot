@@ -376,6 +376,7 @@ class SimpleTrader:
                 'strategy': strategy,
                 'realized_pnl_accum': 0.0,
                 'commission_accum': 0.0,
+                'remaining_quantity': executed_qty,
             }
             self.open_positions[position_key] = position_data
 
@@ -721,137 +722,143 @@ class SimpleTrader:
         client_order_id = order_data.get('c')  # clientOrderId — те, що ми самі задали при створенні SL/TP
         status = order_data.get('X')
         order_type = order_data.get('o')
+        order_side = order_data.get('S')
         symbol = order_data.get('s')
         position_side = order_data.get('ps')
 
-        if status == 'FILLED' and order_type in ('STOP_MARKET', 'TAKE_PROFIT_MARKET', 'MARKET') and order_data.get('ro') == True:
-            position_key = f"{symbol}_{position_side}"
-            position = self.open_positions.get(position_key)
+        if status != 'FILLED' or order_type not in ('STOP_MARKET', 'TAKE_PROFIT_MARKET', 'MARKET'):
+            return
 
-            if not position:
-                logger.debug(f"No open position tracked for {symbol} {position_side}, skipping")
-                return
+        position_key = f"{symbol}_{position_side}"
+        position = self.open_positions.get(position_key)
 
-            known_bot_client_order_ids = set(position.get('tp_client_order_ids', []) or [])
-            if position.get('sl_client_order_id'):
-                known_bot_client_order_ids.add(position['sl_client_order_id'])
+        if not position:
+            logger.debug(f"No open position tracked for {symbol} {position_side}, skipping")
+            return
 
-            known_bot_order_ids = set(position.get('tp_order_ids', []) or [])
-            if position.get('sl_order_id'):
-                known_bot_order_ids.add(position['sl_order_id'])
+        expected_close_side = 'SELL' if position_side == 'LONG' else 'BUY'
+        if order_side != expected_close_side:
+            return
 
-            if client_order_id and client_order_id in known_bot_client_order_ids:
-                closed_by = 'bot'
-            elif exchange_order_id in known_bot_order_ids:
-                closed_by = 'bot'
-            else:
-                closed_by = 'user'
+        known_bot_client_order_ids = set(position.get('tp_client_order_ids', []) or [])
+        if position.get('sl_client_order_id'):
+            known_bot_client_order_ids.add(position['sl_client_order_id'])
 
-            trade_id = order_data.get('t')
+        known_bot_order_ids = set(position.get('tp_order_ids', []) or [])
+        if position.get('sl_order_id'):
+            known_bot_order_ids.add(position['sl_order_id'])
 
-            filled_qty = float(order_data.get('l', 0) or order_data.get('q', 0) or 0)
+        if client_order_id and client_order_id in known_bot_client_order_ids:
+            closed_by = 'bot'
+        elif exchange_order_id in known_bot_order_ids:
+            closed_by = 'bot'
+        else:
+            closed_by = 'user'
 
-            trade_realized_pnl = float(order_data.get('rp', 0) or 0)
-            commission = float(order_data.get('n', 0) or 0)
-            commission_asset = order_data.get('N')
+        trade_id = order_data.get('t')
 
-            # накопичуємо ID закриваючих угод — тільки ID, жодних цін/PnL
-            position.setdefault('closing_trade_ids', [])
-            if trade_id is not None:
-                position['closing_trade_ids'].append(trade_id)
-            position.setdefault('closing_orders', [])
-            position['closing_orders'].append({
-                'order_id': exchange_order_id,
-                'client_order_id': client_order_id,
-                'closed_by': closed_by
-            })
+        filled_qty = float(order_data.get('l', 0) or order_data.get('q', 0) or 0)
 
-            position['realized_pnl_accum'] = position.get('realized_pnl_accum', 0.0) + trade_realized_pnl
-            position['commission_accum'] = position.get('commission_accum', 0.0) + commission
-            if commission_asset:
-                position['commission_asset'] = commission_asset
+        trade_realized_pnl = float(order_data.get('rp', 0) or 0)
+        commission = float(order_data.get('n', 0) or 0)
+        commission_asset = order_data.get('N')
 
-            remaining_quantity = position.get('remaining_quantity')
-            if remaining_quantity is None:
-                remaining_quantity = position.get('quantity', 0)
-            remaining = remaining_quantity - filled_qty
-            position['remaining_quantity'] = max(0.0, remaining)
+        # накопичуємо ID закриваючих угод — тільки ID, жодних цін/PnL
+        position.setdefault('closing_trade_ids', [])
+        if trade_id is not None:
+            position['closing_trade_ids'].append(trade_id)
+        position.setdefault('closing_orders', [])
+        position['closing_orders'].append({
+            'order_id': exchange_order_id,
+            'client_order_id': client_order_id,
+            'closed_by': closed_by
+        })
 
-            logger.info(
-                f"Partial/full close fill: {symbol} {position_side}, order={exchange_order_id}, "
-                f"client_order_id={client_order_id}, trade_id={trade_id}, filled_qty={filled_qty}, "
-                f"trade_pnl={trade_realized_pnl}, commission={commission}, "
-                f"remaining={position['remaining_quantity']:.8f}, closed_by={closed_by}"
+        position['realized_pnl_accum'] = position.get('realized_pnl_accum', 0.0) + trade_realized_pnl
+        position['commission_accum'] = position.get('commission_accum', 0.0) + commission
+        if commission_asset:
+            position['commission_asset'] = commission_asset
+
+        remaining_quantity = position.get('remaining_quantity')
+        if remaining_quantity is None:
+            remaining_quantity = position.get('quantity', 0)
+        remaining = remaining_quantity - filled_qty
+        position['remaining_quantity'] = max(0.0, remaining)
+
+        logger.info(
+            f"Partial/full close fill: {symbol} {position_side}, order={exchange_order_id}, "
+            f"client_order_id={client_order_id}, trade_id={trade_id}, filled_qty={filled_qty}, "
+            f"trade_pnl={trade_realized_pnl}, commission={commission}, "
+            f"remaining={position['remaining_quantity']:.8f}, closed_by={closed_by}"
+        )
+
+        is_full_close = order_type == 'STOP_MARKET' or position['remaining_quantity'] <= 1e-8
+
+        try:
+            self.db.update_position_metadata(
+                order_id=position['order_id'],
+                metadata=json.dumps(position)
             )
+        except Exception as e:
+            logger.error(f"Failed to update position metadata (partial close) in DB: {e}", exc_info=True)
 
-            # SL завжди закриває решту повністю (STOP_MARKET без closePosition тут не має 'quantity' часткового рівня)
-            is_full_close = order_type == 'STOP_MARKET' or position['remaining_quantity'] <= 1e-8
+        if not is_full_close:
+            # позиція ще частково відкрита — НЕ видаляємо, НЕ закриваємо в БД
+            return
 
-            try:
-                self.db.update_position_metadata(
-                    order_id=position['order_id'],
-                    metadata=json.dumps(position)
-                )
-            except Exception as e:
-                logger.error(f"Failed to update position metadata (partial close) in DB: {e}", exc_info=True)
+        del self.open_positions[position_key]
 
-            if not is_full_close:
-                # позиція ще частково відкрита — НЕ видаляємо, НЕ закриваємо в БД
-                return
+        logger.info(f"Position fully closed: {symbol} {position_side}, closed_by={closed_by}")
 
-            del self.open_positions[position_key]
+        close_price = float(order_data.get('ap', 0) or 0)
+        realized_pnl = position.get('realized_pnl_accum', 0.0)
+        commission_total = position.get('commission_accum', 0.0)
+        net_pnl = realized_pnl - commission_total
+        margin_usdt = self._calc_margin_usdt(position)
+        try:
+            roe_percent = self._calc_roe_percent(position, realized_pnl)
+        except Exception as e:
+            logger.error(f"Failed to calc ROE% for {symbol} {position_side}: {e}", exc_info=True)
+            roe_percent = None
 
-            logger.info(f"Position fully closed: {symbol} {position_side}, closed_by={closed_by}")
+        try:
+            self.db.update_position_status(
+                order_id=position['order_id'],
+                status='CLOSED',
+                closed_at=datetime.utcnow(),
+                close_price=close_price,
+                realized_pnl=realized_pnl,
+                roe_percent=roe_percent,
+                commission_usdt=commission_total,
+                net_pnl=net_pnl,
+                margin_usdt=margin_usdt,
+            )
+        except Exception as e:
+            logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
 
-            close_price = float(order_data.get('ap', 0) or 0)
-            realized_pnl = position.get('realized_pnl_accum', 0.0)
-            commission_total = position.get('commission_accum', 0.0)
-            net_pnl = realized_pnl - commission_total
-            margin_usdt = self._calc_margin_usdt(position)
-            try:
-                roe_percent = self._calc_roe_percent(position, realized_pnl)
-            except Exception as e:
-                logger.error(f"Failed to calc ROE% for {symbol} {position_side}: {e}", exc_info=True)
-                roe_percent = None
+        strategy = position.get('strategy')
+        close_info_message = f"Стратегія: {strategy}" if strategy else None
 
-            try:
-                self.db.update_position_status(
-                    order_id=position['order_id'],
-                    status='CLOSED',
-                    closed_at=datetime.utcnow(),
-                    close_price=close_price,
-                    realized_pnl=realized_pnl,
-                    roe_percent=roe_percent,
-                    commission_usdt=commission_total,
-                    net_pnl=net_pnl,
-                    margin_usdt=margin_usdt,
-                )
-            except Exception as e:
-                logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
-
-            strategy = position.get('strategy')
-            close_info_message = f"Стратегія: {strategy}" if strategy else None
-
-            await self.event_bus.publish(Event(
-                type=EventType.POSITION_CLOSED,
-                data={
-                    'symbol': symbol,
-                    'side': position_side,
-                    'close_price': close_price,
-                    'realized_pnl': realized_pnl,
-                    'commission_usdt': commission_total,
-                    'net_pnl': net_pnl,
-                    'margin_usdt': margin_usdt,
-                    'roe_percent': roe_percent,
-                    'closed_by': closed_by,
-                    'order_id': position.get('order_id'),
-                    'entry_price': position.get('entry_price'),
-                    'quantity': position.get('quantity'),
-                    'leverage': position.get('leverage'),
-                    'strategy': strategy,
-                    'positions_info_message': close_info_message
-                }
-            ))
+        await self.event_bus.publish(Event(
+            type=EventType.POSITION_CLOSED,
+            data={
+                'symbol': symbol,
+                'side': position_side,
+                'close_price': close_price,
+                'realized_pnl': realized_pnl,
+                'commission_usdt': commission_total,
+                'net_pnl': net_pnl,
+                'margin_usdt': margin_usdt,
+                'roe_percent': roe_percent,
+                'closed_by': closed_by,
+                'order_id': position.get('order_id'),
+                'entry_price': position.get('entry_price'),
+                'quantity': position.get('quantity'),
+                'leverage': position.get('leverage'),
+                'strategy': strategy,
+                'positions_info_message': close_info_message
+            }
+        ))
 
     async def _handle_account_update(self, event: Event) -> None:
         """Ловить ручні дії на біржі, які не пройшли через ORDER_TRADE_UPDATE обробник (safety net)"""
@@ -995,7 +1002,6 @@ class SimpleTrader:
                 strategy = existing.get('strategy')
                 close_info_message = f"Стратегія: {strategy}" if strategy else None
 
-                # Публікуємо подію POSITION_CLOSED
                 await self.event_bus.publish(Event(
                     type=EventType.POSITION_CLOSED,
                     data={
