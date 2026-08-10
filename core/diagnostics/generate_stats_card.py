@@ -254,9 +254,11 @@ def generate_stats_card(
     losing_count: int,
     total_pnl: float,
     symbol_pnl: list,
+    strategy_stats: Optional[list] = None,
     account_label: Optional[str] = None,
     generated_at: Optional[datetime] = None,
     max_symbols: int = 8,
+    max_strategies: int = 8,
     output_path: Optional[str] = None,
 ) -> io.BytesIO:
     """
@@ -271,6 +273,17 @@ def generate_stats_card(
     if rest:
         rest_sum = sum(v for _, v in rest)
         shown_rows = shown_rows + [(f"Інші ({len(rest)})", rest_sum)]
+
+    # --- підготовка даних по стратегіях (визначає додаткову висоту картки) ---
+    shown_strats: list = []
+    if strategy_stats:
+        strat_rows = sorted(strategy_stats, key=lambda s: (s[1] + s[2]), reverse=True)
+        shown_strats = strat_rows[:max_strategies]
+        strat_rest = strat_rows[max_strategies:]
+        if strat_rest:
+            rest_win = sum(s[1] for s in strat_rest)
+            rest_loss = sum(s[2] for s in strat_rest)
+            shown_strats = shown_strats + [(f"Інші ({len(strat_rest)})", rest_win, rest_loss)]
 
     pad = 40
 
@@ -287,10 +300,17 @@ def generate_stats_card(
     LIST_LABEL_ADV = 24 + 14
     ROW_H = 46
     END_GAP = 24 + 1 + 24   # gap + divider + gap
+    STRAT_ROW_H = 44
+    STRAT_END_GAP = 24 + 1 + 24  # gap + divider + gap, only counted when section is shown
     FOOTER_ADV = 20
     BOTTOM_PAD = 32
 
     row_count = max(1, len(shown_rows))
+
+    strat_block_h = 0
+    if shown_strats:
+        strat_block_h = LIST_LABEL_ADV + len(shown_strats) * STRAT_ROW_H + STRAT_END_GAP
+
     card_h = (
         TOP
         + TITLE_ADV
@@ -303,6 +323,7 @@ def generate_stats_card(
         + LIST_LABEL_ADV
         + row_count * ROW_H
         + END_GAP
+        + strat_block_h
         + FOOTER_ADV
         + BOTTOM_PAD
     )
@@ -400,6 +421,49 @@ def generate_stats_card(
     y += 24
     draw.line([(pad, y), (CARD_W - pad, y)], fill=DIVIDER, width=1)
     y += 24
+
+    # --- Win/Loss по стратегіях (опційна секція) ---
+    if shown_strats:
+        f_strat_title = _font(500, 20)
+        draw.text((pad, y), "Win/Loss по стратегіях", font=f_strat_title, fill=TEXT_MUTED)
+        y += LIST_LABEL_ADV
+
+        name_w = 260
+        value_col_w = 110  # місце під "12W / 4L" праворуч
+        f_strat_name = _font(600, 19)
+        f_strat_val = _font(700, 18)
+
+        for strat_name, win, loss in shown_strats:
+            total = win + loss
+            win_ratio = (win / total) if total else 0.0
+
+            text_y = y + STRAT_ROW_H / 2 - 11
+            draw.text((pad, text_y), strat_name, font=f_strat_name, fill=TEXT_WHITE)
+
+            bar_x0 = pad + name_w
+            bar_max_w = CARD_W - pad - value_col_w - bar_x0
+            bar_h = 18
+            bar_y = y + STRAT_ROW_H / 2 - bar_h / 2
+
+            # трек (програшна частина, червоний фон) + зелений сегмент (виграшна частина) поверх
+            draw.rounded_rectangle(
+                [bar_x0, bar_y, bar_x0 + bar_max_w, bar_y + bar_h], radius=6, fill=RED
+            )
+            win_w = max(0, bar_max_w * win_ratio)
+            if win_w > 0:
+                draw.rounded_rectangle(
+                    [bar_x0, bar_y, bar_x0 + win_w, bar_y + bar_h], radius=6, fill=GREEN
+                )
+
+            val_text = f"{win}W / {loss}L"
+            vw = draw.textlength(val_text, font=f_strat_val)
+            draw.text((CARD_W - pad - vw, text_y), val_text, font=f_strat_val, fill=TEXT_MUTED)
+
+            y += STRAT_ROW_H
+
+        y += 24
+        draw.line([(pad, y), (CARD_W - pad, y)], fill=DIVIDER, width=1)
+        y += 24
 
     f_date = _font(400, 16)
     footer_text = ts.strftime("%d.%m.%Y %H:%M")

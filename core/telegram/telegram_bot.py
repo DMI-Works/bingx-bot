@@ -55,7 +55,7 @@ class TelegramBot:
             raise ValueError("TelegramBot requires strategy_settings (StrategySettingsStore) to be passed in")
 
         self.strategy_settings_store = strategy_settings
-        self.strategy_schemas: dict = {}
+        self.strategy_schemas: dict = {}  
         self.settings_menu = SettingsMenu(
             self.strategy_settings_store,
             self.strategy_schemas,
@@ -484,7 +484,8 @@ class TelegramBot:
         await self._show_history_page(update, context, page=0)
 
     def _build_stats_card(self):
-        """Агрегує всі закриті угоди в картку статистики (PnL по монетах, +/-, разом)."""
+        """Агрегує всі закриті угоди в картку статистики (PnL по монетах, +/-, разом,
+        та Win/Loss по стратегіях, витягнутих з metadata['strategy'])."""
         try:
             all_closed = self.db.get_all_closed_positions()
         except Exception as e:
@@ -496,6 +497,7 @@ class TelegramBot:
         losing_count = 0
         total_pnl = 0.0
         symbol_pnl: dict = {}
+        strategy_counts: dict = {}  # strategy_name -> [win, loss]
 
         for row in all_closed:
             net = row['net_pnl'] if 'net_pnl' in row.keys() and row['net_pnl'] is not None else float(row['realized_pnl'] or 0.0)
@@ -506,13 +508,26 @@ class TelegramBot:
             total_pnl += pnl
             symbol_pnl[symbol] = symbol_pnl.get(symbol, 0.0) + pnl
 
-            if pnl >= 0:
+            is_win = pnl >= 0
+            if is_win:
                 profitable_count += 1
             else:
                 losing_count += 1
 
+            # --- ім'я стратегії з metadata['strategy'] (записується при відкритті позиції) ---
+            try:
+                meta = json.loads(row['metadata']) if row['metadata'] else {}
+            except (TypeError, ValueError):
+                meta = {}
+            strategy_name = meta.get('strategy') or "Невідомо"
+
+            counts = strategy_counts.setdefault(strategy_name, [0, 0])
+            counts[0 if is_win else 1] += 1
+
         if total_trades == 0:
             return None
+
+        strategy_stats = [(name, win, loss) for name, (win, loss) in strategy_counts.items()]
 
         try:
             return generate_stats_card(
@@ -521,6 +536,7 @@ class TelegramBot:
                 losing_count=losing_count,
                 total_pnl=total_pnl,
                 symbol_pnl=list(symbol_pnl.items()),
+                strategy_stats=strategy_stats,
                 generated_at=datetime.now(LOCAL_TZ),
             )
         except Exception as e:
