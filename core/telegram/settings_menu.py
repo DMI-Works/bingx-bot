@@ -5,7 +5,9 @@
   - сторінки зі списком кнопок (навігація вглиб/назад, пагінація);
   - toggle/checkbox параметри (bool);
   - вибір значення зі списку варіантів (choice/enum);
-  - введення довільного числа/тексту через наступне повідомлення користувача.
+  - введення довільного числа/тексту через наступне повідомлення користувача;
+  - вмикання/вимикання стратегії цілком (окремий прапорець enabled,
+    не пов'язаний з jsonparams).
 
 Є два режими:
 
@@ -20,6 +22,20 @@
      варіантів (choice) чи людська назва замість технічного ключа, можна
      передати StrategySchema саме для цієї стратегії; решта стратегій без
      оверрайду однаково працюватимуть в авто-режимі.
+
+ВАЖЛИВО ПРО МИТТЄВЕ ЗАСТОСУВАННЯ:
+  Сам по собі SettingsMenu лише читає/пише StrategySettingsStore (тобто
+  БД). Якщо живі інстанси стратегій створюються один раз при старті бота
+  і більше ніхто їх не оновлює, то зміни з меню (тумблер enabled, зміна
+  параметра, reset) набудуть сили лише після рестарту бота.
+
+  Щоб зміни діяли одразу, передайте в конструктор strategy_manager
+  (StrategyManager з strategies/manager.py) — SettingsMenu буде викликати
+  його set_enabled()/apply_params() одразу після запису в БД, і він
+  синхронізує live-об'єкти стратегій без рестарту. Якщо strategy_manager
+  не передано, SettingsMenu продовжує працювати як раніше (зміни лише в
+  БД, застосовуються після рестарту) — це збережено для зворотної
+  сумісності.
 """
 
 from __future__ import annotations
@@ -115,7 +131,7 @@ class SettingsMenu:
 
     Базове використання (авто-режим, без ручного опису схем):
 
-        settings_menu = SettingsMenu(strategy_settings_store)
+        settings_menu = SettingsMenu(strategy_settings_store, strategy_manager=strategy_manager)
         settings_menu.register(application)
 
         # кнопка входу в меню — де завгодно у вашому боті:
@@ -138,12 +154,24 @@ class SettingsMenu:
                 ],
             ),
         }
-        settings_menu = SettingsMenu(strategy_settings_store, schemas)
+        settings_menu = SettingsMenu(strategy_settings_store, schemas, strategy_manager=strategy_manager)
+
+    Параметр strategy_manager — опційний. Якщо передано (StrategyManager із
+    strategies/manager.py), усі зміни (тумблер стратегії, тумблер/значення
+    параметра, reset до заводських) одразу застосовуються до live-інстансів
+    стратегій, без рестарту бота. Якщо не передано — поведінка як раніше:
+    зміни пишуться лише в БД і застосовуються при наступному старті.
     """
 
-    def __init__(self, store: "StrategySettingsStore", schemas: Optional[Dict[str, StrategySchema]] = None):
+    def __init__(
+        self,
+        store: "StrategySettingsStore",
+        schemas: Optional[Dict[str, StrategySchema]] = None,
+        strategy_manager: Optional["StrategyManager"] = None,
+    ):
         self.store = store
         self.schemas = schemas or {}
+        self.strategy_manager = strategy_manager
         # chat_id -> (strategy_name, param_key, message_id меню, яке треба оновити після вводу)
         self._awaiting: Dict[int, Tuple[str, str, int]] = {}
 
@@ -197,6 +225,19 @@ class SettingsMenu:
             text, kb = self._render_strategy(strategy, page)
             await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
+        elif action == "tglstrat":
+            # тумблер "стратегія увімкнена/вимкнена" цілком (не параметр,
+            # окремий прапорець enabled у БД)
+            strategy = parts[2]
+            new_state = not self.store.is_enabled(strategy)
+            if self.strategy_manager:
+                # оновлює і БД, і live-інстанс одразу (без рестарту бота)
+                self.strategy_manager.set_enabled(strategy, new_state)
+            else:
+                self.store.set_enabled(strategy, new_state)
+            text, kb = self._render_strategy(strategy, 0)
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
         elif action == "tgl":
             strategy, key = parts[2], parts[3]
             self._toggle_bool(strategy, key)
@@ -222,7 +263,9 @@ class SettingsMenu:
 
         elif action == "reset":
             strategy = parts[2]
-            self.store.reset_to_default(strategy)
+            reset_params = self.store.reset_to_default(strategy)
+            if self.strategy_manager:
+                self.strategy_manager.apply_params(strategy, reset_params)
             text, kb = self._render_strategy(strategy, 0)
             await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
@@ -237,6 +280,7 @@ class SettingsMenu:
     def _render_root(self, page: int) -> Tuple[str, InlineKeyboardMarkup]:
         strategies = self.store.list_strategies()  # реальні стратегії, що вже засіяні через seed_defaults()
         names = [s["strategy_name"] for s in strategies]
+        enabled_map = {s["strategy_name"]: s["enabled"] for s in strategies}
 
         if not names:
             text = (
@@ -252,20 +296,30 @@ class SettingsMenu:
         rows = []
         for n in page_items:
             title = self.schemas[n].title if n in self.schemas else n
+            status_mark = "🟢" if enabled_map.get(n) else "🔴"
             modified_mark = " ✏️" if self.store.is_modified(n) else ""
-            rows.append([InlineKeyboardButton(f"⚙️ {title}{modified_mark}", callback_data=_cb(CB_PREFIX, "strat", n, 0))])
+            rows.append([InlineKeyboardButton(
+                f"{status_mark} {title}{modified_mark}",
+                callback_data=_cb(CB_PREFIX, "strat", n, 0)
+            )])
         rows.append(self._pagination_row(("root",), page, total_pages))
 
-        text = "<b>⚙️ Налаштування стратегій</b>\nОберіть стратегію:"
+        text = "<b>⚙️ Налаштування стратегій</b>\n🟢 — увімкнена, 🔴 — вимкнена\nОберіть стратегію:"
         return text, InlineKeyboardMarkup(rows)
 
     def _render_strategy(self, strategy: str, page: int) -> Tuple[str, InlineKeyboardMarkup]:
         schema = self._get_schema(strategy)
         current = self.store.get_params(strategy) or {}
+        is_enabled = self.store.is_enabled(strategy)
 
         page_items, total_pages, page = self._paginate(schema.params, page, size=ROWS_PER_PAGE)
 
         rows: List[List[InlineKeyboardButton]] = []
+
+        toggle_label = "🟢 Стратегія увімкнена (натисніть, щоб вимкнути)" if is_enabled \
+            else "🔴 Стратегія вимкнена (натисніть, щоб увімкнути)"
+        rows.append([InlineKeyboardButton(toggle_label, callback_data=_cb(CB_PREFIX, "tglstrat", strategy))])
+
         for spec in page_items:
             value = current.get(spec.key)
             if spec.kind == "bool":
@@ -289,8 +343,9 @@ class SettingsMenu:
         rows.append([InlineKeyboardButton("🔄 Скинути до заводських", callback_data=_cb(CB_PREFIX, "reset", strategy))])
         rows.append([InlineKeyboardButton("⬅️ До списку стратегій", callback_data=_cb(CB_PREFIX, "root", 0))])
 
+        status_mark = "🟢" if is_enabled else "🔴"
         modified_mark = " ✏️" if self.store.is_modified(strategy) else ""
-        text = f"<b>⚙️ {schema.title}{modified_mark}</b>\nСторінка {page + 1}/{total_pages}"
+        text = f"<b>⚙️ {status_mark} {schema.title}{modified_mark}</b>\nСторінка {page + 1}/{total_pages}"
         return text, InlineKeyboardMarkup(rows)
 
     def _render_choice(self, strategy: str, key: str) -> Tuple[str, InlineKeyboardMarkup]:
@@ -336,11 +391,15 @@ class SettingsMenu:
         current = self.store.get_params(strategy) or {}
         current[key] = not bool(current.get(key))
         self.store.update_params(strategy, current)
+        if self.strategy_manager:
+            self.strategy_manager.apply_params(strategy, current)
 
     def _set_param(self, strategy: str, key: str, value: Any) -> None:
         current = self.store.get_params(strategy) or {}
         current[key] = value
         self.store.update_params(strategy, current)
+        if self.strategy_manager:
+            self.strategy_manager.apply_params(strategy, current)
 
     async def _prompt_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, strategy: str, key: str) -> None:
         query = update.callback_query

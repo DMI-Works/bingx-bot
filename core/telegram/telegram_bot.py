@@ -29,11 +29,12 @@ class TelegramBot:
         token: str,
         chat_id: str,
         event_bus: EventBus,
-        db, 
+        db,
         settings_manager: SettingsManager,
         exchange_client=None,
-        symbol_selector=None   
-
+        symbol_selector=None,
+        strategy_settings: StrategySettingsStore = None,
+        strategy_manager=None,
     ):
         self.token = token
         self.chat_id = chat_id
@@ -42,6 +43,7 @@ class TelegramBot:
         self.settings_manager = settings_manager
         self.exchange_client = exchange_client
         self.symbol_selector = symbol_selector
+        self.strategy_manager = strategy_manager
 
         self.application: Optional[Application] = None
         self.notifications_enabled = True
@@ -49,32 +51,16 @@ class TelegramBot:
         self._subscribe_to_events()
         logger.info("TelegramBot initialized")
 
-        # --- Меню налаштувань стратегій (settings_menu.py) ---
-        # Авто-режим: список стратегій і тип кожного параметра (bool/число/текст)
-        # меню бере прямо з БД (StrategySettingsStore). Нічого декларувати тут
-        # не треба - достатньо, щоб десь у коді, де ви створюєте реальні
-        # стратегії, викликався strategy_settings_store.seed_defaults(...).
-        #
-        # Якщо для якогось параметра конкретної стратегії потрібен явний
-        # список варіантів (choice) замість вільного вводу - додайте оверрайд
-        # у self.strategy_schemas, наприклад:
-        #
-        #   self.strategy_schemas = {
-        #       "MyStrategy": StrategySchema(
-        #           title="Моя стратегія",
-        #           params=[
-        #               ParamSpec(key="mode", label="Режим", kind="choice",
-        #                         choices=["conservative", "aggressive"]),
-        #           ],
-        #       ),
-        #   }
-        #
-        # Решта параметрів цієї ж стратегії (не перелічені в params вручну)
-        # і всі інші стратегії однаково підхоплюються автоматично.
-        self.strategy_settings_store = StrategySettingsStore(self.db)
-        self.strategy_schemas: dict = {}  # ручні оверрайди за потреби, див. коментар вище
-        self.settings_menu = SettingsMenu(self.strategy_settings_store, self.strategy_schemas)
+        if strategy_settings is None:
+            raise ValueError("TelegramBot requires strategy_settings (StrategySettingsStore) to be passed in")
 
+        self.strategy_settings_store = strategy_settings
+        self.strategy_schemas: dict = {}
+        self.settings_menu = SettingsMenu(
+            self.strategy_settings_store,
+            self.strategy_schemas,
+            strategy_manager=self.strategy_manager,
+        )
 
     def _subscribe_to_events(self) -> None:
         self.event_bus.subscribe(EventType.POSITION_OPENED, self._on_position_opened)

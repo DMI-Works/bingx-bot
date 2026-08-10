@@ -46,3 +46,17 @@ class BaseStrategy(ABC):
 
     def is_enabled(self) -> bool:
         return self.enabled
+
+    def update_config(self, new_config: dict) -> None:
+        """
+        Викликається StrategyManager, коли параметри стратегії змінюються
+        в рантаймі через Telegram-меню (без рестарту бота).
+
+        За замовчуванням просто підміняє self.config цілком. Якщо конкретна
+        стратегія кешує окремі параметри в атрибутах (наприклад
+        self.period = config['period'] в __init__), ПЕРЕВИЗНАЧТЕ цей метод
+        у підкласі, щоб оновити ці атрибути теж — інакше зміна параметра
+        через меню не подіє, поки config читається лише опосередковано
+        через self.config всередині analyze().
+        """
+        self.config = new_config

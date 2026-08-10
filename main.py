@@ -13,7 +13,7 @@ from core.exchange import SymbolSelector
 from core.state import SettingsManager
 from core.risk import RiskManager
 from core.trading import SimpleTrader
-from core.strategies import setup_strategies
+from core.strategies import StrategyManager
 from core.telegram import TelegramBot
 
 
@@ -102,6 +102,17 @@ async def main():
     symbol_selector = SymbolSelector(exchange, filters_config)
     logger.info("[OK] Symbol Selector initialized")
 
+    # --- Strategy settings + live strategy manager створюються ДО
+    # TelegramBot, бо SettingsMenu всередині нього має отримати вже готовий
+    # strategy_manager (щоб тумблер enabled/зміна параметра/reset у меню
+    # застосовувались одразу, без рестарту бота) ---
+    strategy_settings = StrategySettingsStore(db)
+    logger.info("[OK] Strategy Settings Store initialized")
+
+    strategy_manager = StrategyManager(event_bus, config, logger, strategy_settings)
+    strategies = strategy_manager.setup()
+    logger.info(f"[OK] Strategy Manager initialized ({len(strategies)} strategies)")
+
     telegram_enabled = config.get('telegram.enabled', False)
     telegram_bot = None
 
@@ -117,7 +128,9 @@ async def main():
                 db=db,
                 settings_manager=settings_manager,
                 exchange_client=exchange,
-                symbol_selector=symbol_selector
+                symbol_selector=symbol_selector,
+                strategy_settings=strategy_settings,
+                strategy_manager=strategy_manager,
             )
             await telegram_bot.start()
             logger.info("[OK] Telegram Bot started")
@@ -134,11 +147,6 @@ async def main():
         logger.info(f"[OK] Initial symbol selection: {sorted(selected_symbols)}")
 
         await symbol_selector.start_refresh_loop(refresh_interval)
-
-    strategy_settings = StrategySettingsStore(db)
-    logger.info("[OK] Strategy Settings Store initialized")
-
-    strategies = setup_strategies(event_bus, config, logger, strategy_settings)
 
     logger.info("=" * 60)
     logger.info("Ruflo Trading Bot is running")

@@ -56,8 +56,8 @@ trading:
 
 # Strategy Configuration — лише перелік, які стратегії запускати.
 # Їхні параметри — в БД.
-strategies:
-  enabled: ['SimpleMovingAverageStrategy', 'RejectionBlockStrategy']
+# strategies:
+#   enabled: ['SimpleMovingAverageStrategy', 'RejectionBlockStrategy']
 
 # Database Configuration
 database:

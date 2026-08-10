@@ -23,6 +23,10 @@ class StrategySettingsStore:
       - is_default=0 — поточні активні параметри, які реально
         використовує стратегія. Саме їх редагує користувач.
 
+    Колонка enabled зберігається лише на активному рядку (is_default=0) —
+    це прапорець "чи запускати цю стратегію взагалі", окремий від самих
+    параметрів. Вмикається/вимикається через Telegram-меню.
+
     user_id поки що завжди DEFAULT_USER_ID ("default") — колонка додана
     заздалегідь, щоб у майбутньому додати per-user редагування без міграції
     схеми.
@@ -40,11 +44,23 @@ class StrategySettingsStore:
                 strategy_name TEXT NOT NULL,
                 params TEXT NOT NULL,
                 is_default INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TIMESTAMP NOT NULL,
                 updated_at TIMESTAMP NOT NULL,
                 UNIQUE(user_id, strategy_name, is_default)
             )
         """)
+
+        # для баз, створених до появи enabled — додаємо колонку окремо.
+        # SQLite впаде на повторному ALTER, якщо колонка вже є — це нормально.
+        try:
+            self.db.execute(
+                "ALTER TABLE strategy_settings ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+            )
+            logger.info("strategy_settings: додано колонку enabled (міграція)")
+        except Exception:
+            pass
+
         logger.info("strategy_settings table created/verified")
 
     # --- внутрішнє ---
@@ -62,6 +78,7 @@ class StrategySettingsStore:
         self,
         strategy_name: str,
         default_params: Dict[str, Any],
+        enabled: bool = True,
         user_id: str = DEFAULT_USER_ID
     ) -> None:
         """
@@ -70,6 +87,12 @@ class StrategySettingsStore:
         є в БД — НЕ перезаписує його (щоб рестарт бота не затирав історію,
         якщо заводські параметри в коді хтось випадково змінив). Якщо
         активного рядка ще немає — ініціалізує його копією дефолтних.
+
+        enabled застосовується лише при ПЕРШОМУ створенні активного рядка
+        (наприклад, зі списку trading.strategies.enabled у yaml — для
+        зворотної сумісності при міграції). Далі станом enabled керує
+        виключно set_enabled() через Telegram-меню, seed_defaults() його
+        більше не чіпає.
         """
         now = datetime.utcnow()
         params_json = json.dumps(default_params)
@@ -77,8 +100,8 @@ class StrategySettingsStore:
         existing_default = self._get_row(strategy_name, is_default=True, user_id=user_id)
         if not existing_default:
             self.db.execute("""
-                INSERT INTO strategy_settings (user_id, strategy_name, params, is_default, created_at, updated_at)
-                VALUES (?, ?, ?, 1, ?, ?)
+                INSERT INTO strategy_settings (user_id, strategy_name, params, is_default, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, 1, 1, ?, ?)
             """, (user_id, strategy_name, params_json, now, now))
             logger.info(f"Seeded default params for strategy '{strategy_name}' (user={user_id})")
         else:
@@ -87,10 +110,13 @@ class StrategySettingsStore:
         existing_active = self._get_row(strategy_name, is_default=False, user_id=user_id)
         if not existing_active:
             self.db.execute("""
-                INSERT INTO strategy_settings (user_id, strategy_name, params, is_default, created_at, updated_at)
-                VALUES (?, ?, ?, 0, ?, ?)
-            """, (user_id, strategy_name, params_json, now, now))
-            logger.info(f"Initialized active params for strategy '{strategy_name}' (user={user_id}) from defaults")
+                INSERT INTO strategy_settings (user_id, strategy_name, params, is_default, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, 0, ?, ?, ?)
+            """, (user_id, strategy_name, params_json, int(enabled), now, now))
+            logger.info(
+                f"Initialized active params for strategy '{strategy_name}' "
+                f"(user={user_id}) from defaults, enabled={enabled}"
+            )
 
     def get_params(self, strategy_name: str, user_id: str = DEFAULT_USER_ID) -> Optional[Dict[str, Any]]:
         """Повертає поточні активні параметри стратегії. None, якщо стратегія ще не засіяна seed_defaults()."""
@@ -115,7 +141,7 @@ class StrategySettingsStore:
         """
         Оновлює активні параметри стратегії. Заводські (is_default=1)
         параметри не чіпає — тому reset_to_default() і далі працюватиме
-        коректно.
+        коректно. enabled теж не чіпає — це окремий прапорець.
         """
         existing = self._get_row(strategy_name, is_default=False, user_id=user_id)
         if not existing:
@@ -135,7 +161,7 @@ class StrategySettingsStore:
         return params
 
     def reset_to_default(self, strategy_name: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
-        """Копіює заводські параметри поверх активних. Повертає параметри, до яких відкотились."""
+        """Копіює заводські параметри поверх активних. enabled не чіпає. Повертає параметри, до яких відкотились."""
         default_row = self._get_row(strategy_name, is_default=True, user_id=user_id)
         if not default_row:
             raise ValueError(f"No default settings found for strategy '{strategy_name}' (user={user_id})")
@@ -150,16 +176,43 @@ class StrategySettingsStore:
         logger.info(f"Strategy '{strategy_name}' (user={user_id}) reset to default params")
         return json.loads(default_row['params'])
 
+    def is_enabled(self, strategy_name: str, user_id: str = DEFAULT_USER_ID) -> bool:
+        """Чи увімкнена стратегія (запускається при setup_strategies)."""
+        row = self._get_row(strategy_name, is_default=False, user_id=user_id)
+        if not row:
+            return False
+        return bool(row['enabled'])
+
+    def set_enabled(self, strategy_name: str, enabled: bool, user_id: str = DEFAULT_USER_ID) -> None:
+        """Вмикає/вимикає стратегію (тумблер у Telegram-меню)."""
+        existing = self._get_row(strategy_name, is_default=False, user_id=user_id)
+        if not existing:
+            raise ValueError(
+                f"No active settings for strategy '{strategy_name}' (user={user_id}) — "
+                f"call seed_defaults() first"
+            )
+
+        now = datetime.utcnow()
+        self.db.execute("""
+            UPDATE strategy_settings
+            SET enabled = ?, updated_at = ?
+            WHERE user_id = ? AND strategy_name = ? AND is_default = 0
+        """, (int(enabled), now, user_id, strategy_name))
+
+        logger.info(f"Strategy '{strategy_name}' (user={user_id}) enabled={enabled}")
+
     def list_strategies(self, user_id: str = DEFAULT_USER_ID) -> List[Dict[str, Any]]:
         """Повертає всі активні налаштування стратегій для юзера (для UI/Telegram-меню)."""
         rows = self.db.fetch_all(
-            "SELECT strategy_name, params, updated_at FROM strategy_settings WHERE user_id = ? AND is_default = 0 ORDER BY strategy_name",
+            "SELECT strategy_name, params, enabled, updated_at FROM strategy_settings "
+            "WHERE user_id = ? AND is_default = 0 ORDER BY strategy_name",
             (user_id,)
         )
         return [
             {
                 'strategy_name': row['strategy_name'],
                 'params': json.loads(row['params']),
+                'enabled': bool(row['enabled']),
                 'updated_at': row['updated_at'],
             }
             for row in rows

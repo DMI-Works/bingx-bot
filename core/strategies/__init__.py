@@ -1,8 +1,8 @@
 from .base_strategy import BaseStrategy
 from .simple_sma_strategy import SimpleMovingAverageStrategy
 from .rejection_block_strategy import RejectionBlockStrategy
-from .strategies_setup import setup_strategies
+from .strategies_setup import StrategyManager
 
-from .test_strategy import TestStrategy
+# from .test_strategy import TestStrategy
 
-__all__ = ['BaseStrategy', 'SimpleMovingAverageStrategy', 'RejectionBlockStrategy', 'TestStrategy', 'setup_strategies']
+__all__ = ['BaseStrategy', 'SimpleMovingAverageStrategy', 'RejectionBlockStrategy', 'StrategyManager', 'StrategyManager']
