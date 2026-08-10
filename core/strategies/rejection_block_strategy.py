@@ -79,20 +79,18 @@ class RejectionBlockStrategy(BaseStrategy):
         self.position_size = config.get('position_size', 100)
         self.leverage = config.get('leverage', 10)
 
-        # Значения из конфига — это ROE% (как на бирже), конвертируем в % цены
-        stop_loss_roe_percent = config.get('stop_loss_buffer_percent', 0.2)
-        take_profit_roe_percents = config.get('take_profit_percents', [2.0, 3.0])
+        # SL и TP задаются в конфиге как ROI% (как показывает биржа),
+        # цена стопа/тейка вычисляется делением на плечо
+        sl_roi_percent = config.get('stop_loss_buffer_percent', 5.0)
+        tp_roi_percent = config.get('take_profit_percent', 10.0)
 
-        self.stop_loss_buffer_percent = stop_loss_roe_percent / self.leverage
-        self.take_profit_percents = [p / self.leverage for p in take_profit_roe_percents]
-
-        self.tp_close_percents = config.get('tp_close_percents', [50, 50])
+        self.stop_loss_buffer_percent = sl_roi_percent / self.leverage
+        self.take_profit_percent = tp_roi_percent / self.leverage
 
         logger.info(
             f"RejectionBlockStrategy risk config: leverage={self.leverage}x, "
-            f"SL={stop_loss_roe_percent}% ROE -> {self.stop_loss_buffer_percent:.8f}% price, "
-            f"TP={take_profit_roe_percents}% ROE -> "
-            f"{[round(p, 8) for p in self.take_profit_percents]}% price"
+            f"SL={sl_roi_percent}% ROI -> {self.stop_loss_buffer_percent:.8f}% price, "
+            f"TP={tp_roi_percent}% ROI -> {self.take_profit_percent:.8f}% price"
         )
 
         # --- кулдаун ---
@@ -114,9 +112,8 @@ class RejectionBlockStrategy(BaseStrategy):
             'overlap_tolerance_percent': app_config.get('trading.rejection_block.overlap_tolerance_percent', 0.05),
             'min_body_percent': app_config.get('trading.rejection_block.min_body_percent', 0.0),
 
-            'stop_loss_buffer_percent': app_config.get('trading.rejection_block.stop_loss_buffer_percent', 0.2),
-            'take_profit_percents': app_config.get('trading.rejection_block.take_profit_percents', [2.0, 3.0]),
-            'tp_close_percents': app_config.get('trading.rejection_block.tp_close_percents', [50, 50]),
+            'stop_loss_buffer_percent': app_config.get('trading.rejection_block.stop_loss_buffer_percent', 5.0),
+            'take_profit_percent': app_config.get('trading.rejection_block.take_profit_percent', 10.0),
 
             'cooldown_seconds': app_config.get(
                 'trading.rejection_block.cooldown_seconds',
@@ -234,28 +231,24 @@ class RejectionBlockStrategy(BaseStrategy):
 
         if is_long:
             stop_loss_price = price * (1 - self.stop_loss_buffer_percent / 100)
+            take_profit_price = price * (1 + self.take_profit_percent / 100)
         else:
             stop_loss_price = price * (1 + self.stop_loss_buffer_percent / 100)
+            take_profit_price = price * (1 - self.take_profit_percent / 100)
 
         take_profit_levels = [
-            {
-                'price': (
-                    price * (1 + pct / 100) if is_long
-                    else price * (1 - pct / 100)
-                ),
-                'close_percent': self.tp_close_percents[i] if i < len(self.tp_close_percents) else 100
-            }
-            for i, pct in enumerate(self.take_profit_percents)
+            {'price': take_profit_price, 'close_percent': 100}
         ]
 
-        sl_roe_percent = self.stop_loss_buffer_percent * self.leverage
-        tp_roe_percents = [round(pct * self.leverage, 8) for pct in self.take_profit_percents]
+        sl_roi_percent = round(self.stop_loss_buffer_percent * self.leverage, 8)
+        tp_roi_percent = round(self.take_profit_percent * self.leverage, 8)
 
         logger.info(
             f"[{symbol}] BUILD SIGNAL: side={side}, entry={price:.6f}, "
             f"stop_loss={stop_loss_price:.6f} "
-            f"({self.stop_loss_buffer_percent:.8f}% price = {sl_roe_percent:.2f}% ROE), "
-            f"take_profit_levels={take_profit_levels} (ROE%={tp_roe_percents})"
+            f"({self.stop_loss_buffer_percent:.8f}% price = {sl_roi_percent}% ROI), "
+            f"take_profit={take_profit_price:.6f} "
+            f"({self.take_profit_percent:.8f}% price = {tp_roi_percent}% ROI)"
         )
 
         strategy_name = getattr(self, 'name', self.__class__.__name__)

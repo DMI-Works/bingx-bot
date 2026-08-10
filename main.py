@@ -138,7 +138,6 @@ async def main():
     strategy_settings = StrategySettingsStore(db)
     logger.info("[OK] Strategy Settings Store initialized")
 
-    # strategies = setup_strategies(event_bus, config, logger)
     strategies = setup_strategies(event_bus, config, logger, strategy_settings)
 
     logger.info("=" * 60)
