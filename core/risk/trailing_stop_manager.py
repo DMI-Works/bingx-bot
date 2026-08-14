@@ -2,13 +2,15 @@
 Керування SL у рантаймі: перенесення стопу в беззбиток + трейлінг за ціною,
 щоб зменшувати кількість збиткових угод, які не встигають дійти до тейку.
 
-Логіка порогова, у одиницях R (risk unit):
+Логіка порогова, у одиницях R (risk unit) для стадії TRAIL і в АБСОЛЮТНИХ
+відсотках від ціни входу для стадії BREAKEVEN:
 
     R = |entry_price - initial_stop_loss_price| / entry_price   (частка від ціни входу)
 
 Два етапи (обидва рахуються від "сприятливого" руху ціни від входу):
 
-    Stage BREAKEVEN — коли рух у нашу сторону досягає breakeven_trigger_r * R,
+    Stage BREAKEVEN — коли рух у нашу сторону досягає breakeven_trigger_percent
+        (абсолютна частка від ціни входу, НЕ залежить від R цієї угоди),
         стоп переноситься в entry_price + буфер на комісію/прослизання
         (буфер завжди в напрямку прибутку, тобто чуть краще за чистий беззбиток).
 
@@ -70,8 +72,9 @@ class TrailingStopManager:
 
         cfg = config or {}
         self.enabled: bool = cfg.get('enabled', True)
-        # поріг переносу в беззбиток, в одиницях R
-        self.breakeven_trigger_r: float = cfg.get('breakeven_trigger_r', 1.0)
+        # поріг переносу в беззбиток — АБСОЛЮТНА частка від ціни входу
+        # (наприклад 0.002 = 0.2%). НЕ залежить від R цієї угоди.
+        self.breakeven_trigger_percent: float = cfg.get('breakeven_trigger_percent', 0.002)
         # буфер понад чистий вхід, щоб не зловити мікро-мінус на комісії/проскальзуванні
         self.breakeven_buffer_percent: float = cfg.get('breakeven_buffer_percent', 0.002)  # 0.2%
         # поріг початку трейлінгу, в одиницях R
@@ -89,7 +92,7 @@ class TrailingStopManager:
             self.event_bus.subscribe(EventType.PRICE_UPDATED, self._on_price_update)
             self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
             logger.info(
-                f"TrailingStopManager initialized: breakeven@{self.breakeven_trigger_r}R, "
+                f"TrailingStopManager initialized: breakeven@{self.breakeven_trigger_percent * 100:.2f}%, "
                 f"trail@{self.trail_trigger_r}R (distance {self.trail_distance_r}R)"
             )
         else:
@@ -179,7 +182,8 @@ class TrailingStopManager:
             else:
                 desired_stop = state.peak_price * (1 + trail_dist)
 
-        elif favorable_r >= self.breakeven_trigger_r:
+        elif favorable_fraction >= self.breakeven_trigger_percent:
+            # беззбиток тригериться АБСОЛЮТНИМ рухом ціни від входу, R тут не бере участі
             new_stage = "breakeven"
             if side == 'LONG':
                 desired_stop = entry_price * (1 + self.breakeven_buffer_percent)
@@ -237,6 +241,8 @@ class TrailingStopManager:
             await self.exchange.cancel_order(symbol, old_sl_order_id)
         except BingXAPIError as e:
             if e.code in (100404, 100400, 109400) or 'not exist' in (e.msg or '').lower() or 'not found' in (e.msg or '').lower():
+                # ордер уже спрацював/відмінений — позиція, ймовірно, вже закривається
+                # через _handle_order_update, нічого страшного, просто виходимо
                 logger.info(
                     f"TrailingStop: old SL for {position_key} already gone "
                     f"(orderId={old_sl_order_id}), skipping move: {e.code} {e.msg}"

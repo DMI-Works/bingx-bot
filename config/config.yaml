@@ -61,12 +61,12 @@ trading:
 
 trailing_stop:
     enabled: true
-    breakeven_trigger_r: 1.0      # перенос в беззбиток при движении 1R в плюс
-    breakeven_buffer_percent: 0.004   # +0.4% сверху входа — покрывает комиссию/слипедж
-    trail_trigger_r: 1.5          # начало трейлинга при движении 1.5R
-    trail_distance_r: 1.0         # трейлить на расстоянии 1R от пика
-    min_move_percent: 0.0008      # не двигать SL, если сдвиг меньше 0.08%
-    min_seconds_between_moves: 5  # троттлинг реальных cancel+create на бирже
+    breakeven_trigger_percent: 0.002   # безубыток при движении цены на 0.2% от входа — АБСОЛЮТНО, без R
+    breakeven_buffer_percent: 0.004
+    trail_trigger_r: 1.5               # трейлинг всё ещё в R (скажи, если тоже надо на абсолют)
+    trail_distance_r: 1.0
+    min_move_percent: 0.0008
+    min_seconds_between_moves: 5
 
 # Database Configuration
 database:
