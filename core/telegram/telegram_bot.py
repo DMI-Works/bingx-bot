@@ -66,6 +66,7 @@ class TelegramBot:
         self.event_bus.subscribe(EventType.POSITION_OPENED, self._on_position_opened)
         self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
         self.event_bus.subscribe(EventType.STOP_LOSS_TRIGGERED, self._on_stop_loss_triggered)
+        self.event_bus.subscribe(EventType.STOP_LOSS_MOVED, self._on_stop_loss_moved)
         self.event_bus.subscribe(EventType.TAKE_PROFIT_TRIGGERED, self._on_take_profit_triggered)
         self.event_bus.subscribe(EventType.ERROR, self._on_error)
         self.event_bus.subscribe(EventType.CRITICAL_ERROR, self._on_critical_error)
@@ -399,6 +400,46 @@ class TelegramBot:
 Ціна: ${event.data.get('price', 0):.6f}
 [INFO]: {event.data.get('positions_info_message')}
 """
+        await self.send_message(text)
+
+    async def _on_stop_loss_moved(self, event: Event) -> None:
+        data = event.data
+ 
+        symbol = data.get('symbol', 'N/A')
+        side = data.get('side', 'N/A')
+        stage = data.get('stage')
+        old_price = data.get('old_stop_price')
+        new_price = data.get('new_stop_price')
+        entry_price = data.get('entry_price')
+        strategy = data.get('strategy')
+ 
+        stage_label = {
+            'breakeven': '🟡 Перенесено в беззбиток',
+            'trailing': '🟢 Підтягнуто трейлінгом',
+        }.get(stage, '🔄 Стоп перенесено')
+ 
+        side_emoji = "🟢" if side == "LONG" else "🔴"
+ 
+        if old_price is None or new_price is None or entry_price is None:
+            logger.warning(f"STOP_LOSS_MOVED event missing price data: {data}")
+            await self.send_message(f"{stage_label}\n\n{side_emoji} <b>{symbol}</b> {side}")
+            return
+ 
+        # decimals під ціну, як і в решті бота — щоб не показувати "0.00" на дешевих монетах
+        ref = abs(new_price or entry_price or 0)
+        decimals = 4 if ref >= 1 else (6 if ref >= 0.01 else 8)
+ 
+        text = f"""
+{stage_label}
+ 
+{side_emoji} <b>{symbol}</b> {side}
+├ Вхід: <code>${entry_price:.{decimals}f}</code>
+├ Старий стоп: <code>${old_price:.{decimals}f}</code>
+└ Новий стоп: <code>${new_price:.{decimals}f}</code>
+"""
+        if strategy:
+            text += f"\n[INFO]: Стратегія: {strategy}"
+ 
         await self.send_message(text)
 
     async def _on_take_profit_triggered(self, event: Event) -> None:

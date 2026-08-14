@@ -11,7 +11,7 @@ from core.events import EventBus
 from core.exchange import BingXClient
 from core.exchange import SymbolSelector
 from core.state import SettingsManager
-from core.risk import RiskManager
+from core.risk import RiskManager, TrailingStopManager
 from core.trading import SimpleTrader
 from core.strategies import StrategyManager
 from core.telegram import TelegramBot
@@ -96,6 +96,16 @@ async def main():
         risk_manager=risk_manager,
     )
     logger.info("[OK] Simple Trader initialized")
+
+    trailing_stop_config = config.get('trading.trailing_stop', {})
+    trailing_stop_manager = TrailingStopManager(
+        event_bus=event_bus,
+        exchange=exchange,
+        db=db,
+        trader=trader,
+        config=trailing_stop_config,
+    )
+    logger.info("[OK] Trailing Stop Manager initialized")
 
     filters_config = config.get('trading.filters', {})
     refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)

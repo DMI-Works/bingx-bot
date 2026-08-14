@@ -57,11 +57,11 @@ class BingXClient:
     @staticmethod
     def _raise_if_error(response: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
         """
-        BingX возвращает HTTP 200 даже при бизнес-ошибках — код лежит в теле.
-        rest_client только логирует такие ошибки, но не бросает исключение
-        (это осознанно, чтобы позволить retry-логике на 100001 отработать).
-        Поэтому на уровне BingXClient мы обязаны сами проверить code перед
-        тем, как считать операцию успешной.
+        BingX повертає HTTP 200 навіть при бізнес-помилках — код лежить у тілі.
+        rest_client лише логує такі помилки, але не кидає виключення
+        (це усвідомлено, щоб дозволити retry-логіці на 100001 відпрацювати).
+        Тому на рівні BingXClient ми зобов'язані самі перевірити code перед
+        тим, як вважати операцію успішною.
         """
         if isinstance(response, dict) and response.get('code') not in (0, None):
             raise BingXAPIError(
@@ -292,6 +292,24 @@ class BingXClient:
 
         except Exception as e:
             logger.error(f"Failed to create order: {e}")
+            raise
+
+    async def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        try:
+            params = {
+                'symbol': symbol,
+                'orderId': order_id,
+            }
+            response = await self.rest_client.delete('/openApi/swap/v2/trade/order', params)
+            self._raise_if_error(response, '/openApi/swap/v2/trade/order')
+            logger.info(f"Order cancelled: {symbol} orderId={order_id}")
+            return response
+        except BingXAPIError:
+            # прокидаємо як є — виклик, що чекає на BingXAPIError (напр.
+            # TrailingStopManager), сам вирішує, чи це "вже виконаний ордер"
+            raise
+        except Exception as e:
+            logger.error(f"Failed to cancel order {order_id} for {symbol}: {e}")
             raise
 
     async def set_leverage(self, symbol: str, leverage: int, side: str = "BOTH") -> Dict[str, Any]:
