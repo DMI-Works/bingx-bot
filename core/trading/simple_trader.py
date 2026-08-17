@@ -507,20 +507,25 @@ class SimpleTrader:
 
                 if 'current price' in (e.msg or '').lower() and buffer_percent is not None and attempt < max_attempts:
                     try:
-                        live_price = await self.exchange.get_ticker_price(symbol)
+                        mark_price = await self.exchange.get_mark_price(symbol)
+                        # +0.05% запасу понад buffer_percent — навіть mark
+                        # price, отримана через REST, встигає трохи
+                        # "постаріти" за час round-trip до біржі на
+                        # волатильних алтах
+                        safety_percent = buffer_percent + 0.0005
                         new_stop_price = (
-                            live_price * (1 - buffer_percent) if side == 'LONG'
-                            else live_price * (1 + buffer_percent)
+                            mark_price * (1 - safety_percent) if side == 'LONG'
+                            else mark_price * (1 + safety_percent)
                         )
                         logger.warning(
                             f"SL for {symbol} rejected as stale (price already passed target "
-                            f"{current_stop_price}). Re-anchoring to live price {live_price} -> "
+                            f"{current_stop_price}). Re-anchoring to mark price {mark_price} -> "
                             f"new stop={new_stop_price}, retrying (attempt {attempt+1})"
                         )
                         current_stop_price = new_stop_price
                         continue
                     except Exception as fetch_err:
-                        logger.error(f"Failed to fetch live price to re-anchor SL for {symbol}: {fetch_err}")
+                        logger.error(f"Failed to fetch mark price to re-anchor SL for {symbol}: {fetch_err}")
                         break
 
                 break
@@ -534,7 +539,11 @@ class SimpleTrader:
                 )
                 return None, None
 
-        logger.error(f"Failed to create stop loss for {symbol}: {last_error.code if last_error else '?'} {last_error.msg if last_error else ''}")
+        logger.error(
+            f"Failed to create stop loss for {symbol} after {max_attempts} attempts "
+            f"(last tried stopPrice={current_stop_price}): "
+            f"{last_error.code if last_error else '?'} {last_error.msg if last_error else ''}"
+        )
         await self._notify_error(
             error=f"{last_error.code} {last_error.msg}" if last_error else "unknown error",
             context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",

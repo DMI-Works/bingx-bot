@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import json
 from dataclasses import dataclass, field
@@ -85,8 +86,20 @@ class TrailingStopManager:
         self.min_move_percent: float = cfg.get('min_move_percent', 0.0008)  # 0.08%
         # не частіше ніж раз на N секунд реально рухаємо ордер на біржі для однієї позиції
         self.min_seconds_between_moves: float = cfg.get('min_seconds_between_moves', 5.0)
+        # додатковий гістерезис для ПОВТОРНИХ рухів у межах однієї стадії breakeven —
+        # без цього ціна, що топчеться біля тригера, змушує нас кожні
+        # min_seconds_between_moves намагатись "довести" стоп до теоретичного
+        # таргета від entry_price, який біржа тут же відбиває як застарілий
+        # (110412 Stop Loss price should be greater than the current price),
+        # і ми йдемо на re-anchor до live price — а на наступному тіку все
+        # повторюється знову, хоча по суті стоп вже стоїть де треба.
+        self.breakeven_re_move_percent: float = cfg.get('breakeven_re_move_percent', 0.003)  # 0.3%
 
         self._states: Dict[str, _TrailState] = {}
+        # position_key -> unix timestamp (time.time()), до якого не намагаємось
+        # рухати SL цієї позиції — виставляється при отриманні 109429 (rate limit)
+        # і читається з тексту помилки біржі ("can retry after time: <ms epoch>")
+        self._rate_limited_until: Dict[str, float] = {}
 
         if self.enabled:
             self.event_bus.subscribe(EventType.PRICE_UPDATED, self._on_price_update)
@@ -139,6 +152,14 @@ class TrailingStopManager:
             await self._process_position(position_key, position, price)
 
     async def _process_position(self, position_key: str, position: dict, price: float) -> None:
+        # якщо недавно словили rate limit саме по цій позиції — не намагаємось
+        # взагалі, чекаємо час, який сама біржа вказала в помилці 109429
+        rate_limited_until = self._rate_limited_until.get(position_key)
+        if rate_limited_until is not None:
+            if time.time() < rate_limited_until:
+                return
+            self._rate_limited_until.pop(position_key, None)
+
         entry_price = position.get('entry_price')
         side = position.get('side')
         current_stop = position.get('stop_loss_price')
@@ -200,6 +221,17 @@ class TrailingStopManager:
         else:
             improved = desired_stop < current_stop * (1 - self.min_move_percent)
 
+        # додатковий гістерезис для ПОВТОРНИХ рухів у межах тієї самої стадії
+        # breakeven: якщо стадія не змінюється і ми вже рухали стоп на ній
+        # раніше (current_stop вже НЕ дорівнює "initial" далекому значенню),
+        # вимагаємо суттєвіший зсув, а не 0.08%, щоб не гонятись за шумом
+        # ціни біля точки тригера й не спамити cancel/create щохвилини.
+        if improved and new_stage == state.stage and new_stage == "breakeven":
+            if side == 'LONG':
+                improved = desired_stop > current_stop * (1 + self.breakeven_re_move_percent)
+            else:
+                improved = desired_stop < current_stop * (1 - self.breakeven_re_move_percent)
+
         if not improved:
             return
 
@@ -236,10 +268,32 @@ class TrailingStopManager:
         close_side = 'SELL' if side == 'LONG' else 'BUY'
         position_side = side
 
+        # %-дистанція, яку зберігаємо при re-anchor на live price — той самий
+        # трюк, що й у SimpleTrader._create_stop_loss: якщо ордер відбитий
+        # біржею як "current price already passed target", беремо АКТУАЛЬНУ
+        # ціну і рахуємо стоп від НЕЇ на ту саму % дистанцію, а не залишаємо
+        # застарілу ціну, пораховану кілька round-trip'ів (await) тому.
+        if stage == "trailing":
+            state = self._states.get(position_key)
+            distance_fraction = self.trail_distance_r * state.initial_risk_fraction if state else None
+        else:  # breakeven
+            distance_fraction = self.breakeven_buffer_percent
+
         # 1) відміняємо старий SL
         try:
             await self.exchange.cancel_order(symbol, old_sl_order_id)
         except BingXAPIError as e:
+            if e.code == 109429:
+                # rate limit — не долбимо API далі, а чекаємо час, який
+                # сама біржа вказала в тілі помилки ("can retry after time: <ms epoch>").
+                # Якщо розпарсити не вдалось — падаємо на дефолтні 60с бекоффа.
+                retry_at = self._parse_retry_after(e.msg) or (time.time() + 60.0)
+                self._rate_limited_until[position_key] = retry_at
+                logger.warning(
+                    f"TrailingStop: rate limited (109429) on {position_key}, "
+                    f"backing off until {retry_at} (unix ts)"
+                )
+                return
             if e.code in (100404, 100400, 109400) or 'not exist' in (e.msg or '').lower() or 'not found' in (e.msg or '').lower():
                 # ордер уже спрацював/відмінений — позиція, ймовірно, вже закривається
                 # через _handle_order_update, нічого страшного, просто виходимо
@@ -254,35 +308,83 @@ class TrailingStopManager:
             logger.error(f"TrailingStop: unexpected error cancelling old SL for {position_key}: {e}", exc_info=True)
             return
 
-        # 2) створюємо новий SL на новій ціні (та сама схема, що й SimpleTrader._create_stop_loss)
+        # 2) створюємо новий SL — retry + re-anchor, ІДЕНТИЧНО до
+        # SimpleTrader._create_stop_loss: якщо біржа каже "current price"
+        # (ціна вже пройшла ціль), перераховуємо ціль від живої ціни на ту
+        # саму %-дистанцію і пробуємо ще раз (до 3 спроб)
+        current_stop_price = new_stop_price
         client_order_id = f"sl-{int(time.time() * 1000)}"
-        try:
-            response = await self.exchange.create_order(
-                symbol=symbol,
-                side=close_side,
-                order_type='STOP_MARKET',
-                quantity=quantity,
-                stop_price=new_stop_price,
-                position_side=position_side,
-                close_position=True,
-                client_order_id=client_order_id,
-            )
-        except BingXAPIError as e:
+        max_attempts = 3
+        last_error: Optional[BingXAPIError] = None
+        response = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await self.exchange.create_order(
+                    symbol=symbol,
+                    side=close_side,
+                    order_type='STOP_MARKET',
+                    quantity=quantity,
+                    stop_price=current_stop_price,
+                    position_side=position_side,
+                    close_position=True,
+                    client_order_id=client_order_id,
+                )
+                break
+            except BingXAPIError as e:
+                last_error = e
+                if e.code == 109429:
+                    retry_at = self._parse_retry_after(e.msg) or (time.time() + 60.0)
+                    self._rate_limited_until[position_key] = retry_at
+                    logger.warning(
+                        f"TrailingStop: rate limited (109429) creating new SL for {position_key}, "
+                        f"backing off until {retry_at} (unix ts). "
+                        f"POSITION MAY NOW BE WITHOUT A STOP — check manually!"
+                    )
+                    await self._notify_critical(
+                        f"Rate limit при перевиставленні SL для {symbol} {side} — "
+                        f"позиція тимчасово БЕЗ стопу до відновлення ліміту, перевірте вручну!"
+                    )
+                    return
+                if 'current price' in (e.msg or '').lower() and distance_fraction is not None and attempt < max_attempts:
+                    try:
+                        live_price = await self.exchange.get_ticker_price(symbol)
+                        current_stop_price = (
+                            live_price * (1 - distance_fraction) if side == 'LONG'
+                            else live_price * (1 + distance_fraction)
+                        )
+                        logger.warning(
+                            f"TrailingStop: SL for {position_key} rejected as stale "
+                            f"(target {new_stop_price} already passed by price). "
+                            f"Re-anchoring to live price {live_price} -> new stop={current_stop_price}, "
+                            f"retrying (attempt {attempt + 1})"
+                        )
+                        continue
+                    except Exception as fetch_err:
+                        logger.error(f"TrailingStop: failed to fetch live price to re-anchor SL for {symbol}: {fetch_err}")
+                        break
+                break
+            except Exception as e:
+                logger.error(f"TrailingStop: unexpected error creating new SL for {position_key}: {e}", exc_info=True)
+                await self._notify_critical(
+                    f"Не вдалося перенести SL для {symbol} {side} (позиція, можливо, БЕЗ захисту): {e}"
+                )
+                return
+
+        if response is None:
             logger.error(
-                f"TrailingStop: failed to create new SL for {position_key} @ {new_stop_price}: "
-                f"{e.code} {e.msg}. POSITION MAY NOW BE WITHOUT A STOP — check manually!"
+                f"TrailingStop: failed to create new SL for {position_key} after {max_attempts} attempts: "
+                f"{last_error.code if last_error else '?'} {last_error.msg if last_error else ''}. "
+                f"POSITION MAY NOW BE WITHOUT A STOP — check manually!"
             )
             await self._notify_critical(
                 f"Не вдалося перенести SL для {symbol} {side} на {new_stop_price:.6f} "
-                f"(стара позиція, можливо, БЕЗ захисту): {e.code} {e.msg}"
+                f"(стара позиція, можливо, БЕЗ захисту): "
+                f"{last_error.code if last_error else '?'} {last_error.msg if last_error else ''}"
             )
             return
-        except Exception as e:
-            logger.error(f"TrailingStop: unexpected error creating new SL for {position_key}: {e}", exc_info=True)
-            await self._notify_critical(
-                f"Не вдалося перенести SL для {symbol} {side} (позиція, можливо, БЕЗ захисту): {e}"
-            )
-            return
+
+        new_stop_price = current_stop_price  # фіксуємо фактично виставлену ціну (могла бути re-anchored)
 
         new_order_id = None
         if 'data' in response and 'order' in response['data']:
@@ -333,6 +435,21 @@ class TrailingStopManager:
         except Exception as e:
             logger.error(f"TrailingStop: failed to publish STOP_LOSS_MOVED event: {e}")
 
+    @staticmethod
+    def _parse_retry_after(msg: Optional[str]) -> Optional[float]:
+        """Парсить 'can retry after time: 1786999966671' (мс epoch, unix) з
+        тіла помилки BingX і повертає unix timestamp у секундах, до якого
+        варто утриматись від нових запитів для цього ендпоінту/акаунту."""
+        if not msg:
+            return None
+        m = re.search(r'retry after time:\s*(\d+)', msg)
+        if not m:
+            return None
+        try:
+            return int(m.group(1)) / 1000.0
+        except ValueError:
+            return None
+
     async def _notify_critical(self, message: str) -> None:
         try:
             await self.event_bus.publish(Event(
@@ -351,3 +468,4 @@ class TrailingStopManager:
             return
         position_key = f"{symbol}_{side}"
         self._states.pop(position_key, None)
+        self._rate_limited_until.pop(position_key, None)

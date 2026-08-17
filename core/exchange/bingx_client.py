@@ -348,6 +348,30 @@ class BingXClient:
             logger.error(f"Failed to get ticker price: {e}")
             raise
 
+    async def get_mark_price(self, symbol: str) -> float:
+        """
+        Mark price (індексна/funding-скоригована ціна) — саме та ціна, за
+        якою BingX тригерить STOP_MARKET/TAKE_PROFIT_MARKET ордери за
+        замовчуванням (workingType=MARK_PRICE, підтверджено з WS
+        ORDER_TRADE_UPDATE echo). Використовуй ЦЮ функцію, а не
+        get_ticker_price(), коли рахуєш/переанкориш stopPrice відносно
+        "поточної ціни" — інакше на низьколіквідних парах (мало угод —
+        last-trade price "залипає") можна знову і знову отримувати 110412
+        "Stop Loss price should be greater/less than the current price",
+        навіть коли переанкоринг вже спрацював, бо звірявся не з тією ціною.
+        """
+        try:
+            response = await self.rest_client.get('/openApi/swap/v2/quote/premiumIndex', {'symbol': symbol})
+            self._raise_if_error(response, '/openApi/swap/v2/quote/premiumIndex')
+            data = response.get('data', {})
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            return float(data.get('markPrice', 0))
+
+        except Exception as e:
+            logger.error(f"Failed to get mark price: {e}")
+            raise
+
     async def close(self) -> None:
         await self.stop_websocket()
         await self.rest_client.close()
