@@ -192,50 +192,8 @@ class TrailingStopManager:
         r = state.initial_risk_fraction
         favorable_r = favorable_fraction / r
 
-        desired_stop: Optional[float] = None
-        new_stage = state.stage
-
-        if favorable_r >= self.trail_trigger_r:
-            new_stage = "trailing"
-            trail_dist = self.trail_distance_r * r
-            if side == 'LONG':
-                desired_stop = state.peak_price * (1 - trail_dist)
-            else:
-                desired_stop = state.peak_price * (1 + trail_dist)
-
-        elif favorable_fraction >= self.breakeven_trigger_percent:
-            # беззбиток тригериться АБСОЛЮТНИМ рухом ціни від входу, R тут не бере участі
-            new_stage = "breakeven"
-            if side == 'LONG':
-                desired_stop = entry_price * (1 + self.breakeven_buffer_percent)
-            else:
-                desired_stop = entry_price * (1 - self.breakeven_buffer_percent)
-
-        if desired_stop is None:
+        if favorable_r < self.trail_trigger_r and favorable_fraction < self.breakeven_trigger_percent:
             return
-
-        # стоп рухаємо ЛИШЕ в бік прибутку і лише якщо зсув достатньо великий,
-        # щоб не дьоргати ордер на кожен тік
-        if side == 'LONG':
-            improved = desired_stop > current_stop * (1 + self.min_move_percent)
-        else:
-            improved = desired_stop < current_stop * (1 - self.min_move_percent)
-
-        # додатковий гістерезис для ПОВТОРНИХ рухів у межах тієї самої стадії
-        # breakeven: якщо стадія не змінюється і ми вже рухали стоп на ній
-        # раніше (current_stop вже НЕ дорівнює "initial" далекому значенню),
-        # вимагаємо суттєвіший зсув, а не 0.08%, щоб не гонятись за шумом
-        # ціни біля точки тригера й не спамити cancel/create щохвилини.
-        if improved and new_stage == state.stage and new_stage == "breakeven":
-            if side == 'LONG':
-                improved = desired_stop > current_stop * (1 + self.breakeven_re_move_percent)
-            else:
-                improved = desired_stop < current_stop * (1 - self.breakeven_re_move_percent)
-
-        if not improved:
-            return
-
-        state.stage = new_stage
 
         now = time.monotonic()
         async with state.lock:
@@ -247,13 +205,44 @@ class TrailingStopManager:
             current_stop = position.get('stop_loss_price')
             if current_stop is None:
                 return
-            if side == 'LONG' and not (desired_stop > current_stop * (1 + self.min_move_percent)):
-                return
-            if side == 'SHORT' and not (desired_stop < current_stop * (1 - self.min_move_percent)):
-                return
             if now - state.last_move_at < self.min_seconds_between_moves:
                 return
 
+            desired_stop: Optional[float] = None
+            new_stage = state.stage
+
+            if favorable_r >= self.trail_trigger_r:
+                new_stage = "trailing"
+                trail_dist = self.trail_distance_r * r
+                if side == 'LONG':
+                    desired_stop = state.peak_price * (1 - trail_dist)
+                else:
+                    desired_stop = state.peak_price * (1 + trail_dist)
+            elif favorable_fraction >= self.breakeven_trigger_percent:
+                new_stage = "breakeven"
+                if side == 'LONG':
+                    desired_stop = entry_price * (1 + self.breakeven_buffer_percent)
+                else:
+                    desired_stop = entry_price * (1 - self.breakeven_buffer_percent)
+
+            if desired_stop is None:
+                return
+
+            if side == 'LONG':
+                improved = desired_stop > current_stop * (1 + self.min_move_percent)
+            else:
+                improved = desired_stop < current_stop * (1 - self.min_move_percent)
+
+            if improved and new_stage == state.stage and new_stage == "breakeven":
+                if side == 'LONG':
+                    improved = desired_stop > current_stop * (1 + self.breakeven_re_move_percent)
+                else:
+                    improved = desired_stop < current_stop * (1 - self.breakeven_re_move_percent)
+
+            if not improved:
+                return
+
+            state.stage = new_stage
             state.last_move_at = now
             await self._move_stop_loss(position_key, position, desired_stop, new_stage)
 
@@ -267,6 +256,8 @@ class TrailingStopManager:
 
         close_side = 'SELL' if side == 'LONG' else 'BUY'
         position_side = side
+
+        old_stop_price_before_move = position.get('stop_loss_price')
 
         # %-дистанція, яку зберігаємо при re-anchor на live price — той самий
         # трюк, що й у SimpleTrader._create_stop_loss: якщо ордер відбитий
@@ -349,16 +340,48 @@ class TrailingStopManager:
                 if 'current price' in (e.msg or '').lower() and distance_fraction is not None and attempt < max_attempts:
                     try:
                         live_price = await self.exchange.get_ticker_price(symbol)
-                        current_stop_price = (
+                        raw_reanchored = (
                             live_price * (1 - distance_fraction) if side == 'LONG'
                             else live_price * (1 + distance_fraction)
                         )
-                        logger.warning(
-                            f"TrailingStop: SL for {position_key} rejected as stale "
-                            f"(target {new_stop_price} already passed by price). "
-                            f"Re-anchoring to live price {live_price} -> new stop={current_stop_price}, "
-                            f"retrying (attempt {attempt + 1})"
-                        )
+
+                        regressed = False
+                        if old_stop_price_before_move is not None:
+                            if side == 'LONG' and old_stop_price_before_move < live_price:
+                                current_stop_price = max(raw_reanchored, old_stop_price_before_move)
+                            elif side == 'SHORT' and old_stop_price_before_move > live_price:
+                                current_stop_price = min(raw_reanchored, old_stop_price_before_move)
+                            else:
+                                # старий стоп сам уже невалідний відносно живої ціни —
+                                # ринок реально пройшов його (гепнув), кращого варіанту
+                                # немає, змушені прийняти raw_reanchored як є
+                                current_stop_price = raw_reanchored
+                                regressed = (
+                                    (side == 'LONG' and raw_reanchored < old_stop_price_before_move) or
+                                    (side == 'SHORT' and raw_reanchored > old_stop_price_before_move)
+                                )
+                        else:
+                            current_stop_price = raw_reanchored
+
+                        if regressed:
+                            logger.error(
+                                f"TrailingStop: {position_key} — market gapped past old stop "
+                                f"{old_stop_price_before_move}; re-anchored stop {current_stop_price} "
+                                f"is WORSE than before (unavoidable, price moved through it)."
+                            )
+                            await self._notify_critical(
+                                f"⚠️ SL для {symbol} {side} перевиставлено ГІРШЕ за попередній "
+                                f"({old_stop_price_before_move:.6f} -> {current_stop_price:.6f}) — "
+                                f"ціна пройшла через старий стоп до того, як ми встигли його оновити."
+                            )
+                        else:
+                            logger.warning(
+                                f"TrailingStop: SL for {position_key} rejected as stale "
+                                f"(target {new_stop_price} already passed by price). "
+                                f"Re-anchoring to live price {live_price} -> new stop={current_stop_price} "
+                                f"(clamped against old stop {old_stop_price_before_move}), "
+                                f"retrying (attempt {attempt + 1})"
+                            )
                         continue
                     except Exception as fetch_err:
                         logger.error(f"TrailingStop: failed to fetch live price to re-anchor SL for {symbol}: {fetch_err}")
