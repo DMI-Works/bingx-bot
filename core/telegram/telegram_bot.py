@@ -469,7 +469,56 @@ class TelegramBot:
             text += f"\n<code>{error}</code>"
         await self.send_message(text)
 
-    
+    async def notify_startup(
+        self,
+        *,
+        testnet: bool,
+        strategies: list,
+        trading_enabled: bool,
+        symbols_count: int,
+    ) -> None:
+        """
+        Відправляє одноразове вітальне повідомлення одразу після повного
+        старту бота (біржа, стратегії, символи вже готові). Викликається
+        явно з main.py в самому кінці ініціалізації — жодних побічних
+        ефектів на існуючу логіку не має, це чиста нотифікація.
+        """
+        mode_label = "🧪 Testnet" if testnet else "🔴 LIVE (реальні кошти)"
+        trading_label = "✅ Увімкнено" if trading_enabled else "❌ Вимкнено"
+
+        enabled_names = [s.name for s in strategies if s.is_enabled()]
+        total_count = len(strategies)
+        enabled_count = len(enabled_names)
+
+        lines = [
+            "🚀 <b>Бот запущено та готовий до роботи</b>",
+            "",
+            f"Режим: {mode_label}",
+            f"Торгівля: {trading_label}",
+            f"Стратегій активно: {enabled_count}/{total_count}",
+            f"Символів відстежується: {symbols_count}",
+        ]
+
+        if enabled_names:
+            lines.append("")
+            lines.append("Активні стратегії:")
+            for name in enabled_names:
+                lines.append(f"  • {name}")
+
+        if self.exchange_client:
+            try:
+                balance_data = await self.exchange_client.get_account_balance()
+                if balance_data.get('code') == 0 and 'data' in balance_data:
+                    balance = balance_data['data'].get('balance', {})
+                    lines.append("")
+                    lines.append(f"💰 Баланс: ${float(balance.get('balance', 0)):.2f}")
+            except Exception as e:
+                logger.warning(f"notify_startup: не вдалось отримати баланс: {e}")
+
+        lines.append("")
+        lines.append(f"🕐 {datetime.now(LOCAL_TZ).strftime('%d.%m.%Y %H:%M:%S')}")
+
+        await self.send_message("\n".join(lines))
 
     async def _cmd_export_db(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         DB_PATH = "data/trading_bot.db"
