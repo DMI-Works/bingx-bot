@@ -36,7 +36,7 @@ class EventType(Enum):
     # TAKE_PROFIT_FAILED = "take_profit_failed"
 
     # Balance Events
-    BALANCE_UPDATED = "balance_updated"
+    HANDLE_ACCOUNT_INFO_UPDATE = "handle_account_info_update"
 
     # WebSocket Events
     WEBSOCKET_CONNECTED = "websocket_connected"

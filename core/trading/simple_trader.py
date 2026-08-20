@@ -38,7 +38,7 @@ class SimpleTrader:
         # Підписуємось на оновлення ордерів з WebSocket
         self.event_bus.subscribe(EventType.ORDER_FILLED, self._handle_order_update)
 
-        self.event_bus.subscribe(EventType.BALANCE_UPDATED, self._handle_account_update)
+        self.event_bus.subscribe(EventType.HANDLE_ACCOUNT_INFO_UPDATE, self._handle_account_update)
 
         # Відновлюємо активні позиції з БД при старті (переживають рестарт бота)
         self._restore_open_positions()
@@ -823,6 +823,8 @@ class SimpleTrader:
     async def _handle_account_update(self, event: Event) -> None:
         """Ловить ручні дії на біржі, які не пройшли через ORDER_TRADE_UPDATE обробник (safety net)"""
         positions_data = event.data.get('a', {}).get('P', [])
+        logger.info(f"[WS] Publishing HANDLE_ACCOUNT_INFO_UPDATE event: {event}")
+        logger.info(f"[WS] Publishing HANDLE_ACCOUNT_INFO_UPDATE positions_data: {positions_data}")
 
         for pos in positions_data:
             symbol = pos.get('s')

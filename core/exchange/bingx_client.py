@@ -78,7 +78,6 @@ class BingXClient:
 
             # Обрабатываем только события, которые нам нужны
             if event_type == "ACCOUNT_UPDATE":
-                logger.info(f"[WS] ACCOUNT_UPDATE: {data}")
                 await self._handle_account_update(data)
                 return
 
@@ -96,13 +95,12 @@ class BingXClient:
 
     async def _handle_account_update(self, data: Dict[str, Any]) -> None:
         if self.event_bus:
-            logger.info(f"[WS] Publishing BALANCE_UPDATED event: {data}")
             await self.event_bus.publish(Event(
-                type=EventType.BALANCE_UPDATED,
+                type=EventType.HANDLE_ACCOUNT_INFO_UPDATE,
                 data=data,
                 source="BingXClient"
             ))
-            logger.info("[WS] BALANCE_UPDATED event published")
+            logger.info("[WS] HANDLE_ACCOUNT_INFO_UPDATE event published")
 
     async def _handle_order_update(self, data: Dict[str, Any]) -> None:
         if self.event_bus:
