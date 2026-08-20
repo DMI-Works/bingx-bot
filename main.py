@@ -148,6 +148,8 @@ async def main():
             logger.warning("Telegram credentials not found, bot disabled")
 
     ws_enabled = config.get('exchange.websocket.enabled', True)
+    selected_symbols = set()
+
     if ws_enabled:
         await exchange.start_websocket()
         await exchange.start_user_data_stream()
@@ -157,6 +159,19 @@ async def main():
         logger.info(f"[OK] Initial symbol selection: {sorted(selected_symbols)}")
 
         await symbol_selector.start_refresh_loop(refresh_interval)
+
+    # --- Стартове повідомлення в Telegram — ЛИШЕ після того, як усе
+    # реально готове (біржа, стратегії, символи), щоб цифри в ньому
+    # відповідали дійсності. Якщо Telegram вимкнено — просто пропускаємо. ---
+    if telegram_bot:
+        try:
+            await telegram_bot.notify_startup(
+                testnet=testnet,
+                strategies=strategies
+            )
+            logger.info("[OK] Startup notification sent to Telegram")
+        except Exception as e:
+            logger.error(f"Failed to send startup notification: {e}", exc_info=True)
 
     logger.info("=" * 60)
     logger.info("Ruflo Trading Bot is running")
