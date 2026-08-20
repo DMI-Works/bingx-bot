@@ -135,6 +135,9 @@ class TrailingStopManager:
         event.data — той самий формат, що й у BaseStrategy._on_price_update:
         список трейдів з полями 's' (symbol) і 'p' (price) від WS.
         """
+        
+        logger.info(">>> PRICE TICK RECEIVED IN TRAILING STOP <<<")
+        
         if not self.enabled or not self.trail_levels_percent:
             logger.debug(
                 f"TrailingStop: no-op tick — enabled={self.enabled}, levels={self.trail_levels_percent}"
