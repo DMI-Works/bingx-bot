@@ -398,3 +398,66 @@ class BingXClient:
         if self.ws_client:
             await self.ws_client.unsubscribe(f"{symbol}@trade", symbol)
             self.subscribed_symbols.discard(symbol)
+    
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 500,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Історичні свічки (K-line). Endpoint: /openApi/swap/v3/quote/klines
+        interval: '1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d' і т.д.
+        Повертає список свічок {open, high, low, close, volume, time(ms)}
+        у ХРОНОЛОГІЧНОМУ порядку (старі -> нові).
+        """
+        try:
+            params = {
+                'symbol': symbol,
+                'interval': interval,
+                'limit': min(limit, 1000),
+            }
+            if start_time is not None:
+                params['startTime'] = start_time
+            if end_time is not None:
+                params['endTime'] = end_time
+
+            response = await self.rest_client.get('/openApi/swap/v3/quote/klines', params)
+            self._raise_if_error(response, '/openApi/swap/v3/quote/klines')
+
+            data = response.get('data', [])
+
+            # BingX іноді повертає свічки від нових до старих — нормалізуємо
+            if len(data) >= 2 and data[0].get('time', 0) > data[-1].get('time', 0):
+                data = list(reversed(data))
+
+            logger.info(f"[{symbol}] get_klines: отримано {len(data)} свічок, interval={interval}")
+
+            if data:
+                first, last = data[0], data[-1]
+                logger.info(
+                    f"[{symbol}] get_klines: перша={first.get('time')} "
+                    f"(o={first.get('open')} c={first.get('close')}) | "
+                    f"остання={last.get('time')} (o={last.get('open')} c={last.get('close')})"
+                )
+                invalid = [
+                    k for k in data
+                    if float(k.get('high', 0)) < float(k.get('low', 0))
+                    or not (float(k.get('low', 0)) <= float(k.get('open', 0)) <= float(k.get('high', 0)))
+                    or not (float(k.get('low', 0)) <= float(k.get('close', 0)) <= float(k.get('high', 0)))
+                ]
+                if invalid:
+                    logger.warning(
+                        f"[{symbol}] get_klines: {len(invalid)} підозрілих свічок "
+                        f"(high/low/open/close не узгоджені) — перевір дані вручну"
+                    )
+            else:
+                logger.warning(f"[{symbol}] get_klines: біржа повернула ПОРОЖНІЙ список свічок")
+
+            return data
+
+        except Exception as e:
+            logger.error(f"Failed to get klines for {symbol}: {e}")
+            raise

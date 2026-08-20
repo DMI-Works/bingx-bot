@@ -4,45 +4,15 @@ import logging
 
 from .registry import register_strategy
 from .base_strategy import BaseStrategy
+from .candle_warmup import Candle, CandleWarmupMixin
 from ..events import EventBus
 
 
 logger = logging.getLogger(__name__)
 
 
-class Candle:
-    __slots__ = ('open', 'high', 'low', 'close', 'start_time')
-
-    def __init__(self, price: float, start_time: float):
-        self.open = price
-        self.high = price
-        self.low = price
-        self.close = price
-        self.start_time = start_time
-
-    def update(self, price: float) -> None:
-        self.high = max(self.high, price)
-        self.low = min(self.low, price)
-        self.close = price
-
-    @property
-    def body(self) -> float:
-        return abs(self.close - self.open)
-
-    @property
-    def upper_wick(self) -> float:
-        return self.high - max(self.open, self.close)
-
-    @property
-    def lower_wick(self) -> float:
-        return min(self.open, self.close) - self.low
-
-    @property
-    def range(self) -> float:
-        return self.high - self.low
-
 @register_strategy('RejectionBlockStrategy')
-class RejectionBlockStrategy(BaseStrategy):
+class RejectionBlockStrategy(CandleWarmupMixin, BaseStrategy):
     """
     Ищет "rejection block": свечу похожую на молот/пин-бар, чей экстремум
     (лоу для бычьего паттерна, хай для медвежьего) "закрывается" тенью
@@ -56,7 +26,7 @@ class RejectionBlockStrategy(BaseStrategy):
     под конкретный инструмент/таймфрейм перед реальным использованием.
     """
 
-    def __init__(self, event_bus: EventBus, config: dict):
+    def __init__(self, event_bus: EventBus, config: dict, bingx_client=None):
         super().__init__("RejectionBlockStrategy", event_bus, config)
 
         # --- свечи ---
@@ -101,6 +71,9 @@ class RejectionBlockStrategy(BaseStrategy):
         self.current_candle: Dict[str, Candle] = {}
         self.last_trade_time: Dict[str, float] = {}
 
+        # --- прогрів історії з біржі (див. CandleWarmupMixin) ---
+        self.bingx_client = bingx_client
+        
     @classmethod
     def build_config(cls, app_config) -> dict:
         return {
@@ -124,7 +97,14 @@ class RejectionBlockStrategy(BaseStrategy):
             'leverage': app_config.get('trading.default_leverage', 10),
         }
 
+    # --- налаштування CandleWarmupMixin ---
+
+    def _max_candles_buffer(self) -> int:
+        return 50
+
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
+        await self._ensure_warmup(symbol)
+
         now = time.time()
         closed_candle = self._update_candle(symbol, price, now)
 
@@ -180,7 +160,7 @@ class RejectionBlockStrategy(BaseStrategy):
         history = self.candles.setdefault(symbol, [])
         history.append(closed)
         # для паттерна нужны всего 2 последние свечи, буфер небольшой
-        if len(history) > 50:
+        if len(history) > self._max_candles_buffer():
             history.pop(0)
 
         self.current_candle[symbol] = Candle(price, now)

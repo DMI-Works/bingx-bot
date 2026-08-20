@@ -119,7 +119,7 @@ async def main():
     strategy_settings = StrategySettingsStore(db)
     logger.info("[OK] Strategy Settings Store initialized")
 
-    strategy_manager = StrategyManager(event_bus, config, logger, strategy_settings)
+    strategy_manager = StrategyManager(event_bus, config, logger, strategy_settings, bingx_client=exchange)
     strategies = strategy_manager.setup()
     logger.info(f"[OK] Strategy Manager initialized ({len(strategies)} strategies)")
 

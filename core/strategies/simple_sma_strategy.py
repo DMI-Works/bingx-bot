@@ -4,30 +4,17 @@ import logging
 
 from .registry import register_strategy
 from .base_strategy import BaseStrategy
+from .candle_warmup import Candle, CandleWarmupMixin
 from ..events import EventBus
 
 
 logger = logging.getLogger(__name__)
 
 
-class Candle:
-    __slots__ = ('open', 'high', 'low', 'close', 'start_time')
-
-    def __init__(self, price: float, start_time: float):
-        self.open = price
-        self.high = price
-        self.low = price
-        self.close = price
-        self.start_time = start_time
-
-    def update(self, price: float) -> None:
-        self.high = max(self.high, price)
-        self.low = min(self.low, price)
-        self.close = price
-
 @register_strategy('SimpleMovingAverageStrategy')
-class SimpleMovingAverageStrategy(BaseStrategy):
-    def __init__(self, event_bus: EventBus, config: dict):
+class SimpleMovingAverageStrategy(CandleWarmupMixin, BaseStrategy):
+
+    def __init__(self, event_bus: EventBus, config: dict, bingx_client=None):
         super().__init__("SimpleMovingAverageStrategy", event_bus, config)
 
         # --- свечи ---
@@ -64,13 +51,16 @@ class SimpleMovingAverageStrategy(BaseStrategy):
         self.current_candle: Dict[str, Candle] = {}
         self.side_history: Dict[str, List[str]] = {}
         self.last_trade_time: Dict[str, float] = {}
+        
+        # --- прогрів історії з біржі (див. CandleWarmupMixin) ---
+        self.bingx_client = bingx_client
 
     @classmethod
     def build_config(cls, app_config) -> dict:
         use_atr_risk = app_config.get('trading.stop_loss.mode', 'fixed_percent') == 'atr'
         return {
             'timeframe_seconds': 60,
-            'sma_period': app_config.get('trading.sma_period', 20),
+            'sma_period': app_config.get('trading.sma_period', 80),
             'threshold_percent': app_config.get('trading.threshold_percent', 0.3),
             'confirmation_candles': app_config.get('trading.confirmation_candles', 2),
             'cooldown_seconds': app_config.get('trading.cooldown_seconds', 300),
@@ -89,7 +79,17 @@ class SimpleMovingAverageStrategy(BaseStrategy):
             ),
         }
 
+    # --- налаштування CandleWarmupMixin під потреби цієї стратегії ---
+
+    def _min_candles_needed(self) -> int:
+        return max(self.sma_period, self.atr_period + 1)
+
+    def _max_candles_buffer(self) -> int:
+        return max(self.sma_period, self.atr_period + 1) * 2
+
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
+        await self._ensure_warmup(symbol)
+
         now = time.time()
         closed_candle = self._update_candle(symbol, price, now)
 
@@ -98,7 +98,7 @@ class SimpleMovingAverageStrategy(BaseStrategy):
             return None
 
         candles = self.candles.get(symbol, [])
-        min_needed = max(self.sma_period, self.atr_period + 1)
+        min_needed = self._min_candles_needed()
         if len(candles) < min_needed:
             logger.info(
                 f"[{symbol}] SKIP: not enough candles yet "
@@ -181,7 +181,7 @@ class SimpleMovingAverageStrategy(BaseStrategy):
         closed = current
         history = self.candles.setdefault(symbol, [])
         history.append(closed)
-        max_needed = max(self.sma_period, self.atr_period + 1) * 2
+        max_needed = self._max_candles_buffer()
         if len(history) > max_needed:
             history.pop(0)
 

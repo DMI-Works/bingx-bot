@@ -1,3 +1,4 @@
+import inspect
 import logging
 from typing import Dict, List, Optional
 
@@ -18,11 +19,12 @@ class StrategyManager:
     без рестарту бота.
     """
 
-    def __init__(self, event_bus, config, logger: logging.Logger, strategy_settings):
+    def __init__(self, event_bus, config, logger: logging.Logger, strategy_settings, bingx_client=None):
         self.event_bus = event_bus
         self.config = config
         self.logger = logger
         self.store = strategy_settings
+        self.bingx_client = bingx_client
         self.instances: Dict[str, BaseStrategy] = {}
 
     def setup(self) -> List[BaseStrategy]:
@@ -38,7 +40,8 @@ class StrategyManager:
                 self.logger.error(f"[SKIP] No params in DB for {name} even after seeding — unexpected")
                 continue
 
-            strategy = strategy_cls(self.event_bus, strategy_config)
+            extra_kwargs = self._build_extra_kwargs(name, strategy_cls)
+            strategy = strategy_cls(self.event_bus, strategy_config, **extra_kwargs)
             self.instances[name] = strategy
 
             if self.store.is_enabled(name):
@@ -49,6 +52,29 @@ class StrategyManager:
                 self.logger.info(f"[SKIP] {name} disabled (toggle in Telegram to enable)")
 
         return list(self.instances.values())
+
+    def _build_extra_kwargs(self, name: str, strategy_cls) -> dict:
+        """
+        Не всі стратегії приймають bingx_client (наприклад, ті, що не
+        успадковують CandleWarmupMixin) — передаємо його лише класам, чий
+        __init__ явно очікує цей параметр. Це той самий принцип DI, що й
+        для exchange у SimpleTrader/SymbolSelector, просто автоматизований
+        для довільної кількості стратегій.
+        """
+        kwargs = {}
+        params = inspect.signature(strategy_cls.__init__).parameters
+
+        if 'bingx_client' in params:
+            if self.bingx_client is None:
+                self.logger.warning(
+                    f"[{name}] очікує bingx_client, але StrategyManager його не отримав "
+                    f"(bingx_client=None) — прогрів історії буде недоступний"
+                )
+            else:
+                kwargs['bingx_client'] = self.bingx_client
+                self.logger.info(f"[{name}] bingx_client передано в конструктор")
+
+        return kwargs
 
     # ---------- виклики з SettingsMenu (миттєве застосування) ----------
 
