@@ -21,7 +21,7 @@ class SimpleMovingAverageStrategy(CandleWarmupMixin, BaseStrategy):
         self.timeframe_seconds = config.get('timeframe_seconds', 60)
 
         # --- SMA / сигнал ---
-        self.sma_period = config.get('sma_period', 20)
+        self.sma_period = config.get('sma_period', 80)
         self.threshold_percent = config.get('threshold_percent', 0.3)
         self.confirmation_candles = config.get('confirmation_candles', 2)
 
