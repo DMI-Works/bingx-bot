@@ -165,7 +165,7 @@ class TrailingStopManager:
 
         # позиція може бути LONG і/або SHORT одночасно (hedge mode) — перевіряємо обидві
         for side in ('LONG', 'SHORT'):
-            position_key = "{symbol}_{side}"
+            position_key = f"{symbol}_{side}"
             position = self.trader.open_positions.get(position_key)
             logger.info(
                 f"TrailingStop: position {position_key} {position}"
