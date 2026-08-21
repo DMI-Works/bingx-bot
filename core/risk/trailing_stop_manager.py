@@ -136,15 +136,16 @@ class TrailingStopManager:
         список трейдів з полями 's' (symbol) і 'p' (price) від WS.
         """
         
-        logger.info(">>> PRICE TICK RECEIVED IN TRAILING STOP <<<")
-        
         if not self.enabled or not self.trail_levels_percent:
-            logger.debug(
+            logger.info(
                 f"TrailingStop: no-op tick — enabled={self.enabled}, levels={self.trail_levels_percent}"
             )
             return
 
         raw = event.data
+        logger.info(
+                f"TrailingStop: data {raw}"
+        )
         if not raw:
             return
 
@@ -159,6 +160,9 @@ class TrailingStopManager:
         except (TypeError, ValueError):
             price = 0.0
 
+        logger.info(
+                f"TrailingStop: price {price}"
+        )
         if not symbol or price <= 0:
             return
 
@@ -166,6 +170,9 @@ class TrailingStopManager:
         for side in ('LONG', 'SHORT'):
             position_key = f"{symbol}_{side}"
             position = self.trader.open_positions.get(position_key)
+            logger.info(
+                f"TrailingStop: position {position}"
+            )
             if not position:
                 continue
             await self._process_position(position_key, position, price)
