@@ -453,7 +453,7 @@ class TrailingStopManager:
             f"old_order={old_sl_order_id}, new_order={new_order_id})"
         )
 
-        event_leverage = position.get('leverage') or 1'
+        event_leverage = position.get('leverage') or 1
         try:
             event_leverage = float(event_leverage)
         except (TypeError, ValueError):
