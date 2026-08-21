@@ -168,7 +168,7 @@ class TrailingStopManager:
             position_key = "{symbol}_{side}"
             position = self.trader.open_positions.get(position_key)
             logger.info(
-                f"TrailingStop: position {position}"
+                f"TrailingStop: position {position_key} {position}"
             )
             if not position:
                 continue
