@@ -68,6 +68,118 @@ def _cb(*parts: Any) -> str:
         logger.warning(f"callback_data занадто довгий ({len(data)} байт): {data}")
     return data
 
+PARAM_CATALOG: Dict[str, Tuple[str, str]] = {
+    # --- спільні для більшості стратегій ---
+    "timeframe_seconds": (
+        "Таймфрейм (сек)",
+        "Розмір однієї свічки в секундах, на якій рахуються сигнали стратегії.",
+    ),
+    "position_size": (
+        "Розмір позиції (USDT)",
+        "Сума в USDT, від якої виділяється 1/10 (10% [ 100$ -> 10$ ] ) на одну угоду цієї стратегії.",
+    ),
+    "leverage": (
+        "Плече",
+        "Кредитне плече, з яким відкриваються угоди цієї стратегії.",
+    ),
+    "cooldown_seconds": (
+        "Кулдаун між угодами (сек)",
+        "Мінімальний час після закриття угоди по символу, перш ніж стратегія може знову відкрити по ньому позицію.",
+    ),
+    "stop_loss_percent": (
+        "Стоп-лосс (% ROI)",
+        "На скільки відсотків ROI (з урахуванням плеча) ціна може піти проти позиції, перш ніж вона закриється по стопу.",
+    ),
+    "stop_loss_buffer_percent": (
+        "Стоп-лосс (% ROI)",
+        "На скільки відсотків ROI (з урахуванням плеча) ціна може піти проти позиції, перш ніж вона закриється по стопу.",
+    ),
+    "take_profit_percent": (
+        "Тейк-профіт (% ROI)",
+        "На скільки відсотків ROI (з урахуванням плеча) має вирости прибуток, щоб позиція закрилась по тейку.",
+    ),
+    "take_profit_levels": (
+        "Рівні тейк-профіту",
+        "Список рівнів фіксації прибутку (ціна у % та частка позиції для закриття на кожному рівні). "
+        "Редагування списку через це меню недоступне — змінюйте в конфігурації бота.",
+    ),
+
+    # --- RejectionBlockStrategy (price-action патерн) ---
+    "wick_to_body_ratio": (
+        "Тінь / тіло",
+        "У скільки разів домінантна тінь свічки має бути більшою за її тіло, щоб свічка вважалась патерном.",
+    ),
+    "min_wick_ratio": (
+        "Мін. частка домінантної тіні",
+        "Яку мінімальну частку від усього діапазону свічки має займати домінантна тінь (0.6 = 60%).",
+    ),
+    "opposite_wick_max_ratio": (
+        "Макс. частка протилежної тіні",
+        "Наскільки великою може бути протилежна (не домінантна) тінь відносно домінантної, щоб патерн ще зарахувався.",
+    ),
+    "overlap_tolerance_percent": (
+        "Допуск перекриття тіней (%)",
+        "Наскільки (у % від ціни) тінь поточної свічки може не доходити до тіні попередньої й все одно вважатись 'перекриттям'.",
+    ),
+    "min_body_percent": (
+        "Мін. розмір тіла свічки (%)",
+        "Мінімальний розмір тіла свічки у % від ціни — відсіює свічки-голки на порожньому об'ємі.",
+    ),
+
+    # --- SimpleMovingAverageStrategy ---
+    "sma_period": (
+        "Період SMA",
+        "Кількість свічок, за якими рахується просте ковзне середнє (SMA).",
+    ),
+    "threshold_percent": (
+        "Поріг сигналу (%)",
+        "Наскільки далеко (у %) ціна має відхилитись від SMA, щоб це вважалось сигналом на вхід.",
+    ),
+    "confirmation_candles": (
+        "Свічок підтвердження",
+        "Скільки послідовних свічок в один бік потрібно для підтвердження сигналу, перш ніж відкрити позицію.",
+    ),
+    "atr_period": (
+        "Період ATR",
+        "Кількість свічок, за якими рахується ATR (середній істинний діапазон) для розрахунку ризику.",
+    ),
+    "use_atr_risk": (
+        "Ризик за ATR",
+        "Якщо увімкнено — стоп і тейки рахуються від ATR (волатильності), а не від фіксованих відсотків.",
+    ),
+    "atr_stop_multiplier": (
+        "Множник ATR для стопу",
+        "На скільки ATR (помножених на це число) стоп-лосс віддаляється від ціни входу.",
+    ),
+    "atr_tp_multipliers": (
+        "Множники ATR для тейків",
+        "Список множників ATR для кожного рівня тейк-профіту (напр. [2.0, 3.5] — другий тейк далі першого). "
+        "Редагування списку через це меню недоступне — змінюйте в конфігурації бота.",
+    ),
+    "tp_close_percents": (
+        "% закриття по рівнях тейку",
+        "Яку частку позиції закривати на кожному рівні тейк-профіту (напр. [50, 50] — по половині на кожному). "
+        "Редагування списку через це меню недоступне — змінюйте в конфігурації бота.",
+    ),
+}
+
+
+def _prettify_key(key: str) -> str:
+    """Fallback-перетворення технічного ключа параметра на людську назву,
+    коли його немає в PARAM_CATALOG: "atr_stop_multiplier" -> "Atr stop multiplier".
+    Не такий гарний, як ручний запис у каталозі, але кращий за сирий ключ
+    і не дає меню зламатись на новому/незадокументованому параметрі."""
+    return key.replace("_", " ").strip().capitalize() or key
+
+
+def _catalog_lookup(key: str) -> Tuple[str, Optional[str]]:
+    """Повертає (людська назва, опис) для ключа параметра: з PARAM_CATALOG,
+    якщо він там є, інакше (_prettify_key(key), None)."""
+    entry = PARAM_CATALOG.get(key)
+    if entry:
+        return entry
+    return _prettify_key(key), None
+
 
 # ---------------------------------------------------------------------------
 # Декларативний опис параметрів (для ручного оверрайду)
@@ -84,6 +196,7 @@ class ParamSpec:
     max_value: Optional[float] = None                   # для kind="number"
     fmt: Callable[[Any], str] = str                     # як показати значення в кнопці/тексті
     parse: Callable[[str], Any] = lambda s: s           # як розпарсити текст користувача (number/text)
+    description: Optional[str] = None                   # короткий опис параметра для користувача (може бути None)
 
     def render_value(self, value: Any) -> str:
         try:
@@ -103,20 +216,20 @@ class StrategySchema:
 
 
 def _infer_param_spec(key: str, value: Any) -> Optional[ParamSpec]:
-    """
-    Автоматично визначає тип параметра за його поточним значенням у БД.
-    bool перевіряємо ДО int, бо в Python bool є підтипом int.
-    Списки/словники/None не редагуємо через просте меню — повертаємо None,
-    такий параметр покажеться лише для перегляду.
-    """
+
+    label, description = _catalog_lookup(key)
+
     if isinstance(value, bool):
-        return ParamSpec(key=key, label=key, kind="bool")
+        return ParamSpec(key=key, label=label, kind="bool", description=description)
     if isinstance(value, int):
-        return ParamSpec(key=key, label=key, kind="number", parse=int)
+        return ParamSpec(key=key, label=label, kind="number", parse=int, description=description)
     if isinstance(value, float):
-        return ParamSpec(key=key, label=key, kind="number", parse=float, fmt=lambda v: f"{float(v):.4f}")
+        return ParamSpec(
+            key=key, label=label, kind="number", parse=float,
+            fmt=lambda v: f"{float(v):.4f}", description=description,
+        )
     if isinstance(value, str):
-        return ParamSpec(key=key, label=key, kind="text", parse=str)
+        return ParamSpec(key=key, label=label, kind="text", parse=str, description=description)
     return None
 
 
@@ -125,43 +238,6 @@ def _infer_param_spec(key: str, value: Any) -> Optional[ParamSpec]:
 # ---------------------------------------------------------------------------
 
 class SettingsMenu:
-    """
-    Універсальний рушій вкладених inline-меню для редагування параметрів
-    стратегій (StrategySettingsStore) прямо з Telegram.
-
-    Базове використання (авто-режим, без ручного опису схем):
-
-        settings_menu = SettingsMenu(strategy_settings_store, strategy_manager=strategy_manager)
-        settings_menu.register(application)
-
-        # кнопка входу в меню — де завгодно у вашому боті:
-        InlineKeyboardButton("⚙️ Параметри стратегій", callback_data=settings_menu.root_callback())
-
-    Список стратегій і всі їх параметри меню бере прямо з БД. Достатньо, щоб
-    десь у коді (там, де ви створюєте реальні стратегії) було:
-
-        strategy_settings_store.seed_defaults("MyStrategy", {"period": 14, "enabled": True})
-
-    Ручний оверрайд для конкретної стратегії (напр. щоб зробити choice-список
-    замість вільного вводу тексту):
-
-        schemas = {
-            "MyStrategy": StrategySchema(
-                title="Моя стратегія",
-                params=[
-                    ParamSpec(key="mode", label="Режим", kind="choice",
-                              choices=["conservative", "aggressive"]),
-                ],
-            ),
-        }
-        settings_menu = SettingsMenu(strategy_settings_store, schemas, strategy_manager=strategy_manager)
-
-    Параметр strategy_manager — опційний. Якщо передано (StrategyManager із
-    strategies/manager.py), усі зміни (тумблер стратегії, тумблер/значення
-    параметра, reset до заводських) одразу застосовуються до live-інстансів
-    стратегій, без рестарту бота. Якщо не передано — поведінка як раніше:
-    зміни пишуться лише в БД і застосовуються при наступному старті.
-    """
 
     def __init__(
         self,
@@ -188,7 +264,8 @@ class SettingsMenu:
 
     def _get_schema(self, strategy_name: str) -> StrategySchema:
         """Повертає схему для стратегії: якщо для неї є ручний оверрайд - бере
-        його; інакше будує схему на льоту з поточних значень у БД."""
+        його; інакше будує схему на льоту з поточних значень у БД, підставляючи
+        людські назви/описи з PARAM_CATALOG."""
         if strategy_name in self.schemas:
             return self.schemas[strategy_name]
 
@@ -197,8 +274,9 @@ class SettingsMenu:
         for key, value in current.items():
             spec = _infer_param_spec(key, value)
             if spec is None:
-                # список/словник/None тощо - показуємо лише для перегляду
-                spec = ParamSpec(key=key, label=key, kind="readonly", fmt=lambda v: str(v))
+               
+                label, description = _catalog_lookup(key)
+                spec = ParamSpec(key=key, label=label, kind="readonly", fmt=lambda v: str(v), description=description)
             params.append(spec)
 
         return StrategySchema(title=strategy_name, params=params)
@@ -214,6 +292,10 @@ class SettingsMenu:
 
         parts = query.data.split(SEP)
         action = parts[1]  # parts[0] == CB_PREFIX
+
+        chat_id = update.effective_chat.id
+        if action != "num":
+            self._awaiting.pop(chat_id, None)
 
         if action == "root":
             page = int(parts[2])
@@ -320,6 +402,7 @@ class SettingsMenu:
             else "🔴 Стратегія вимкнена (натисніть, щоб увімкнути)"
         rows.append([InlineKeyboardButton(toggle_label, callback_data=_cb(CB_PREFIX, "tglstrat", strategy))])
 
+        desc_lines: List[str] = []
         for spec in page_items:
             value = current.get(spec.key)
             if spec.kind == "bool":
@@ -335,6 +418,8 @@ class SettingsMenu:
                 label = f"{spec.label}: {spec.render_value(value)}"
                 cb = _cb(CB_PREFIX, "num", strategy, spec.key)
             rows.append([InlineKeyboardButton(label, callback_data=cb)])
+            if spec.description:
+                desc_lines.append(f"• <b>{spec.label}</b> — {spec.description}")
 
         if not schema.params:
             rows.append([InlineKeyboardButton("📭 Немає параметрів", callback_data=_cb(CB_PREFIX, "noop"))])
@@ -345,7 +430,12 @@ class SettingsMenu:
 
         status_mark = "🟢" if is_enabled else "🔴"
         modified_mark = " ✏️" if self.store.is_modified(strategy) else ""
-        text = f"<b>⚙️ {status_mark} {schema.title}{modified_mark}</b>\nСторінка {page + 1}/{total_pages}"
+        desc_block = ("\n\n" + "\n".join(desc_lines)) if desc_lines else ""
+        text = (
+            f"<b>⚙️ {status_mark} {schema.title}{modified_mark}</b>\n"
+            f"Сторінка {page + 1}/{total_pages}"
+            f"{desc_block}"
+        )
         return text, InlineKeyboardMarkup(rows)
 
     def _render_choice(self, strategy: str, key: str) -> Tuple[str, InlineKeyboardMarkup]:
@@ -360,7 +450,8 @@ class SettingsMenu:
             rows.append([InlineKeyboardButton(f"{mark}{choice}", callback_data=_cb(CB_PREFIX, "val", strategy, key, idx))])
 
         rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=_cb(CB_PREFIX, "strat", strategy, 0))])
-        text = f"<b>{spec.label}</b>\nОберіть значення:"
+        desc_line = f"<i>{spec.description}</i>\n\n" if spec.description else ""
+        text = f"<b>{spec.label}</b>\n{desc_line}Оберіть значення:"
         return text, InlineKeyboardMarkup(rows)
 
     # ---------- пагінація (спільна для будь-якого списку) ----------
@@ -410,12 +501,17 @@ class SettingsMenu:
         if spec.min_value is not None or spec.max_value is not None:
             rng = f" (діапазон: {spec.min_value} … {spec.max_value})"
 
+        desc_line = f"<i>{spec.description}</i>\n" if spec.description else ""
         text = (
             f"✏️ Введіть нове значення для <b>{spec.label}</b>{rng}\n"
+            f"{desc_line}"
             f"Поточне: <code>{spec.render_value(current.get(key))}</code>\n\n"
-            f"Надішліть значення наступним повідомленням, або /cancel для відміни."
+            f"Надішліть значення наступним повідомленням."
         )
-        await query.edit_message_text(text, parse_mode="HTML")
+        back_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ Назад", callback_data=_cb(CB_PREFIX, "strat", strategy, 0))
+        ]])
+        await query.edit_message_text(text, reply_markup=back_kb, parse_mode="HTML")
 
         chat_id = update.effective_chat.id
         self._awaiting[chat_id] = (strategy, key, query.message.message_id)
@@ -430,11 +526,6 @@ class SettingsMenu:
         spec = self._get_schema(strategy).get(key)
         raw = update.message.text.strip()
 
-        if raw == "/cancel":
-            del self._awaiting[chat_id]
-            await update.message.reply_text("Скасовано")
-            return
-
         try:
             value = spec.parse(raw)
             if spec.min_value is not None and value < spec.min_value:
@@ -442,7 +533,7 @@ class SettingsMenu:
             if spec.max_value is not None and value > spec.max_value:
                 raise ValueError(f"максимум {spec.max_value}")
         except Exception as e:
-            await update.message.reply_text(f"❌ Невірне значення: {e}. Спробуйте ще раз або /cancel")
+            await update.message.reply_text(f"❌ Невірне значення: {e}. Спробуйте ще раз.")
             return
 
         self._set_param(strategy, key, value)
