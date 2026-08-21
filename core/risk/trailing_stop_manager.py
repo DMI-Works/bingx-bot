@@ -1,7 +1,7 @@
 """
 Керування SL у рантаймі: єдиний стоп-лосс позиції переставляється
-СХОДИНКАМИ (у % від ціни входу) у бік прибутку, поки ціна не досягла
-чергового порогу — і ніколи не рухається назад.
+СХОДИНКАМИ у бік прибутку, поки ціна не досягла чергового порогу — і
+ніколи не рухається назад.
 
 ВАЖЛИВО (з'ясовано емпірично, BingX API error 110406 "Position SL order
 already exists"): на BingX SL — це НЕ довільний reduce-only ордер, а
@@ -18,16 +18,23 @@ price" для swap-ордерів BingX не надає).
 на нову ціну і від цього моменту вважається "керованим" цим модулем. Далі
 він рухається ЛИШЕ вперед, на кожен наступний ДОСЯГНУТИЙ поріг.
 
-Сходинка (приклад): trail_levels_percent = [2.0, 8.0]
-    - рух ціни в наш бік досяг +2% від входу -> SL переставляється на
-      +(2% - буфер) від входу;
-    - рух досяг +8% -> SL переставляється на +(8% - буфер) від входу.
+ОДИНИЦІ ВИМІРУ (ROI% vs price%):
+    trail_levels_percent задається в ROI% — так само, як SL/TP у
+    стратегіях (наприклад RejectionBlockStrategy: "SL=5.0% ROI ->
+    0.50000000% price" при leverage=10x). Це узгоджено з тим, як
+    користувач/стратегії думають про профіт: "+2% ROI", а не "+2% руху
+    ціни". Перед порівнянням із фактичним рухом ціни (favorable_fraction,
+    яке завжди є price%) кожен рівень ділиться на leverage конкретної
+    позиції:
 
-Буфер (dynamic_stop_buffer_percent) віднімається від рівня перед
-розрахунком фактичної ціни стопу: поки тик обробляється і запит іде до
-біржі, ціна встигає "втекти" далі, і без запасу цільова ціна може
-виявитись вже позаду ринку (біржа відбиває ордер як застарілий, помилка
-110412 "current price").
+        level_price_percent = level_roi_percent / leverage
+
+    Приклад: trail_levels_percent = [2.0, 8.0], leverage = 10x
+        - рух ціни в наш бік досяг +0.2% від входу (= +2% ROI при 10x)
+          -> SL переставляється на новий рівень;
+        - рух досяг +0.8% від входу (= +8% ROI при 10x) -> SL
+          переставляється знову.
+
 
 Правила руху:
     - тільки вперед, ніколи в мінус і ніколи нижче вже застосованого рівня;
@@ -35,7 +42,6 @@ price" для swap-ордерів BingX не надає).
       позначається застосованим, і на наступному тіку буде здійснена нова
       спроба (з коротким кулдауном, щоб не спамити біржу при постійному
       збої).
-
 """
 
 from __future__ import annotations
@@ -86,44 +92,28 @@ class TrailingStopManager:
         cfg = config or {}
         self.enabled: bool = cfg.get('enabled', True)
 
-        # Сходинки (у % від ціни входу), на яких SL переставляється в бік
-        # прибутку. [2.0, 8.0] = коли рух ціни в наш бік досяг +2% від
-        # входу — SL стає на +2% (мінус буфер, див. нижче); коли рух досяг
-        # +8% — на +8% (мінус буфер). Автоматично сортується й дедублюється;
-        # порожній список = SL стратегії ніколи не чіпається.
-        raw_levels = cfg.get('trail_levels_percent', [2.0, 8.0])
+        raw_levels = cfg.get('trail_levels_percent', [2.0, 4.0, 8.0, 16.0, 32.0, 64.0])
         self.trail_levels_percent: List[float] = sorted({float(x) for x in raw_levels if x > 0})
 
-        # Буфер (у % від ціни входу), який ВІДНІМАЄМО від досягнутого рівня
-        # ПЕРЕД тим, як рахувати фактичну ціну SL. Наприклад, при рівні 2% і
-        # буфері 1% реальний стоп ставиться на +1% від входу, а не на +2% —
-        # так стоп завжди лишається з запасом позаду ринку на момент
-        # виставлення, навіть якщо ціна встигла "стрибнути" далі, поки тик
-        # оброблявся.
-        self.stop_buffer_percent: float = cfg.get('dynamic_stop_buffer_percent', 1.0)  # 1%
+        self.stop_buffer_percent: float = cfg.get('dynamic_stop_buffer_percent', 0.5)  # 0.5% ROI
 
-        # Запасний буфер (частка ціни) для re-anchor: використовується ЛИШЕ
-        # якщо біржа відбила цільову ціну як застарілу — тоді SL
-        # переставляється від живої ціни на цю відстань.
+        self.max_buffer_fraction_of_level: float = cfg.get('max_buffer_fraction_of_level', 0.8)
+
+.
         self.reanchor_buffer_percent: float = cfg.get('reanchor_buffer_percent', 0.001)  # 0.1%
 
-        # короткий кулдаун після НЕВДАЛОЇ спроби перемістити SL (будь-яка
-        # причина, не лише rate limit) — щоб не спамити біржу щотіку, поки
-        # проблема не зникне сама (зникла zombie-позиція, минув rate limit тощо)
         self.move_retry_cooldown_seconds: float = cfg.get('move_retry_cooldown_seconds', 15.0)
 
         self._states: Dict[str, _TrailState] = {}
-        # position_key -> unix timestamp, до якого не намагаємось рухати SL
-        # цієї позиції — виставляється після будь-якої невдалої спроби
-        # переміщення (rate limit, zombie-позиція, будь-яка інша помилка API)
         self._retry_after: Dict[str, float] = {}
 
         if self.enabled:
             self.event_bus.subscribe(EventType.PRICE_UPDATED, self._on_price_update)
             self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
             logger.info(
-                f"TrailingStopManager initialized: levels={self.trail_levels_percent}%, "
-                f"buffer={self.stop_buffer_percent}% (single SL slot, moved via cancel+create on level crossings)"
+                f"TrailingStopManager initialized: levels={self.trail_levels_percent}%ROI, "
+                f"buffer={self.stop_buffer_percent}%ROI (capped at {self.max_buffer_fraction_of_level:.0%} of level) "
+                f"(single SL slot, moved via cancel+create on level crossings)"
             )
         else:
             logger.info("TrailingStopManager initialized but disabled via config")
@@ -135,17 +125,10 @@ class TrailingStopManager:
         event.data — той самий формат, що й у BaseStrategy._on_price_update:
         список трейдів з полями 's' (symbol) і 'p' (price) від WS.
         """
-        
         if not self.enabled or not self.trail_levels_percent:
-            logger.info(
-                f"TrailingStop: no-op tick — enabled={self.enabled}, levels={self.trail_levels_percent}"
-            )
             return
 
         raw = event.data
-        logger.info(
-                f"TrailingStop: data {raw}"
-        )
         if not raw:
             return
 
@@ -167,26 +150,29 @@ class TrailingStopManager:
         for side in ('LONG', 'SHORT'):
             position_key = f"{symbol}_{side}"
             position = self.trader.open_positions.get(position_key)
-            logger.info(
-                f"TrailingStop: position {position_key} {position}"
-            )
             if not position:
                 continue
             await self._process_position(position_key, position, price)
 
-    def _highest_reached_level_index(self, favorable_fraction: float, last_applied_index: int) -> int:
+    def _highest_reached_level_index(
+        self, favorable_fraction: float, last_applied_index: int, leverage: float
+    ) -> int:
         """Повертає індекс найвищого ЩЕ НЕ застосованого порогу з
         trail_levels_percent, якого досягла поточна сприятлива зміна ціни
-        (favorable_fraction — частка від ціни входу). Якщо ціна одним тіком
-        проскочила відразу кілька порогів (геп/волатильність) — повертає
-        найвищий з них, а не перший. Якщо новий поріг не досягнуто —
-        повертає last_applied_index без змін.
+        (favorable_fraction — частка від ціни входу, тобто "price%").
+        trail_levels_percent задається в ROI%, тому перед порівнянням
+        переводимо поріг у price% діленням на leverage: поріг 2.0% ROI
+        при leverage=10 відповідає лише 0.2% руху ціни. Якщо ціна одним
+        тіком проскочила відразу кілька порогів (геп/волатильність) —
+        повертає найвищий з них, а не перший. Якщо новий поріг не
+        досягнуто — повертає last_applied_index без змін.
         """
         target = last_applied_index
-        for i, level_percent in enumerate(self.trail_levels_percent):
+        for i, level_roi_percent in enumerate(self.trail_levels_percent):
             if i <= target:
                 continue
-            if favorable_fraction >= level_percent / 100.0:
+            level_price_percent = level_roi_percent / leverage
+            if favorable_fraction >= level_price_percent / 100.0:
                 target = i
         return target
 
@@ -210,27 +196,84 @@ class TrailingStopManager:
             logger.debug(f"TrailingStop: {position_key} SKIP: no sl_order_id on position")
             return
 
+        # trail_levels_percent задано в ROI% (аналогічно SL/TP стратегій),
+        # тому для порівняння з favorable_fraction (price%) переводимо
+        # через leverage конкретної позиції
+        leverage = position.get('leverage') or 1
+        try:
+            leverage = float(leverage)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"TrailingStop: {position_key} invalid leverage={leverage!r}, falling back to 1x"
+            )
+            leverage = 1.0
+        if leverage <= 0:
+            leverage = 1.0
+
         favorable_fraction = (
             (price - entry_price) / entry_price if side == 'LONG'
             else (entry_price - price) / entry_price
         )
+        favorable_roi_percent = favorable_fraction * leverage * 100.0
+
+        state = self._states.setdefault(position_key, _TrailState())
+
+        # --- єдиний лог "серцебиття" позиції: показує, куди рухається
+        # ціна відносно входу та наступного порогу сходинки (в ROI%, щоб
+        # легко звіряти з тим, що видно на біржі), щоб було видно, ЧОМУ
+        # стоп не рухається (у мінусі / ще не дійшло до порогу / порогів
+        # вже нема) без спаму по всіх символах підряд — рядок друкується
+        # лише для позицій, що реально відкриті.
+        applied_level = (
+            self.trail_levels_percent[state.last_applied_level_index]
+            if state.last_applied_level_index >= 0 else None
+        )
+        next_level = (
+            self.trail_levels_percent[state.last_applied_level_index + 1]
+            if state.last_applied_level_index + 1 < len(self.trail_levels_percent) else None
+        )
+        current_sl_price = position.get('stop_loss_price')
+        if current_sl_price is not None:
+            current_sl_fraction = (
+                (current_sl_price - entry_price) / entry_price if side == 'LONG'
+                else (entry_price - current_sl_price) / entry_price
+            )
+            current_sl_roi_percent = current_sl_fraction * leverage * 100.0
+            current_sl_str = f"{current_sl_fraction:+.3%}price/{current_sl_roi_percent:+.2f}%ROI ({current_sl_price:.6f})"
+        else:
+            current_sl_str = "None"
+        logger.info(
+            f"TrailingStop: {position_key} price={price:.6f} entry={entry_price:.6f} "
+            f"favorable_price={favorable_fraction:+.3%} favorable_roi={favorable_roi_percent:+.2f}% "
+            f"leverage={leverage:g}x applied_level={applied_level}%ROI "
+            f"next_level={next_level}%ROI current_sl={current_sl_str}"
+        )
+
         if favorable_fraction <= 0:
             # позиція в мінусі або рівно на вході — НІКОЛИ не рухаємо SL у
             # цей бік, лише вперед, у прибуток
             return
 
-        state = self._states.setdefault(position_key, _TrailState())
-
-        target_index = self._highest_reached_level_index(favorable_fraction, state.last_applied_level_index)
+        target_index = self._highest_reached_level_index(
+            favorable_fraction, state.last_applied_level_index, leverage
+        )
         if target_index <= state.last_applied_level_index:
             return  # жодного нового порогу не досягнуто
 
-        level_percent = self.trail_levels_percent[target_index]
-        # реальну ціну стопу рахуємо не від самого рівня, а від рівня МІНУС
-        # буфер — так SL завжди лишається трохи позаду ринку на момент
-        # виставлення (детальніше — у docstring модуля). Ніколи не йдемо
-        # нижче 0% (тобто гірше за вхід).
-        effective_percent = max(level_percent - self.stop_buffer_percent, 0.0)
+        level_roi_percent = self.trail_levels_percent[target_index]
+        level_price_percent = level_roi_percent / leverage
+
+        buffer_price_percent = self.stop_buffer_percent / leverage
+        max_buffer_price_percent = level_price_percent * self.max_buffer_fraction_of_level
+        if buffer_price_percent > max_buffer_price_percent:
+            logger.warning(
+                f"TrailingStop: {position_key} buffer {buffer_price_percent:.4f}% price would exceed "
+                f"{self.max_buffer_fraction_of_level:.0%} of level {level_price_percent:.4f}% price "
+                f"(level={level_roi_percent:g}%ROI, leverage={leverage:g}x) — capping buffer to avoid SL landing at entry"
+            )
+            buffer_price_percent = max_buffer_price_percent
+
+        effective_percent = max(level_price_percent - buffer_price_percent, 0.0)
         desired_stop = (
             entry_price * (1 + effective_percent / 100.0) if side == 'LONG'
             else entry_price * (1 - effective_percent / 100.0)
@@ -258,7 +301,7 @@ class TrailingStopManager:
                     state.last_applied_level_index = target_index  # рівень технічно "пройдено", просто нема чого рухати
                     return
 
-            success = await self._move_stop_loss(position_key, position, desired_stop, level_percent)
+            success = await self._move_stop_loss(position_key, position, desired_stop, level_roi_percent)
             if success:
                 state.last_applied_level_index = target_index
             else:
@@ -269,11 +312,14 @@ class TrailingStopManager:
     # ---------- реальне переміщення SL на біржі ----------
 
     async def _move_stop_loss(
-        self, position_key: str, position: dict, desired_stop_price: float, level_percent: float
+        self, position_key: str, position: dict, desired_stop_price: float, level_roi_percent: float
     ) -> bool:
         """Переставляє єдиний SL позиції (cancel старого + create нового).
-        Повертає True при успіху, False при будь-якій невдачі (виклик, що
-        не позначає рівень застосованим і намагається ще раз пізніше)."""
+        level_roi_percent — тригерний рівень у ROI% (лише для логів/подій,
+        сама ціна desired_stop_price вже порахована з урахуванням leverage
+        та буфера у _process_position). Повертає True при успіху, False
+        при будь-якій невдачі (виклик, що не позначає рівень застосованим
+        і намагається ще раз пізніше)."""
         symbol = position['symbol']
         side = position['side']
         quantity = position.get('remaining_quantity') or position.get('quantity')
@@ -402,7 +448,7 @@ class TrailingStopManager:
             )
             await self._notify_critical(
                 f"⚠️ Не вдалося перевиставити SL для {symbol} {side} на {desired_stop_price:.6f} "
-                f"(рівень {level_percent:g}%, старий SL вже відмінено): "
+                f"(рівень {level_roi_percent:g}% ROI, старий SL вже відмінено): "
                 f"{last_error.code if last_error else '?'} {last_error.msg if last_error else ''}. "
                 f"Перевірте вручну — позиція може бути без захисту!"
             )
@@ -437,7 +483,7 @@ class TrailingStopManager:
 
         logger.info(
             f"TrailingStop: SL for {position_key} -> {new_stop_price:.6f} "
-            f"(trigger_level={level_percent:g}%, buffer={self.stop_buffer_percent:g}%, "
+            f"(trigger_level={level_roi_percent:g}%ROI, buffer={self.stop_buffer_percent:g}%price, "
             f"old_order={old_sl_order_id}, new_order={new_order_id})"
         )
 
@@ -447,7 +493,7 @@ class TrailingStopManager:
                 data={
                     'symbol': symbol,
                     'side': side,
-                    'stage': f"level_{level_percent:g}pct",
+                    'stage': f"level_{level_roi_percent:g}pct_roi",
                     'entry_price': position.get('entry_price'),
                     'old_stop_price': old_stop_price,
                     'new_stop_price': new_stop_price,
