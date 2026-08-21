@@ -64,7 +64,7 @@ class TrailingStopManager:
 
         self.move_retry_cooldown_seconds: float = cfg.get('move_retry_cooldown_seconds', 15.0)
 
-        self.emergency_static_stop_percent: float = cfg.get('emergency_static_stop_percent', 0.1)  # 0.1% price
+        self.emergency_static_stop_percent: float = cfg.get('emergency_static_stop_percent', 1.0) # 1% від живої ціни
 
         self._states: Dict[str, _TrailState] = {}
         self._retry_after: Dict[str, float] = {}
@@ -453,6 +453,14 @@ class TrailingStopManager:
             f"old_order={old_sl_order_id}, new_order={new_order_id})"
         )
 
+        event_leverage = position.get('leverage') or 1'
+        try:
+            event_leverage = float(event_leverage)
+        except (TypeError, ValueError):
+            event_leverage = 1.0
+        if event_leverage <= 0:
+            event_leverage = 1.0
+
         try:
             await self.event_bus.publish(Event(
                 type=EventType.STOP_LOSS_MOVED,
@@ -463,6 +471,7 @@ class TrailingStopManager:
                     'entry_price': position.get('entry_price'),
                     'old_stop_price': old_stop_price,
                     'new_stop_price': new_stop_price,
+                    'leverage': event_leverage,
                     'strategy': position.get('strategy'),
                 },
                 source="TrailingStopManager",

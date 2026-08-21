@@ -404,42 +404,59 @@ class TelegramBot:
 
     async def _on_stop_loss_moved(self, event: Event) -> None:
         data = event.data
- 
+
         symbol = data.get('symbol', 'N/A')
         side = data.get('side', 'N/A')
         stage = data.get('stage')
         old_price = data.get('old_stop_price')
         new_price = data.get('new_stop_price')
         entry_price = data.get('entry_price')
+        leverage = data.get('leverage') or 1
         strategy = data.get('strategy')
- 
+
         stage_label = {
             'breakeven': '🟡 Перенесено в беззбиток',
             'trailing': '🟢 Підтягнуто трейлінгом',
         }.get(stage, '🔄 Стоп перенесено')
- 
+
         side_emoji = "🟢" if side == "LONG" else "🔴"
- 
+
         if old_price is None or new_price is None or entry_price is None:
             logger.warning(f"STOP_LOSS_MOVED event missing price data: {data}")
             await self.send_message(f"{stage_label}\n\n{side_emoji} <b>{symbol}</b> {side}")
             return
- 
-        # decimals під ціну, як і в решті бота — щоб не показувати "0.00" на дешевих монетах
-        ref = abs(new_price or entry_price or 0)
+
+        try:
+            leverage = float(leverage)
+        except (TypeError, ValueError):
+            leverage = 1.0
+        if leverage <= 0:
+            leverage = 1.0
+
+        ref = abs(entry_price or 0)
         decimals = 4 if ref >= 1 else (6 if ref >= 0.01 else 8)
- 
+
+        def _roi_percent(stop_price: float) -> float:
+            fraction = (
+                (stop_price - entry_price) / entry_price if side == 'LONG'
+                else (entry_price - stop_price) / entry_price
+            )
+            return fraction * leverage * 100.0
+
+        old_roi = _roi_percent(old_price)
+        new_roi = _roi_percent(new_price)
+
         text = f"""
-{stage_label}
- 
-{side_emoji} <b>{symbol}</b> {side}
-├ Вхід: <code>${entry_price:.{decimals}f}</code>
-├ Старий стоп: <code>${old_price:.{decimals}f}</code>
-└ Новий стоп: <code>${new_price:.{decimals}f}</code>
-"""
+    {stage_label}
+
+    {side_emoji} <b>{symbol}</b> {side}
+    ├ Вхід: <code>${entry_price:.{decimals}f}</code>
+    ├ Старий стоп: <code>{old_roi:+.2f}% ROI</code>
+    └ Новий стоп: <code>{new_roi:+.2f}% ROI</code>
+    """
         if strategy:
             text += f"\n[INFO]: Стратегія: {strategy}"
- 
+
         await self.send_message(text)
 
     async def _on_take_profit_triggered(self, event: Event) -> None:
