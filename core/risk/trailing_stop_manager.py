@@ -160,15 +160,12 @@ class TrailingStopManager:
         except (TypeError, ValueError):
             price = 0.0
 
-        logger.info(
-                f"TrailingStop: price {price}"
-        )
         if not symbol or price <= 0:
             return
 
         # позиція може бути LONG і/або SHORT одночасно (hedge mode) — перевіряємо обидві
         for side in ('LONG', 'SHORT'):
-            position_key = f"{symbol}"
+            position_key = "{symbol}_{side}"
             position = self.trader.open_positions.get(position_key)
             logger.info(
                 f"TrailingStop: position {position}"
