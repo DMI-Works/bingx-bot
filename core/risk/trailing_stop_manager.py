@@ -64,7 +64,7 @@ class TrailingStopManager:
 
         self.move_retry_cooldown_seconds: float = cfg.get('move_retry_cooldown_seconds', 15.0)
 
-        self.emergency_static_stop_percent: float = cfg.get('emergency_static_stop_percent', 1.0) # 1% від живої ціни
+        self.emergency_static_stop_percent: float = cfg.get('emergency_static_stop_percent', 1.0)  # 1% ROI
 
         self._states: Dict[str, _TrailState] = {}
         self._retry_after: Dict[str, float] = {}
@@ -75,7 +75,7 @@ class TrailingStopManager:
             logger.info(
                 f"TrailingStopManager initialized: levels={self.trail_levels_percent}%ROI, "
                 f"buffer={self.stop_buffer_percent}%ROI (capped at {self.max_buffer_fraction_of_level:.0%} of level) "
-                f"emergency_static_stop={self.emergency_static_stop_percent}%price "
+                f"emergency_static_stop={self.emergency_static_stop_percent}%ROI "
                 f"(single SL slot, moved via cancel+create on level crossings)"
             )
         else:
@@ -117,24 +117,43 @@ class TrailingStopManager:
                 continue
             await self._process_position(position_key, position, price)
 
+    # ---------- допоміжне: ROI% <-> price% ----------
+
+    @staticmethod
+    def _safe_leverage(position: dict, position_key: str, context: str) -> float:
+        leverage = position.get('leverage') or 1
+        try:
+            leverage = float(leverage)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"TrailingStop: {position_key} invalid leverage={leverage!r} ({context}), falling back to 1x"
+            )
+            return 1.0
+        return leverage if leverage > 0 else 1.0
+
+    @staticmethod
+    def _roi_percent_to_price_percent(roi_percent: float, leverage: float) -> float:
+        """trail_levels_percent / stop_buffer_percent / emergency_static_stop_percent
+        задаються в ROI% (як TP/SL стратегій), тому перед застосуванням до
+        живої ціни завжди переводяться в price% діленням на leverage: поріг
+        2.0% ROI при leverage=10 відповідає лише 0.2% руху ціни."""
+        return roi_percent / leverage
+
     def _highest_reached_level_index(
         self, favorable_fraction: float, last_applied_index: int, leverage: float
     ) -> int:
         """Повертає індекс найвищого ЩЕ НЕ застосованого порогу з
         trail_levels_percent, якого досягла поточна сприятлива зміна ціни
         (favorable_fraction — частка від ціни входу, тобто "price%").
-        trail_levels_percent задається в ROI%, тому перед порівнянням
-        переводимо поріг у price% діленням на leverage: поріг 2.0% ROI
-        при leverage=10 відповідає лише 0.2% руху ціни. Якщо ціна одним
-        тіком проскочила відразу кілька порогів (геп/волатильність) —
-        повертає найвищий з них, а не перший. Якщо новий поріг не
-        досягнуто — повертає last_applied_index без змін.
+        Якщо ціна одним тіком проскочила відразу кілька порогів
+        (геп/волатильність) — повертає найвищий з них, а не перший. Якщо
+        новий поріг не досягнуто — повертає last_applied_index без змін.
         """
         target = last_applied_index
         for i, level_roi_percent in enumerate(self.trail_levels_percent):
             if i <= target:
                 continue
-            level_price_percent = level_roi_percent / leverage
+            level_price_percent = self._roi_percent_to_price_percent(level_roi_percent, leverage)
             if favorable_fraction >= level_price_percent / 100.0:
                 target = i
         return target
@@ -159,19 +178,7 @@ class TrailingStopManager:
             logger.debug(f"TrailingStop: {position_key} SKIP: no sl_order_id on position")
             return
 
-        # trail_levels_percent задано в ROI% (аналогічно SL/TP стратегій),
-        # тому для порівняння з favorable_fraction (price%) переводимо
-        # через leverage конкретної позиції
-        leverage = position.get('leverage') or 1
-        try:
-            leverage = float(leverage)
-        except (TypeError, ValueError):
-            logger.warning(
-                f"TrailingStop: {position_key} invalid leverage={leverage!r}, falling back to 1x"
-            )
-            leverage = 1.0
-        if leverage <= 0:
-            leverage = 1.0
+        leverage = self._safe_leverage(position, position_key, context="trail")
 
         favorable_fraction = (
             (price - entry_price) / entry_price if side == 'LONG'
@@ -224,9 +231,9 @@ class TrailingStopManager:
             return  # жодного нового порогу не досягнуто
 
         level_roi_percent = self.trail_levels_percent[target_index]
-        level_price_percent = level_roi_percent / leverage
+        level_price_percent = self._roi_percent_to_price_percent(level_roi_percent, leverage)
 
-        buffer_price_percent = self.stop_buffer_percent / leverage
+        buffer_price_percent = self._roi_percent_to_price_percent(self.stop_buffer_percent, leverage)
         max_buffer_price_percent = level_price_percent * self.max_buffer_fraction_of_level
         if buffer_price_percent > max_buffer_price_percent:
             logger.warning(
@@ -414,9 +421,9 @@ class TrailingStopManager:
             )
             await self._notify_critical(
                 f"⚠️ Не вдалося перевиставити SL для {symbol} {side} на {desired_stop_price:.6f} "
-                f"(рівень {level_roi_percent:g}% ROI, старий SL вже відмінено): "
+                f"(рівень {level_roi_percent:g}%ROI, старий SL вже відмінено): "
                 f"{last_error.code if last_error else '?'} {last_error.msg if last_error else ''}. "
-                f"Пробую аварійний статичний стоп {self.emergency_static_stop_percent:g}%..."
+                f"Пробую аварійний статичний стоп {self.emergency_static_stop_percent:g}%ROI..."
             )
             return await self._place_emergency_stop(position_key, position)
 
@@ -449,17 +456,11 @@ class TrailingStopManager:
 
         logger.info(
             f"TrailingStop: SL for {position_key} -> {new_stop_price:.6f} "
-            f"(trigger_level={level_roi_percent:g}%ROI, buffer={self.stop_buffer_percent:g}%price, "
+            f"(trigger_level={level_roi_percent:g}%ROI, buffer={self.stop_buffer_percent:g}%ROI, "
             f"old_order={old_sl_order_id}, new_order={new_order_id})"
         )
 
-        event_leverage = position.get('leverage') or 1
-        try:
-            event_leverage = float(event_leverage)
-        except (TypeError, ValueError):
-            event_leverage = 1.0
-        if event_leverage <= 0:
-            event_leverage = 1.0
+        event_leverage = self._safe_leverage(position, position_key, context="event publish")
 
         try:
             await self.event_bus.publish(Event(
@@ -486,11 +487,18 @@ class TrailingStopManager:
     async def _place_emergency_stop(self, position_key: str, position: dict) -> bool:
         """Аварійний стоп: ставиться, коли основна спроба перевиставити SL
         провалилась ПІСЛЯ того, як старий SL вже відмінено (позиція реально
-        лишилась без захисту на біржі)."""
+        лишилась без захисту на біржі).
+
+        emergency_static_stop_percent — це ROI%, так само як trail_levels_percent
+        і stop_buffer_percent. Перед застосуванням до живої ціни завжди
+        переводиться в price% діленням на leverage позиції — інакше на
+        плечі стоп ставиться в leverage-разів далі від ціни, ніж треба."""
         symbol = position['symbol']
         side = position['side']
         quantity = position.get('remaining_quantity') or position.get('quantity')
         close_side = 'SELL' if side == 'LONG' else 'BUY'
+
+        leverage = self._safe_leverage(position, position_key, context="emergency stop")
 
         try:
             live_price = await self.exchange.get_ticker_price(symbol)
@@ -502,10 +510,11 @@ class TrailingStopManager:
             )
             return False
 
-        pct = self.emergency_static_stop_percent
+        pct_roi = self.emergency_static_stop_percent
+        pct_price = self._roi_percent_to_price_percent(pct_roi, leverage)
         emergency_stop_price = (
-            live_price * (1 - pct / 100.0) if side == 'LONG'
-            else live_price * (1 + pct / 100.0)
+            live_price * (1 - pct_price / 100.0) if side == 'LONG'
+            else live_price * (1 + pct_price / 100.0)
         )
 
         client_order_id = f"sl-emrg-{int(time.time() * 1000)}"
@@ -525,8 +534,9 @@ class TrailingStopManager:
             msg = getattr(e, 'msg', str(e))
             logger.error(f"TrailingStop: EMERGENCY stop creation FAILED for {position_key}: {code} {msg}")
             await self._notify_critical(
-                f"🚨 КРИТИЧНО: аварійний стоп {pct:g}% для {symbol} {side} теж НЕ вдалось "
-                f"виставити ({code} {msg}) — позиція БЕЗ ЗАХИСТУ, потрібне РУЧНЕ втручання НЕГАЙНО!"
+                f"🚨 КРИТИЧНО: аварійний стоп {pct_roi:g}%ROI ({pct_price:.4f}%price, leverage={leverage:g}x) "
+                f"для {symbol} {side} теж НЕ вдалось виставити ({code} {msg}) — позиція БЕЗ ЗАХИСТУ, "
+                f"потрібне РУЧНЕ втручання НЕГАЙНО!"
             )
             return False
 
@@ -548,11 +558,12 @@ class TrailingStopManager:
 
         logger.warning(
             f"TrailingStop: EMERGENCY static stop placed for {position_key} -> {emergency_stop_price:.6f} "
-            f"({pct:g}% price from live={live_price:.6f}), order={new_order_id}"
+            f"({pct_roi:g}%ROI / {pct_price:.4f}%price, leverage={leverage:g}x, live={live_price:.6f}), "
+            f"order={new_order_id}"
         )
         await self._notify_critical(
             f"⚠️ Основне перевиставлення SL для {symbol} {side} провалилось — виставлено АВАРІЙНИЙ "
-            f"статичний стоп {pct:g}% на {emergency_stop_price:.6f}. Перевірте вручну, коли зможете!"
+            f"статичний стоп {pct_roi:g}%ROI на {emergency_stop_price:.6f}. Перевірте вручну, коли зможете!"
         )
         return True
 
