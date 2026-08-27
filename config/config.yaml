@@ -54,19 +54,25 @@ trading:
     allowed_hours: []
     timezone: "UTC"
 
+  trailing_stop:
+    enabled: true
+    trail_levels_percent: [3.0, 4.0, 8.0, 16.0, 32.0, 64.0]
+    # буфер (в %ROI) — насколько SL отстаёт от достигнутого уровня
+    dynamic_stop_buffer_percent: 0.5
+    # буфер не может съедать больше этой доли расстояния до уровня
+    max_buffer_fraction_of_level: 0.8
+    # допуск на "re-anchor" SL к живой цене, если биржа отклонила как stale
+    reanchor_buffer_percent: 0.001
+    # кулдаун между повторными попытками переставить SL после неудачи
+    move_retry_cooldown_seconds: 15.0
+    # аварийный статичный стоп (в %ROI от живой цены), если основная
+    # попытка переставить SL полностью провалилась
+    emergency_static_stop_percent: 1.0
+
 # Strategy Configuration — лише перелік, які стратегії запускати.
 # Їхні параметри — в БД.
 # strategies:
 #   enabled: ['SimpleMovingAverageStrategy', 'RejectionBlockStrategy']
-
-trailing_stop:
-    enabled: true
-    breakeven_trigger_percent: 0.002   # безубыток при движении цены на 0.2% от входа — АБСОЛЮТНО, без R
-    breakeven_buffer_percent: 0.004
-    trail_trigger_r: 1.5               # трейлинг всё ещё в R (скажи, если тоже надо на абсолют)
-    trail_distance_r: 1.0
-    min_move_percent: 0.0008
-    min_seconds_between_moves: 5
 
 # Database Configuration
 database:
