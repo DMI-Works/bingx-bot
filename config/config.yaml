@@ -36,6 +36,12 @@ trading:
     max_total_risk_percent: 5.0
     max_consecutive_losses: 3
     cooldown_after_trade_seconds: 60
+    # risk-based position sizing (см. ТЗ п.2 "risk_per_trade вместо fixed size")
+    # ВЫКЛЮЧЕНО по умолчанию — включи явно (true) после того, как проверишь
+    # risk_per_trade_percent на testnet: он заменит position_size стратегий
+    # на quantity = (equity * risk_per_trade_percent%) / |entry - stop_loss|
+    use_risk_based_sizing: false
+    risk_per_trade_percent: 0.5
 
   # Filters — відбір монет для торгівлі, не залежить від стратегії
   filters:
@@ -48,15 +54,32 @@ trading:
     max_spread_percent: 0.5
     min_atr: 0
     refresh_interval_seconds: 3600
+    # ротація монет (SymbolSelector.select) кожні refresh_interval_seconds:
+    # - held (відкриті позиції) і whitelist_symbols — НІКОЛИ не чіпаються
+    # - підписаний зараз символ БЕЗ позиції захищений від заміни, якщо
+    #   давав сигнал за останні no_signal_replace_after_seconds
+    # - "тихий" (без сигналу за цей час) непридбаний символ — замінюється
+    #   свіжим кандидатом за 24h об'ємом
+    no_signal_replace_after_seconds: 3600
 
   time_filters:
     enabled: false
     allowed_hours: []
     timezone: "UTC"
 
+  # ВАЖНО: main.py читает этот блок как config.get('trading.trailing_stop'),
+  # поэтому он ОБЯЗАН быть вложен под trading: (а не на верхнем уровне, как
+  # было раньше — из-за этого TrailingStopManager получал config={} и всегда
+  # работал на хардкод-дефолтах, полностью игнорируя эти настройки).
+  # Имена параметров ниже соответствуют реальным полям, которые читает
+  # TrailingStopManager.__init__ (core/risk/trailing_stop_manager.py) —
+  # старые ключи (breakeven_trigger_percent, trail_trigger_r, trail_distance_r,
+  # min_move_percent, min_seconds_between_moves) в коде НЕ используются нигде.
   trailing_stop:
     enabled: true
-    trail_levels_percent: [3.0, 4.0, 8.0, 16.0, 32.0, 64.0]
+    # пороги перестановки SL, заданы в %ROI (как показывает биржа) —
+    # переводятся в %price делением на leverage конкретной позиции
+    trail_levels_percent: [4.0, 8.0, 16.0, 32.0, 64.0]
     # буфер (в %ROI) — насколько SL отстаёт от достигнутого уровня
     dynamic_stop_buffer_percent: 0.5
     # буфер не может съедать больше этой доли расстояния до уровня
@@ -65,7 +88,7 @@ trading:
     reanchor_buffer_percent: 0.001
     # кулдаун между повторными попытками переставить SL после неудачи
     move_retry_cooldown_seconds: 15.0
-    # аварийный статичный стоп (в %ROI от живой цены), если основная
+    # аварийный статичный стоп (в %price от живой цены), если основная
     # попытка переставить SL полностью провалилась
     emergency_static_stop_percent: 1.0
 

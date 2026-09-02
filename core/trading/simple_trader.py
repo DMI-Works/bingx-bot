@@ -239,6 +239,34 @@ class SimpleTrader:
             if strategy:
                 positions_info_message = f"{positions_info_message} | Стратегія: {strategy}"
 
+            # --- risk-based sizing: заменяем fixed quantity от стратегии на
+            # quantity, посчитанный от equity * risk_per_trade_percent,
+            # ТОЛЬКО если явно включено в конфиге RiskManager. При любой
+            # неудаче (нет equity, нет stop_loss/reference_price) — тихо
+            # остаёмся на исходном quantity стратегии, никогда не блокируем
+            # открытие позиции из-за этого пересчёта.
+            if (
+                self.risk_manager
+                and getattr(self.risk_manager, 'use_risk_based_sizing', False)
+                and stop_loss_price
+                and reference_price
+            ):
+                risk_quantity = await self.risk_manager.compute_risk_based_quantity(
+                    entry_price=reference_price,
+                    stop_loss_price=stop_loss_price,
+                )
+                if risk_quantity and risk_quantity > 0:
+                    logger.info(
+                        f"Risk-based sizing for {symbol} {side}: "
+                        f"strategy quantity={quantity} -> risk-based quantity={risk_quantity}"
+                    )
+                    quantity = risk_quantity
+                else:
+                    logger.warning(
+                        f"Risk-based sizing failed for {symbol} {side} — "
+                        f"falling back to strategy quantity={quantity}"
+                    )
+
             logger.info(f"Opening position: {symbol} {side} {quantity} (strategy={strategy})")
 
             try:
