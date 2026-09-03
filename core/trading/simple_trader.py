@@ -63,6 +63,9 @@ class SimpleTrader:
                     'entry_price': metadata.get('entry_price', 0.0),
                     'leverage': metadata.get('leverage', 10),
                     'stop_loss_price': metadata.get('stop_loss_price'),
+                    # fallback на поточний stop_loss_price для позицій,
+                    # відкритих ДО появи цього поля (старі записи в БД)
+                    'initial_stop_loss_price': metadata.get('initial_stop_loss_price', metadata.get('stop_loss_price')),
                     'take_profit_levels': metadata.get('take_profit_levels'),
                     'opened_by': metadata.get('opened_by', 'bot'),
                     'sl_order_id': metadata.get('sl_order_id'),
@@ -239,6 +242,34 @@ class SimpleTrader:
             if strategy:
                 positions_info_message = f"{positions_info_message} | Стратегія: {strategy}"
 
+            # --- risk-based sizing: заменяем fixed quantity от стратегии на
+            # quantity, посчитанный от equity * risk_per_trade_percent,
+            # ТОЛЬКО если явно включено в конфиге RiskManager. При любой
+            # неудаче (нет equity, нет stop_loss/reference_price) — тихо
+            # остаёмся на исходном quantity стратегии, никогда не блокируем
+            # открытие позиции из-за этого пересчёта.
+            if (
+                self.risk_manager
+                and getattr(self.risk_manager, 'use_risk_based_sizing', False)
+                and stop_loss_price
+                and reference_price
+            ):
+                risk_quantity = await self.risk_manager.compute_risk_based_quantity(
+                    entry_price=reference_price,
+                    stop_loss_price=stop_loss_price,
+                )
+                if risk_quantity and risk_quantity > 0:
+                    logger.info(
+                        f"Risk-based sizing for {symbol} {side}: "
+                        f"strategy quantity={quantity} -> risk-based quantity={risk_quantity}"
+                    )
+                    quantity = risk_quantity
+                else:
+                    logger.warning(
+                        f"Risk-based sizing failed for {symbol} {side} — "
+                        f"falling back to strategy quantity={quantity}"
+                    )
+
             logger.info(f"Opening position: {symbol} {side} {quantity} (strategy={strategy})")
 
             try:
@@ -366,6 +397,11 @@ class SimpleTrader:
                 'entry_price': entry_price,
                 'leverage': leverage,
                 'stop_loss_price': stop_loss_price,
+                # НЕЗМІННА копія самого першого SL, який порахувала стратегія.
+                # TrailingStopManager НІКОЛИ це поле не чіпає — використовує
+                # лише як fallback, якщо не вдалось перевиставити стоп на
+                # черговому рівні (замість "аварійного" стопу від live price).
+                'initial_stop_loss_price': stop_loss_price,
                 'take_profit_levels': take_profit_levels,
                 'opened_by': 'bot',
                 'sl_order_id': None,

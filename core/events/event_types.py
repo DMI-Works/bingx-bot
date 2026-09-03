@@ -44,6 +44,9 @@ class EventType(Enum):
     # WEBSOCKET_RECONNECTING = "websocket_reconnecting"
     # WEBSOCKET_ERROR = "websocket_error"
 
+    # Symbol Selection Events
+    SYMBOLS_ROTATED = "symbols_rotated"
+
     # Recovery Events
     # RECOVERY_STARTED = "recovery_started"
     # RECOVERY_COMPLETED = "recovery_completed"

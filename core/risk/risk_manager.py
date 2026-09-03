@@ -22,13 +22,97 @@ class RiskManager:
         self.max_consecutive_losses = config.get('max_consecutive_losses', 3)
         self.cooldown_after_trade_seconds = config.get('cooldown_after_trade_seconds', 60)
 
+        # --- risk-based position sizing (заменяет fixed position_size из стратегии) ---
+        # По умолчанию ВЫКЛЮЧЕНО (use_risk_based_sizing=False) — включать
+        # осознанно в config.yaml после того, как проверишь risk_per_trade_percent
+        # на своём реальном балансе, иначе бот молча начнёт торговать другими
+        # объёмами, чем раньше.
+        self.use_risk_based_sizing = config.get('use_risk_based_sizing', False)
+        self.risk_per_trade_percent = config.get('risk_per_trade_percent', 0.5)
+
         self.consecutive_losses = 0
         self.last_trade_time: Optional[datetime] = None
 
         # события всё ещё нужны для cooldown/consecutive_losses, но НЕ для счёта открытых позиций
         self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed_event)
 
-        logger.info("RiskManager initialized (open positions count comes live from exchange)")
+        logger.info(
+            "RiskManager initialized (open positions count comes live from exchange); "
+            f"risk_based_sizing={'ON' if self.use_risk_based_sizing else 'OFF'} "
+            f"({self.risk_per_trade_percent}% equity/trade if ON)"
+        )
+
+    async def get_equity(self) -> Optional[float]:
+        """Текущий капитал (equity) аккаунта в USDT, нужен для risk-based sizing.
+        Возвращает None, если получить не удалось (fail-safe — вызывающий код
+        должен в этом случае НЕ открывать позицию risk-based методом)."""
+        try:
+            balance_data = await self.exchange.get_account_balance()
+        except Exception as e:
+            logger.error(f"RiskManager: failed to fetch account balance for sizing: {e}", exc_info=True)
+            return None
+
+        if not balance_data or balance_data.get('code') != 0 or 'data' not in balance_data:
+            logger.error(f"RiskManager: unexpected balance response for sizing: {balance_data}")
+            return None
+
+        balance = balance_data['data'].get('balance', {})
+        try:
+            equity = float(balance.get('equity', 0))
+        except (TypeError, ValueError):
+            equity = 0.0
+
+        if equity <= 0:
+            logger.error(f"RiskManager: got non-positive equity ({equity}) — cannot size position")
+            return None
+
+        return equity
+
+    async def compute_risk_based_quantity(
+        self, entry_price: float, stop_loss_price: float, risk_percent: Optional[float] = None
+    ) -> Optional[float]:
+        """
+        quantity = (equity * risk_percent%) / |entry_price - stop_loss_price|
+
+        entry_price здесь — reference_price сигнала (цена, от которой стратегия
+        считала SL/TP), т.к. для MARKET-ордера реальная entry_price появится
+        только ПОСЛЕ отправки ордера, а quantity нужен ДО. Это единственная
+        точка компромисса: сайзинг чуть менее точен при проскальзывании, но
+        уже строго ограничен фильтром max_spread_percent на выбор символов.
+
+        Возвращает None при любой невозможности посчитать риск честно —
+        вызывающий код обязан в этом случае НЕ открывать позицию risk-based
+        методом (упасть обратно на старый quantity — небезопасно тихо
+        менять смысл того, что запросила стратегия).
+        """
+        if entry_price is None or stop_loss_price is None or entry_price <= 0:
+            logger.warning(
+                f"RiskManager: cannot compute risk-based quantity — "
+                f"invalid entry_price={entry_price} or stop_loss_price={stop_loss_price}"
+            )
+            return None
+
+        distance = abs(entry_price - stop_loss_price)
+        if distance <= 0:
+            logger.warning(
+                f"RiskManager: cannot compute risk-based quantity — "
+                f"stop_loss_price equals entry_price (distance=0)"
+            )
+            return None
+
+        equity = await self.get_equity()
+        if equity is None:
+            return None
+
+        pct = risk_percent if risk_percent is not None else self.risk_per_trade_percent
+        risk_usdt = equity * (pct / 100.0)
+        quantity = risk_usdt / distance
+
+        logger.info(
+            f"RiskManager: risk-based sizing: equity={equity:.2f}, risk={pct}% -> "
+            f"risk_usdt={risk_usdt:.4f}, sl_distance={distance:.6f} -> quantity={quantity:.8f}"
+        )
+        return quantity
 
     async def _get_real_open_positions(self) -> list[dict]:
         """
@@ -126,6 +210,8 @@ class RiskManager:
         self.max_total_risk_percent = config.get('max_total_risk_percent', self.max_total_risk_percent)
         self.max_consecutive_losses = config.get('max_consecutive_losses', self.max_consecutive_losses)
         self.cooldown_after_trade_seconds = config.get('cooldown_after_trade_seconds', self.cooldown_after_trade_seconds)
+        self.use_risk_based_sizing = config.get('use_risk_based_sizing', self.use_risk_based_sizing)
+        self.risk_per_trade_percent = config.get('risk_per_trade_percent', self.risk_per_trade_percent)
         logger.info("Risk config updated")
 
     async def get_status(self) -> dict:
