@@ -79,18 +79,13 @@ trading:
     enabled: true
     # пороги перестановки SL, заданы в %ROI (как показывает биржа) —
     # переводятся в %price делением на leverage конкретной позиции
-    trail_levels_percent: [4.0, 8.0, 16.0, 32.0, 64.0]
+    trail_levels_percent: [2.0, 4.0, 8.0, 16.0, 32.0, 64.0]
     # буфер (в %ROI) — насколько SL отстаёт от достигнутого уровня
     dynamic_stop_buffer_percent: 0.5
     # буфер не может съедать больше этой доли расстояния до уровня
     max_buffer_fraction_of_level: 0.8
-    # допуск на "re-anchor" SL к живой цене, если биржа отклонила как stale
-    reanchor_buffer_percent: 0.001
     # кулдаун между повторными попытками переставить SL после неудачи
     move_retry_cooldown_seconds: 15.0
-    # аварийный статичный стоп (в %price от живой цены), если основная
-    # попытка переставить SL полностью провалилась
-    emergency_static_stop_percent: 1.0
 
 # Strategy Configuration — лише перелік, які стратегії запускати.
 # Їхні параметри — в БД.

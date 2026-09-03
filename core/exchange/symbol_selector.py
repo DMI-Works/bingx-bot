@@ -3,15 +3,23 @@ import logging
 from typing import List, Dict, Any, Set, Optional
 
 from .bingx_client import BingXClient
+from ..events import Event, EventBus, EventType
 
 logger = logging.getLogger(__name__)
 
 
 class SymbolSelector:
-    def __init__(self, exchange: BingXClient, filters: Dict[str, Any], signal_tracker=None):
+    def __init__(
+        self,
+        exchange: BingXClient,
+        filters: Dict[str, Any],
+        signal_tracker=None,
+        event_bus: Optional[EventBus] = None,
+    ):
         self.exchange = exchange
         self.filters = filters
         self.signal_tracker = signal_tracker  # SignalActivityTracker | None
+        self.event_bus = event_bus  # якщо задано — шле SYMBOLS_ROTATED в ТГ при кожній заміні
         self._refresh_task: Optional[asyncio.Task] = None
         self.current_symbols: Set[str] = set()
 
@@ -129,9 +137,13 @@ class SymbolSelector:
         to_subscribe = selected - current
         to_unsubscribe = current - selected
 
+        subscribed_ok: Set[str] = set()
+        unsubscribed_ok: Set[str] = set()
+
         for symbol in to_subscribe:
             try:
                 await self.exchange.subscribe_trades(symbol)
+                subscribed_ok.add(symbol)
             except Exception as e:
                 logger.error(f"Failed to subscribe {symbol}: {e}")
 
@@ -139,11 +151,25 @@ class SymbolSelector:
             try:
                 await self.exchange.unsubscribe_trades(symbol)
                 logger.info(f"[SYMBOLS] Unsubscribed: {symbol}")
+                unsubscribed_ok.add(symbol)
             except Exception as e:
                 logger.error(f"Failed to unsubscribe {symbol}: {e}")
 
         if not to_subscribe and not to_unsubscribe:
             logger.info(f"[SYMBOLS] No changes, {len(selected)} symbols active")
+        elif self.event_bus is not None and (subscribed_ok or unsubscribed_ok):
+            try:
+                await self.event_bus.publish(Event(
+                    type=EventType.SYMBOLS_ROTATED,
+                    data={
+                        'added': sorted(subscribed_ok),
+                        'removed': sorted(unsubscribed_ok),
+                        'total_active': len(selected),
+                    },
+                    source="SymbolSelector",
+                ))
+            except Exception as e:
+                logger.error(f"[SYMBOLS] Failed to publish SYMBOLS_ROTATED event: {e}")
 
         self.current_symbols = selected
         return selected

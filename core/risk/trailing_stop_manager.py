@@ -60,11 +60,7 @@ class TrailingStopManager:
 
         self.max_buffer_fraction_of_level: float = cfg.get('max_buffer_fraction_of_level', 0.8)
 
-        self.reanchor_buffer_percent: float = cfg.get('reanchor_buffer_percent', 0.001)  # 0.1%
-
         self.move_retry_cooldown_seconds: float = cfg.get('move_retry_cooldown_seconds', 15.0)
-
-        self.emergency_static_stop_percent: float = cfg.get('emergency_static_stop_percent', 1.0)  # 1% ROI
 
         self._states: Dict[str, _TrailState] = {}
         self._retry_after: Dict[str, float] = {}
@@ -75,8 +71,8 @@ class TrailingStopManager:
             logger.info(
                 f"TrailingStopManager initialized: levels={self.trail_levels_percent}%ROI, "
                 f"buffer={self.stop_buffer_percent}%ROI (capped at {self.max_buffer_fraction_of_level:.0%} of level) "
-                f"emergency_static_stop={self.emergency_static_stop_percent}%ROI "
-                f"(single SL slot, moved via cancel+create on level crossings)"
+                f"(single SL slot, moved via cancel+create on level crossings; "
+                f"on any move failure -> single fallback to strategy's initial stop)"
             )
         else:
             logger.info("TrailingStopManager initialized but disabled via config")
@@ -117,43 +113,24 @@ class TrailingStopManager:
                 continue
             await self._process_position(position_key, position, price)
 
-    # ---------- допоміжне: ROI% <-> price% ----------
-
-    @staticmethod
-    def _safe_leverage(position: dict, position_key: str, context: str) -> float:
-        leverage = position.get('leverage') or 1
-        try:
-            leverage = float(leverage)
-        except (TypeError, ValueError):
-            logger.warning(
-                f"TrailingStop: {position_key} invalid leverage={leverage!r} ({context}), falling back to 1x"
-            )
-            return 1.0
-        return leverage if leverage > 0 else 1.0
-
-    @staticmethod
-    def _roi_percent_to_price_percent(roi_percent: float, leverage: float) -> float:
-        """trail_levels_percent / stop_buffer_percent / emergency_static_stop_percent
-        задаються в ROI% (як TP/SL стратегій), тому перед застосуванням до
-        живої ціни завжди переводяться в price% діленням на leverage: поріг
-        2.0% ROI при leverage=10 відповідає лише 0.2% руху ціни."""
-        return roi_percent / leverage
-
     def _highest_reached_level_index(
         self, favorable_fraction: float, last_applied_index: int, leverage: float
     ) -> int:
         """Повертає індекс найвищого ЩЕ НЕ застосованого порогу з
         trail_levels_percent, якого досягла поточна сприятлива зміна ціни
         (favorable_fraction — частка від ціни входу, тобто "price%").
-        Якщо ціна одним тіком проскочила відразу кілька порогів
-        (геп/волатильність) — повертає найвищий з них, а не перший. Якщо
-        новий поріг не досягнуто — повертає last_applied_index без змін.
+        trail_levels_percent задається в ROI%, тому перед порівнянням
+        переводимо поріг у price% діленням на leverage: поріг 2.0% ROI
+        при leverage=10 відповідає лише 0.2% руху ціни. Якщо ціна одним
+        тіком проскочила відразу кілька порогів (геп/волатильність) —
+        повертає найвищий з них, а не перший. Якщо новий поріг не
+        досягнуто — повертає last_applied_index без змін.
         """
         target = last_applied_index
         for i, level_roi_percent in enumerate(self.trail_levels_percent):
             if i <= target:
                 continue
-            level_price_percent = self._roi_percent_to_price_percent(level_roi_percent, leverage)
+            level_price_percent = level_roi_percent / leverage
             if favorable_fraction >= level_price_percent / 100.0:
                 target = i
         return target
@@ -178,7 +155,19 @@ class TrailingStopManager:
             logger.debug(f"TrailingStop: {position_key} SKIP: no sl_order_id on position")
             return
 
-        leverage = self._safe_leverage(position, position_key, context="trail")
+        # trail_levels_percent задано в ROI% (аналогічно SL/TP стратегій),
+        # тому для порівняння з favorable_fraction (price%) переводимо
+        # через leverage конкретної позиції
+        leverage = position.get('leverage') or 1
+        try:
+            leverage = float(leverage)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"TrailingStop: {position_key} invalid leverage={leverage!r}, falling back to 1x"
+            )
+            leverage = 1.0
+        if leverage <= 0:
+            leverage = 1.0
 
         favorable_fraction = (
             (price - entry_price) / entry_price if side == 'LONG'
@@ -231,9 +220,9 @@ class TrailingStopManager:
             return  # жодного нового порогу не досягнуто
 
         level_roi_percent = self.trail_levels_percent[target_index]
-        level_price_percent = self._roi_percent_to_price_percent(level_roi_percent, leverage)
+        level_price_percent = level_roi_percent / leverage
 
-        buffer_price_percent = self._roi_percent_to_price_percent(self.stop_buffer_percent, leverage)
+        buffer_price_percent = self.stop_buffer_percent / leverage
         max_buffer_price_percent = level_price_percent * self.max_buffer_fraction_of_level
         if buffer_price_percent > max_buffer_price_percent:
             logger.warning(
@@ -291,10 +280,11 @@ class TrailingStopManager:
         при будь-якій невдачі (виклик, що не позначає рівень застосованим
         і намагається ще раз пізніше).
 
-        Якщо старий SL вже відмінено, а новий створити не вдалось попри
-        ретраї — позиція фізично без захисту на біржі. У цьому випадку,
-        перш ніж здатись, робиться остання спроба: аварійний статичний
-        стоп від живої ціни (_place_emergency_stop). Якщо і це не
+        Якщо старий SL вже відмінено, а новий створити не вдалось —
+        позиція фізично без захисту на біржі. У цьому випадку робиться
+        ОДНА остання спроба: повернути SL до initial_stop_loss_price —
+        того самого стопу, який стратегія порахувала на вході
+        (_place_fallback_to_initial_stop). Якщо і це не
         вдалось — повертається False і йде критичне сповіщення без
         подальшого автоматичного відновлення (тут вже потрібне ручне
         втручання)."""
@@ -331,103 +321,65 @@ class TrailingStopManager:
             logger.error(f"TrailingStop: unexpected error cancelling SL for {position_key}: {e}", exc_info=True)
             return False
 
-        # 2) створюємо новий SL — з ретраєм на "stale price": якщо біржа
-        # каже "current price" (ціна вже пройшла ціль), перераховуємо ціль
-        # від живої ціни й пробуємо ще раз (до 3 спроб), ніколи не гірше за
-        # стоп, який щойно відмінили.
-        current_stop_price = desired_stop_price
+        # 2) створюємо новий SL — ОДНА спроба, без перерахунку від live price
+        # і без каскаду ретраїв. Якщо не вдалось — одразу fallback на
+        # initial_stop_loss_price (найпростіший надійний варіант замість
+        # нарощування ще однієї гілки розрахункової логіки).
         client_order_id = f"sl-{int(time.time() * 1000)}"
-        max_attempts = 3
-        last_error: Optional[BingXAPIError] = None
-        response = None
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = await self.exchange.create_order(
-                    symbol=symbol,
-                    side=close_side,
-                    order_type='STOP_MARKET',
-                    quantity=quantity,
-                    stop_price=current_stop_price,
-                    position_side=position_side,
-                    close_position=True,
-                    client_order_id=client_order_id,
-                )
-                break
-            except BingXAPIError as e:
-                last_error = e
-                if e.code == 109429:
-                    self._apply_rate_limit_backoff(position_key, e.msg)
-                    logger.error(
-                        f"TrailingStop: rate limited (109429) creating new SL for {position_key} "
-                        f"AFTER cancelling the old one — falling back to emergency static stop!"
-                    )
-                    return await self._place_emergency_stop(position_key, position)
-                if self._is_gone_error(e):
-                    # позиція закрилась між cancel і create (наприклад,
-                    # ринковий ордер/інший процес закрив її) — нема куди
-                    # ставити SL, це не помилка
-                    logger.info(f"TrailingStop: {position_key} position gone before new SL could be created, skipping")
-                    return False
-                if e.code == 110406:
-                    # "Position SL order already exists" — попри те, що ми
-                    # щойно відмінили старий, біржа бачить якийсь SL на
-                    # позиції. Це означає, що позиція, ймовірно, ВСЕ Ж
-                    # ЗАХИЩЕНА (просто не тим ордером, який ми відстежуємо) —
-                    # не панікуємо, але лишаємо слід для ручної перевірки.
-                    logger.warning(
-                        f"TrailingStop: {position_key} got 110406 (SL already exists) right after our own "
-                        f"cancel — some SL order is present on the exchange, but our tracked id is stale. "
-                        f"Skipping this attempt; will resync next tick."
-                    )
-                    return False
-                if 'current price' in (e.msg or '').lower() and attempt < max_attempts:
-                    try:
-                        live_price = await self.exchange.get_ticker_price(symbol)
-                        raw_reanchored = (
-                            live_price * (1 - self.reanchor_buffer_percent) if side == 'LONG'
-                            else live_price * (1 + self.reanchor_buffer_percent)
-                        )
-                        if old_stop_price is not None:
-                            current_stop_price = (
-                                max(raw_reanchored, old_stop_price) if side == 'LONG'
-                                else min(raw_reanchored, old_stop_price)
-                            )
-                        else:
-                            current_stop_price = raw_reanchored
-                        logger.warning(
-                            f"TrailingStop: SL for {position_key} rejected as stale "
-                            f"(target {desired_stop_price} already passed by price). "
-                            f"Re-anchoring to live price {live_price} -> new stop={current_stop_price}, "
-                            f"retrying (attempt {attempt + 1})"
-                        )
-                        continue
-                    except Exception as fetch_err:
-                        logger.error(f"TrailingStop: failed to fetch live price to re-anchor SL for {symbol}: {fetch_err}")
-                        break
-                break
-            except Exception as e:
-                logger.error(f"TrailingStop: unexpected error creating new SL for {position_key}: {e}", exc_info=True)
+        try:
+            response = await self.exchange.create_order(
+                symbol=symbol,
+                side=close_side,
+                order_type='STOP_MARKET',
+                quantity=quantity,
+                stop_price=desired_stop_price,
+                position_side=position_side,
+                close_position=True,
+                client_order_id=client_order_id,
+            )
+        except BingXAPIError as e:
+            if e.code == 109429:
+                self._apply_rate_limit_backoff(position_key, e.msg)
                 logger.error(
-                    f"TrailingStop: falling back to emergency static stop for {position_key} after unexpected error"
+                    f"TrailingStop: rate limited (109429) creating new SL for {position_key} "
+                    f"AFTER cancelling the old one — falling back to initial stop!"
                 )
-                return await self._place_emergency_stop(position_key, position)
-
-        if response is None:
+                return await self._place_fallback_to_initial_stop(position_key, position)
+            if self._is_gone_error(e):
+                # позиція закрилась між cancel і create — нема куди ставити
+                # SL, це не помилка
+                logger.info(f"TrailingStop: {position_key} position gone before new SL could be created, skipping")
+                return False
+            if e.code == 110406:
+                # "Position SL order already exists" — попри те, що ми щойно
+                # відмінили старий, біржа бачить якийсь SL на позиції.
+                # Ймовірно, позиція ВСЕ Ж захищена (просто не тим ордером,
+                # який ми відстежуємо) — не панікуємо, ресинк наступного тіку.
+                logger.warning(
+                    f"TrailingStop: {position_key} got 110406 (SL already exists) right after our own "
+                    f"cancel — some SL order is present on the exchange, but our tracked id is stale. "
+                    f"Skipping this attempt; will resync next tick."
+                )
+                return False
             logger.error(
-                f"TrailingStop: failed to create new SL for {position_key} after {max_attempts} attempts: "
-                f"{last_error.code if last_error else '?'} {last_error.msg if last_error else ''}. "
-                f"POSITION MAY NOW BE WITHOUT A STOP — falling back to emergency static stop!"
+                f"TrailingStop: failed to create new SL for {position_key} at {desired_stop_price:.6f} "
+                f"(level {level_roi_percent:g}%ROI, old SL already cancelled): {e.code} {e.msg}. "
+                f"Falling back to initial strategy stop..."
             )
             await self._notify_critical(
                 f"⚠️ Не вдалося перевиставити SL для {symbol} {side} на {desired_stop_price:.6f} "
-                f"(рівень {level_roi_percent:g}%ROI, старий SL вже відмінено): "
-                f"{last_error.code if last_error else '?'} {last_error.msg if last_error else ''}. "
-                f"Пробую аварійний статичний стоп {self.emergency_static_stop_percent:g}%ROI..."
+                f"(рівень {level_roi_percent:g}% ROI, старий SL вже відмінено): {e.code} {e.msg}. "
+                f"Повертаю початковий SL стратегії..."
             )
-            return await self._place_emergency_stop(position_key, position)
+            return await self._place_fallback_to_initial_stop(position_key, position)
+        except Exception as e:
+            logger.error(f"TrailingStop: unexpected error creating new SL for {position_key}: {e}", exc_info=True)
+            logger.error(
+                f"TrailingStop: falling back to initial strategy stop for {position_key} after unexpected error"
+            )
+            return await self._place_fallback_to_initial_stop(position_key, position)
 
-        new_stop_price = current_stop_price
+        new_stop_price = desired_stop_price
         new_order_id = None
         if 'data' in response and 'order' in response['data']:
             new_order_id = response['data']['order'].get('orderId')
@@ -456,11 +408,17 @@ class TrailingStopManager:
 
         logger.info(
             f"TrailingStop: SL for {position_key} -> {new_stop_price:.6f} "
-            f"(trigger_level={level_roi_percent:g}%ROI, buffer={self.stop_buffer_percent:g}%ROI, "
+            f"(trigger_level={level_roi_percent:g}%ROI, buffer={self.stop_buffer_percent:g}%price, "
             f"old_order={old_sl_order_id}, new_order={new_order_id})"
         )
 
-        event_leverage = self._safe_leverage(position, position_key, context="event publish")
+        event_leverage = position.get('leverage') or 1
+        try:
+            event_leverage = float(event_leverage)
+        except (TypeError, ValueError):
+            event_leverage = 1.0
+        if event_leverage <= 0:
+            event_leverage = 1.0
 
         try:
             await self.event_bus.publish(Event(
@@ -484,47 +442,43 @@ class TrailingStopManager:
 
     # ---------- аварійний статичний стоп (last resort) ----------
 
-    async def _place_emergency_stop(self, position_key: str, position: dict) -> bool:
-        """Аварійний стоп: ставиться, коли основна спроба перевиставити SL
-        провалилась ПІСЛЯ того, як старий SL вже відмінено (позиція реально
-        лишилась без захисту на біржі).
+    async def _place_fallback_to_initial_stop(self, position_key: str, position: dict) -> bool:
+        """Останній рубіж: якщо перевиставити SL на черговому trailing-рівні
+        не вдалось (а старий SL вже відмінено — позиція фізично без захисту
+        на біржі), просто ОДИН раз ставимо той самий SL, який ще на вході
+        порахувала сама стратегія (position['initial_stop_loss_price']).
 
-        emergency_static_stop_percent — це ROI%, так само як trail_levels_percent
-        і stop_buffer_percent. Перед застосуванням до живої ціни завжди
-        переводиться в price% діленням на leverage позиції — інакше на
-        плечі стоп ставиться в leverage-разів далі від ціни, ніж треба."""
+        Свідомо ніякого перерахунку від live price і повторних спроб —
+        це найпростіший і найнадійніший fallback: цей стоп вже пройшов
+        валідацію біржі один раз при відкритті позиції, тож немає причин
+        вважати, що з ним щось піде не так знову. Trailing-прогрес на цій
+        сходинці при цьому втрачається (SL повертається до початкового
+        рівня), але позиція гарантовано залишається захищеною."""
         symbol = position['symbol']
         side = position['side']
         quantity = position.get('remaining_quantity') or position.get('quantity')
         close_side = 'SELL' if side == 'LONG' else 'BUY'
 
-        leverage = self._safe_leverage(position, position_key, context="emergency stop")
-
-        try:
-            live_price = await self.exchange.get_ticker_price(symbol)
-        except Exception as e:
-            logger.error(f"TrailingStop: emergency stop for {position_key} failed to fetch live price: {e}")
+        initial_stop_price = position.get('initial_stop_loss_price')
+        if not initial_stop_price:
+            logger.error(
+                f"TrailingStop: {position_key} has no initial_stop_loss_price to fall back to — "
+                f"position may be WITHOUT protection, manual check needed!"
+            )
             await self._notify_critical(
-                f"🚨 КРИТИЧНО: {symbol} {side} без захисту, і навіть live price для аварійного "
-                f"стопу отримати не вдалось ({e}). ПОТРІБНЕ РУЧНЕ ВТРУЧАННЯ НЕГАЙНО!"
+                f"🚨 КРИТИЧНО: {symbol} {side} без захисту, і немає навіть початкового SL стратегії "
+                f"для fallback. ПОТРІБНЕ РУЧНЕ ВТРУЧАННЯ НЕГАЙНО!"
             )
             return False
 
-        pct_roi = self.emergency_static_stop_percent
-        pct_price = self._roi_percent_to_price_percent(pct_roi, leverage)
-        emergency_stop_price = (
-            live_price * (1 - pct_price / 100.0) if side == 'LONG'
-            else live_price * (1 + pct_price / 100.0)
-        )
-
-        client_order_id = f"sl-emrg-{int(time.time() * 1000)}"
+        client_order_id = f"sl-fallback-{int(time.time() * 1000)}"
         try:
             response = await self.exchange.create_order(
                 symbol=symbol,
                 side=close_side,
                 order_type='STOP_MARKET',
                 quantity=quantity,
-                stop_price=emergency_stop_price,
+                stop_price=initial_stop_price,
                 position_side=side,
                 close_position=True,
                 client_order_id=client_order_id,
@@ -532,11 +486,10 @@ class TrailingStopManager:
         except Exception as e:
             code = getattr(e, 'code', '?')
             msg = getattr(e, 'msg', str(e))
-            logger.error(f"TrailingStop: EMERGENCY stop creation FAILED for {position_key}: {code} {msg}")
+            logger.error(f"TrailingStop: fallback to initial stop FAILED for {position_key}: {code} {msg}")
             await self._notify_critical(
-                f"🚨 КРИТИЧНО: аварійний стоп {pct_roi:g}%ROI ({pct_price:.4f}%price, leverage={leverage:g}x) "
-                f"для {symbol} {side} теж НЕ вдалось виставити ({code} {msg}) — позиція БЕЗ ЗАХИСТУ, "
-                f"потрібне РУЧНЕ втручання НЕГАЙНО!"
+                f"🚨 КРИТИЧНО: не вдалось виставити навіть початковий SL {initial_stop_price:.6f} для "
+                f"{symbol} {side} ({code} {msg}) — позиція БЕЗ ЗАХИСТУ, потрібне РУЧНЕ втручання НЕГАЙНО!"
             )
             return False
 
@@ -544,7 +497,7 @@ class TrailingStopManager:
         if response and 'data' in response and 'order' in response['data']:
             new_order_id = response['data']['order'].get('orderId')
 
-        position['stop_loss_price'] = emergency_stop_price
+        position['stop_loss_price'] = initial_stop_price
         position['sl_order_id'] = str(new_order_id) if new_order_id else None
         position['sl_client_order_id'] = client_order_id
 
@@ -554,16 +507,16 @@ class TrailingStopManager:
                 metadata=json.dumps(position),
             )
         except Exception as e:
-            logger.error(f"TrailingStop: failed to persist emergency SL to DB for {position_key}: {e}", exc_info=True)
+            logger.error(f"TrailingStop: failed to persist fallback SL to DB for {position_key}: {e}", exc_info=True)
 
         logger.warning(
-            f"TrailingStop: EMERGENCY static stop placed for {position_key} -> {emergency_stop_price:.6f} "
-            f"({pct_roi:g}%ROI / {pct_price:.4f}%price, leverage={leverage:g}x, live={live_price:.6f}), "
-            f"order={new_order_id}"
+            f"TrailingStop: fallback to INITIAL strategy stop placed for {position_key} -> "
+            f"{initial_stop_price:.6f}, order={new_order_id}"
         )
         await self._notify_critical(
-            f"⚠️ Основне перевиставлення SL для {symbol} {side} провалилось — виставлено АВАРІЙНИЙ "
-            f"статичний стоп {pct_roi:g}%ROI на {emergency_stop_price:.6f}. Перевірте вручну, коли зможете!"
+            f"⚠️ Основне перевиставлення SL для {symbol} {side} провалилось — повернули початковий SL "
+            f"стратегії {initial_stop_price:.6f}. Trailing-прогрес на цій сходинці втрачено, "
+            f"але позиція захищена."
         )
         return True
 

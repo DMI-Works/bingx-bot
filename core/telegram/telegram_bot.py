@@ -70,6 +70,7 @@ class TelegramBot:
         self.event_bus.subscribe(EventType.TAKE_PROFIT_TRIGGERED, self._on_take_profit_triggered)
         self.event_bus.subscribe(EventType.ERROR, self._on_error)
         self.event_bus.subscribe(EventType.CRITICAL_ERROR, self._on_critical_error)
+        self.event_bus.subscribe(EventType.SYMBOLS_ROTATED, self._on_symbols_rotated)
         
 
     async def start(self) -> None:
@@ -485,6 +486,21 @@ class TelegramBot:
         if context and error:
             text += f"\n<code>{error}</code>"
         await self.send_message(text)
+
+    async def _on_symbols_rotated(self, event: Event) -> None:
+        added = event.data.get('added') or []
+        removed = event.data.get('removed') or []
+        total = event.data.get('total_active')
+
+        lines = ["🔄 <b>Ротація монет</b>"]
+        if added:
+            lines.append("├ Додано: " + ", ".join(f"<code>{s}</code>" for s in added))
+        if removed:
+            lines.append("├ Прибрано: " + ", ".join(f"<code>{s}</code>" for s in removed))
+        if total is not None:
+            lines.append(f"└ Активних символів: {total}")
+
+        await self.send_message("\n".join(lines))
 
     async def notify_startup(
         self,

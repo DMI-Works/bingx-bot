@@ -113,8 +113,8 @@ async def main():
     # не чіпати символи, які зараз "живі" (давали сигнал за останню годину),
     # і, навпаки, вважати "тихі" непридбані символи кандидатами на заміну.
     signal_activity_tracker = SignalActivityTracker(event_bus)
-    symbol_selector = SymbolSelector(exchange, filters_config, signal_tracker=signal_activity_tracker)
-    logger.info("[OK] Symbol Selector initialized (signal-activity-aware rotation)")
+    symbol_selector = SymbolSelector(exchange, filters_config, signal_tracker=signal_activity_tracker, event_bus=event_bus)
+    logger.info("[OK] Symbol Selector initialized (signal-activity-aware rotation, notifies Telegram)")
 
     # --- Strategy settings + live strategy manager створюються ДО
     # TelegramBot, бо SettingsMenu всередині нього має отримати вже готовий

@@ -63,6 +63,9 @@ class SimpleTrader:
                     'entry_price': metadata.get('entry_price', 0.0),
                     'leverage': metadata.get('leverage', 10),
                     'stop_loss_price': metadata.get('stop_loss_price'),
+                    # fallback на поточний stop_loss_price для позицій,
+                    # відкритих ДО появи цього поля (старі записи в БД)
+                    'initial_stop_loss_price': metadata.get('initial_stop_loss_price', metadata.get('stop_loss_price')),
                     'take_profit_levels': metadata.get('take_profit_levels'),
                     'opened_by': metadata.get('opened_by', 'bot'),
                     'sl_order_id': metadata.get('sl_order_id'),
@@ -394,6 +397,11 @@ class SimpleTrader:
                 'entry_price': entry_price,
                 'leverage': leverage,
                 'stop_loss_price': stop_loss_price,
+                # НЕЗМІННА копія самого першого SL, який порахувала стратегія.
+                # TrailingStopManager НІКОЛИ це поле не чіпає — використовує
+                # лише як fallback, якщо не вдалось перевиставити стоп на
+                # черговому рівні (замість "аварійного" стопу від live price).
+                'initial_stop_loss_price': stop_loss_price,
                 'take_profit_levels': take_profit_levels,
                 'opened_by': 'bot',
                 'sl_order_id': None,
