@@ -532,6 +532,15 @@ class TelegramBot:
         consumed_pct = data.get('consumed_pct', 0)
         direction = "⬆️ вгору (пробито ASK)" if side == 'ask' else "⬇️ вниз (пробито BID)"
 
+        wall_strategy = self.strategy_manager.get('WallBreakoutStrategy') if self.strategy_manager else None
+        if wall_strategy and wall_strategy.is_enabled():
+            footer = "🤖 WallBreakoutStrategy увімкнена — угоду буде відкрито автоматично."
+        else:
+            footer = (
+                "[INFO]: Це лише аналітичний сигнал, угода НЕ відкривається — "
+                "WallBreakoutStrategy вимкнена. Увімкнути: /settings → WallBreakoutStrategy."
+            )
+
         text = f"""
 💥 <b>Пробій стіни</b>
 
@@ -540,7 +549,7 @@ class TelegramBot:
 ├ Поточна ціна: <code>${current_price:.6f}</code>
 └ Стіну з'їдено: <code>{consumed_pct:.0f}%</code>
 
-[INFO]: Це аналітичний сигнал (фаза 1), угода НЕ відкривається автоматично.
+{footer}
 """
         await self.send_message(text)
 

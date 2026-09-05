@@ -119,7 +119,10 @@ async def main():
 
     orderbook_config = config.get('trading.orderbook', {})
     orderbook_analyzer = OrderBookAnalyzer(event_bus, orderbook_config)
-    logger.info("[OK] OrderBookAnalyzer initialized (detect+log only, not wired to trading)")
+    logger.info(
+        "[OK] OrderBookAnalyzer initialized (detect+log+publish; "
+        "trading happens only if WallBreakoutStrategy is enabled via Telegram /settings)"
+    )
 
     # --- Strategy settings + live strategy manager створюються ДО
     # TelegramBot, бо SettingsMenu всередині нього має отримати вже готовий

@@ -2,9 +2,16 @@
 OrderBookAnalyzer — аналіз книги заявок (order book) підписаних символів на
 предмет великих щільностей ("стін") і їх пробою.
 
-Фаза 1 (поточна): лише детект + лог + подія в EventBus (яку слухає
-TelegramBot). НЕ підключено до SimpleTrader — жодних угод на основі цих
-сигналів поки не відкривається.
+Сам аналізатор і надалі лише детектить + логує + публікує подію в
+EventBus (WALL_DETECTED/WALL_BREAKOUT); TelegramBot завжди підписаний на
+обидві й шле сповіщення. Прямого виклику exchange.create_order тут немає
+і не буде — це свідомо окремий шар "детект".
+
+Чи відкриється реальна угода на основі WALL_BREAKOUT — залежить від
+core/strategies/wall_breakout_strategy.py (WallBreakoutStrategy): вона
+підписана на ту саму подію і, якщо увімкнена через Telegram /settings,
+формує TradeSignal і публікує SIGNAL_GENERATED, який підхоплює
+SimpleTrader. За замовчуванням ця стратегія вимкнена.
 
 Джерело даних: EventType.ORDERBOOK_UPDATED від BingXClient._handle_depth_update
 — це ПОВНИЙ знепшот топ-N рівнів (bids/asks), що приходить ~раз/сек, а НЕ
@@ -75,7 +82,7 @@ class OrderBookAnalyzer:
                 f"OrderBookAnalyzer initialized: wall_multiplier={self.wall_multiplier}x, "
                 f"approach_threshold={self.approach_threshold_pct}%, "
                 f"breakout_consumption={self.breakout_consumption_pct}% "
-                f"(detect+log only, NOT wired to trading yet)"
+                f"(detect+log+publish only; trading via WallBreakoutStrategy if enabled)"
             )
         else:
             logger.info("OrderBookAnalyzer initialized but disabled via config")

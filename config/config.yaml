@@ -77,8 +77,11 @@ trading:
     timezone: "UTC"
 
   # OrderBookAnalyzer (core/orderbook_analyzer.py) — детект "стін" і їх
-  # пробою по partial book depth (@depth20). ФАЗА 1: лише детект + лог +
-  # повідомлення в Telegram, НЕ підключено до торгівлі.
+  # пробою по partial book depth (@depth20). Сам по собі лише детектить +
+  # логує + публікує WALL_DETECTED/WALL_BREAKOUT в EventBus (TelegramBot
+  # завжди шле сповіщення). Чи призведе це до реальної угоди — залежить
+  # від того, чи увімкнена WallBreakoutStrategy (див. нижче) через
+  # Telegram /settings; сам OrderBookAnalyzer угод не відкриває.
   orderbook:
     enabled: true
     # рівень книги вважається "стіною", якщо його обсяг у wall_multiplier
@@ -96,6 +99,20 @@ trading:
     # через скільки секунд неактуальна стіна прибирається зі стану,
     # якщо пробою так і не відбулось
     wall_stale_seconds: 300.0
+
+  # WallBreakoutStrategy (core/strategies/wall_breakout_strategy.py) —
+  # заводські параметри, які seed_defaults() один раз кладе в БД при
+  # старті бота (далі редагуються через Telegram /settings, як і в
+  # інших стратегіях). За замовчуванням стратегія ВИМКНЕНА — enabled
+  # вмикається окремо через /settings, тут лише її risk-параметри.
+  # position_size і leverage — спільні з trading.position_size.value /
+  # trading.leverage (той самий принцип, що й у SimpleMovingAverageStrategy).
+  wall_breakout:
+    stop_loss_percent: 1.0
+    take_profit_levels:
+      - percent: 2.0
+        close_percent: 100
+    cooldown_seconds: 300
 
   # ВАЖНО: main.py читает этот блок как config.get('trading.trailing_stop'),
   # поэтому он ОБЯЗАН быть вложен под trading: (а не на верхнем уровне, как
