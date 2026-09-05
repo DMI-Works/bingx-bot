@@ -134,6 +134,23 @@ class TrailingStopManager:
                 target = i
         return target
 
+    def _stop_price_for_level(
+        self, entry_price: float, side: str, level_roi_percent: float, leverage: float
+    ) -> float:
+        """Ціна стопа для конкретного ROI%-рівня з урахуванням leverage і
+        буфера (капованого max_buffer_fraction_of_level, щоб не з'їсти всю
+        відстань між близькими рівнями)."""
+        level_price_percent = level_roi_percent / leverage
+        buffer_price_percent = self.stop_buffer_percent / leverage
+        max_buffer_price_percent = level_price_percent * self.max_buffer_fraction_of_level
+        if buffer_price_percent > max_buffer_price_percent:
+            buffer_price_percent = max_buffer_price_percent
+        effective_percent = max(level_price_percent - buffer_price_percent, 0.0)
+        return (
+            entry_price * (1 + effective_percent / 100.0) if side == 'LONG'
+            else entry_price * (1 - effective_percent / 100.0)
+        )
+
     async def _process_position(self, position_key: str, position: dict, price: float) -> None:
         retry_after = self._retry_after.get(position_key)
         if retry_after is not None:
@@ -240,23 +257,19 @@ class TrailingStopManager:
             return  # жодного нового порогу не досягнуто
 
         level_roi_percent = self.trail_levels_percent[target_index]
-        level_price_percent = level_roi_percent / leverage
 
-        buffer_price_percent = self.stop_buffer_percent / leverage
-        max_buffer_price_percent = level_price_percent * self.max_buffer_fraction_of_level
-        if buffer_price_percent > max_buffer_price_percent:
-            logger.warning(
-                f"TrailingStop: {position_key} buffer {buffer_price_percent:.4f}% price would exceed "
-                f"{self.max_buffer_fraction_of_level:.0%} of level {level_price_percent:.4f}% price "
-                f"(level={level_roi_percent:g}%ROI, leverage={leverage:g}x) — capping buffer to avoid SL landing at entry"
-            )
-            buffer_price_percent = max_buffer_price_percent
-
-        effective_percent = max(level_price_percent - buffer_price_percent, 0.0)
-        desired_stop = (
-            entry_price * (1 + effective_percent / 100.0) if side == 'LONG'
-            else entry_price * (1 - effective_percent / 100.0)
-        )
+        # Драбинка кандидатів ВІД НАЙВИЩОГО досягнутого рівня ДО найближчого
+        # ще не застосованого (за спаданням). Якщо ціна одним тіком
+        # проскочила відразу кілька порогів і найвищий провалюється на
+        # біржі (типово — "stale price", ціна вже пройшла ціль), пробуємо
+        # ближчі рівні замість того, щоб одразу здаватись на
+        # last_positive/initial fallback — саме це закриває дірку, коли
+        # trailing "губить" половину прибутку через один невдалий виклик API.
+        candidates = []
+        for idx in range(target_index, state.last_applied_level_index, -1):
+            lvl = self.trail_levels_percent[idx]
+            stop_price = self._stop_price_for_level(entry_price, side, lvl, leverage)
+            candidates.append((idx, lvl, stop_price))
 
         async with state.lock:
             # перечитуємо: поки чекали на лок, інший тик міг уже застосувати
@@ -269,35 +282,25 @@ class TrailingStopManager:
 
             current_stop = position.get('stop_loss_price')
             if current_stop is not None:
-                # SL рухається ЛИШЕ вперед: якщо порахований desired_stop
-                # чомусь не кращий за вже виставлений (наприклад, буфер
-                # з'їв усю відстань між близькими рівнями) — не чіпаємо
-                is_improvement = (
-                    desired_stop > current_stop if side == 'LONG'
-                    else desired_stop < current_stop
-                )
-                if not is_improvement:
+                # SL рухається ЛИШЕ вперед: прибираємо кандидатів, чия ціна
+                # не краща за вже виставлений SL (наприклад, буфер з'їв усю
+                # відстань між близькими рівнями)
+                candidates = [
+                    c for c in candidates
+                    if (c[2] > current_stop if side == 'LONG' else c[2] < current_stop)
+                ]
+                if not candidates:
                     state.last_applied_level_index = target_index  # рівень технічно "пройдено", просто нема чого рухати
                     return
 
-            success = await self._move_stop_loss(position_key, position, desired_stop, level_roi_percent)
-            if success:
-                state.last_applied_level_index = target_index
-
-                # Зберігаємо саме ФАКТИЧНУ ціну останнього позитивного SL.
-                # Це і є перший fallback при наступному невдалому move.
-                stop_fraction = (
-                    (desired_stop - entry_price) / entry_price if side == 'LONG'
-                    else (entry_price - desired_stop) / entry_price
-                )
-                stop_roi_percent = stop_fraction * leverage * 100.0
-                if stop_fraction > 0:
-                    state.last_positive_stop_price = desired_stop
-                    state.last_positive_roi_percent = stop_roi_percent
-
-                # Новий успішний trailing-рівень = новий цикл повідомлень.
-                state.fallback_notice_key = None
-                state.critical_notice_key = None
+            new_index = await self._move_stop_loss(position_key, position, state, candidates)
+            if new_index is not None:
+                advanced = new_index > state.last_applied_level_index
+                state.last_applied_level_index = new_index
+                if advanced:
+                    # Новий успішний trailing-рівень = новий цикл повідомлень.
+                    state.fallback_notice_key = None
+                    state.critical_notice_key = None
             else:
                 # НЕ позначаємо рівень застосованим — спробуємо ще раз
                 # пізніше (після короткого кулдауну, щоб не спамити біржу)
@@ -306,20 +309,24 @@ class TrailingStopManager:
     # ---------- реальне переміщення SL на біржі ----------
 
     async def _move_stop_loss(
-        self, position_key: str, position: dict, desired_stop_price: float, level_roi_percent: float
-    ) -> bool:
-        """Переставляє єдиний SL позиції (cancel старого + create нового).
-        level_roi_percent — тригерний рівень у ROI% (лише для логів/подій,
-        сама ціна desired_stop_price вже порахована з урахуванням leverage
-        та буфера у _process_position). Повертає True при успіху, False
-        при будь-якій невдачі (виклик, що не позначає рівень застосованим
-        і намагається ще раз пізніше).
+        self, position_key: str, position: dict, state: "_TrailState", candidates: List[tuple]
+    ) -> Optional[int]:
+        """Переставляє єдиний SL позиції: cancel старого ОДИН раз, потім
+        пробує candidates (список (level_index, level_roi_percent,
+        stop_price) за СПАДНОЮ агресивністю — від найвищого досягнутого
+        рівня до найближчого ще не застосованого) один за одним, зупиняється
+        на першому, що вдалось розмістити на біржі.
 
-        Якщо старий SL вже відмінено, а новий створити не вдалось —
-        автоматично запускається fallback-ланцюжок: останній позитивний SL,
-        а якщо він не створюється — найперший SL позиції. Якщо обидва варіанти
-        не вдалися, повертається False; наступні тики автоматично повторюють
-        спробу після cooldown, без ручного втручання."""
+        Якщо провалились геть усі рівні — останній рубіж: fallback-ланцюжок
+        last_positive_stop_price -> initial_stop_loss_price
+        (_place_fallback_to_last_stop). Це НЕ просуває trailing-рівень.
+
+        Повертає:
+        - index рівня, що реально застосувався (може бути НИЖЧИМ за
+          початково бажаний target_index, якщо верхні кандидати провалились);
+        - незмінний state.last_applied_level_index, якщо спрацював лише
+          fallback (last_positive/initial);
+        - None, якщо провалилось геть усе."""
         symbol = position['symbol']
         side = position['side']
         quantity = position.get('remaining_quantity') or position.get('quantity')
@@ -329,148 +336,156 @@ class TrailingStopManager:
         old_sl_order_id = position.get('sl_order_id')
         old_stop_price = position.get('stop_loss_price')
 
-        # 1) відміняємо поточний SL
+        # 1) відміняємо поточний SL ОДИН раз для всієї спроби (не для
+        # кожного кандидата окремо — на позиції завжди лише один SL-ордер)
         try:
             await self.exchange.cancel_order(symbol, old_sl_order_id)
         except BingXAPIError as e:
             if e.code == 109429:
                 self._apply_rate_limit_backoff(position_key, e.msg)
                 logger.warning(f"TrailingStop: rate limited (109429) cancelling SL for {position_key}")
-                return False
+                return None
             if self._is_gone_error(e):
-                # ордер/позиція вже не існує на біржі — або позиція щойно
-                # закрилась (SL спрацював), або це zombie-позиція в
-                # open_positions. У будь-якому разі виставляти новий SL
-                # безглуздо — виходимо без помилки/паніки.
                 logger.info(
                     f"TrailingStop: {position_key} SL/position already gone "
                     f"(orderId={old_sl_order_id}): {e.code} {e.msg}, skipping"
                 )
-                return False
+                return None
             logger.error(f"TrailingStop: failed to cancel SL for {position_key}: {e.code} {e.msg}")
-            return False
+            return None
         except Exception as e:
             logger.error(f"TrailingStop: unexpected error cancelling SL for {position_key}: {e}", exc_info=True)
-            return False
+            return None
 
-        # 2) створюємо новий SL — ОДНА спроба, без перерахунку від live price
-        # і без каскаду ретраїв. Якщо не вдалось — одразу fallback на
-        # initial_stop_loss_price (найпростіший надійний варіант замість
-        # нарощування ще однієї гілки розрахункової логіки).
-        client_order_id = f"sl-{int(time.time() * 1000)}"
-        try:
-            response = await self.exchange.create_order(
-                symbol=symbol,
-                side=close_side,
-                order_type='STOP_MARKET',
-                quantity=quantity,
-                stop_price=desired_stop_price,
-                position_side=position_side,
-                close_position=True,
-                client_order_id=client_order_id,
-            )
-        except BingXAPIError as e:
-            if e.code == 109429:
-                self._apply_rate_limit_backoff(position_key, e.msg)
-                logger.error(
-                    f"TrailingStop: rate limited (109429) creating new SL for {position_key} "
-                    f"AFTER cancelling the old one — falling back to initial stop!"
+        # 2) пробуємо кандидатів по спадній — від найагресивнішого до
+        # найближчого до вже застосованого рівня
+        rate_limited = False
+        for level_index, level_roi_percent, desired_stop_price in candidates:
+            client_order_id = f"sl-{int(time.time() * 1000)}"
+            try:
+                response = await self.exchange.create_order(
+                    symbol=symbol,
+                    side=close_side,
+                    order_type='STOP_MARKET',
+                    quantity=quantity,
+                    stop_price=desired_stop_price,
+                    position_side=position_side,
+                    close_position=True,
+                    client_order_id=client_order_id,
                 )
-                return await self._place_fallback_to_last_stop(position_key, position)
-            if self._is_gone_error(e):
-                # позиція закрилась між cancel і create — нема куди ставити
-                # SL, це не помилка
-                logger.info(f"TrailingStop: {position_key} position gone before new SL could be created, skipping")
-                return False
-            if e.code == 110406:
-                # "Position SL order already exists" — попри те, що ми щойно
-                # відмінили старий, біржа бачить якийсь SL на позиції.
-                # Ймовірно, позиція ВСЕ Ж захищена (просто не тим ордером,
-                # який ми відстежуємо) — не панікуємо, ресинк наступного тіку.
+            except BingXAPIError as e:
+                if e.code == 109429:
+                    self._apply_rate_limit_backoff(position_key, e.msg)
+                    logger.error(
+                        f"TrailingStop: rate limited (109429) creating SL for {position_key} "
+                        f"mid-ladder (level {level_roi_percent:g}%ROI) — stopping, old SL already cancelled!"
+                    )
+                    rate_limited = True
+                    break
+                if self._is_gone_error(e):
+                    logger.info(f"TrailingStop: {position_key} position gone before SL could be created, skipping")
+                    return None
+                if e.code == 110406:
+                    logger.warning(
+                        f"TrailingStop: {position_key} got 110406 (SL already exists) — some SL order "
+                        f"is present on the exchange, resync next tick"
+                    )
+                    return None
                 logger.warning(
-                    f"TrailingStop: {position_key} got 110406 (SL already exists) right after our own "
-                    f"cancel — some SL order is present on the exchange, but our tracked id is stale. "
-                    f"Skipping this attempt; will resync next tick."
+                    f"TrailingStop: {position_key} level {level_roi_percent:g}%ROI "
+                    f"({desired_stop_price:.6f}) REJECTED: {e.code} {e.msg} — trying next closer level..."
                 )
-                return False
-            logger.error(
-                f"TrailingStop: failed to create new SL for {position_key} at {desired_stop_price:.6f} "
-                f"(level {level_roi_percent:g}%ROI, old SL already cancelled): {e.code} {e.msg}. "
-                f"Falling back to initial strategy stop..."
-            )
-            await self._notify_critical(
-                f"⚠️ Не вдалося перевиставити SL для {symbol} {side} на {desired_stop_price:.6f} "
-                f"(рівень {level_roi_percent:g}% ROI, старий SL вже відмінено): {e.code} {e.msg}. "
-                f"Повертаю початковий SL стратегії..."
-            )
-            return await self._place_fallback_to_last_stop(position_key, position)
-        except Exception as e:
-            logger.error(f"TrailingStop: unexpected error creating new SL for {position_key}: {e}", exc_info=True)
-            logger.error(
-                f"TrailingStop: falling back to initial strategy stop for {position_key} after unexpected error"
-            )
-            return await self._place_fallback_to_last_stop(position_key, position)
+                continue
+            except Exception as e:
+                logger.error(
+                    f"TrailingStop: unexpected error creating SL for {position_key} at "
+                    f"level {level_roi_percent:g}%ROI: {e}", exc_info=True
+                )
+                continue
 
-        new_stop_price = desired_stop_price
-        new_order_id = None
-        if 'data' in response and 'order' in response['data']:
-            new_order_id = response['data']['order'].get('orderId')
+            # --- успіх ---
+            new_order_id = None
+            if response and 'data' in response and 'order' in response['data']:
+                new_order_id = response['data']['order'].get('orderId')
+            if not new_order_id:
+                logger.error(f"TrailingStop: SL created for {position_key} but no orderId in response: {response}.")
+                await self._notify_critical(
+                    f"SL для {symbol} {side} перевиставлено, але не вдалось прочитати orderId — перевірте вручну!"
+                )
 
-        if not new_order_id:
-            logger.error(
-                f"TrailingStop: SL created for {position_key} but no orderId in response: {response}."
+            position['stop_loss_price'] = desired_stop_price
+            position['sl_order_id'] = str(new_order_id) if new_order_id else None
+            position['sl_client_order_id'] = client_order_id
+
+            try:
+                self.db.update_position_metadata(order_id=position['order_id'], metadata=json.dumps(position))
+            except Exception as e:
+                logger.error(f"TrailingStop: failed to persist moved SL to DB for {position_key}: {e}", exc_info=True)
+
+            entry_price = position.get('entry_price')
+            leverage = position.get('leverage') or 1
+            try:
+                leverage = float(leverage)
+            except (TypeError, ValueError):
+                leverage = 1.0
+            if leverage <= 0:
+                leverage = 1.0
+
+            if entry_price:
+                stop_fraction = (
+                    (desired_stop_price - entry_price) / entry_price if side == 'LONG'
+                    else (entry_price - desired_stop_price) / entry_price
+                )
+                if stop_fraction > 0:
+                    state.last_positive_stop_price = desired_stop_price
+                    state.last_positive_roi_percent = stop_fraction * leverage * 100.0
+
+            skipped_note = ""
+            if level_index != candidates[0][0]:
+                skipped_note = (
+                    f" (ЦІЛЬОВИЙ рівень {candidates[0][1]:g}%ROI провалився — "
+                    f"застосовано найближчий доступний {level_roi_percent:g}%ROI)"
+                )
+
+            logger.info(
+                f"TrailingStop: SL for {position_key} -> {desired_stop_price:.6f} "
+                f"(trigger_level={level_roi_percent:g}%ROI{skipped_note}, "
+                f"old_order={old_sl_order_id}, new_order={new_order_id})"
             )
-            await self._notify_critical(
-                f"SL для {symbol} {side} перевиставлено, але не вдалось прочитати orderId — перевірте вручну!"
-            )
 
-        # 3) оновлюємо СПІЛЬНИЙ стан позиції (той самий словник, що бачить
-        # SimpleTrader/TelegramBot) — це єдиний SL позиції, інших полів нема
-        position['stop_loss_price'] = new_stop_price
-        position['sl_order_id'] = str(new_order_id) if new_order_id else None
-        position['sl_client_order_id'] = client_order_id
+            try:
+                await self.event_bus.publish(Event(
+                    type=EventType.STOP_LOSS_MOVED,
+                    data={
+                        'symbol': symbol,
+                        'side': side,
+                        'stage': f"level_{level_roi_percent:g}pct_roi",
+                        'entry_price': entry_price,
+                        'old_stop_price': old_stop_price,
+                        'new_stop_price': desired_stop_price,
+                        'leverage': leverage,
+                        'strategy': position.get('strategy'),
+                    },
+                    source="TrailingStopManager",
+                ))
+            except Exception as e:
+                logger.error(f"TrailingStop: failed to publish STOP_LOSS_MOVED event: {e}")
 
-        try:
-            self.db.update_position_metadata(
-                order_id=position['order_id'],
-                metadata=json.dumps(position),
-            )
-        except Exception as e:
-            logger.error(f"TrailingStop: failed to persist moved SL to DB for {position_key}: {e}", exc_info=True)
+            return level_index
 
-        logger.info(
-            f"TrailingStop: SL for {position_key} -> {new_stop_price:.6f} "
-            f"(trigger_level={level_roi_percent:g}%ROI, buffer={self.stop_buffer_percent:g}%price, "
-            f"old_order={old_sl_order_id}, new_order={new_order_id})"
+        # 3) провалились ГЕТЬ УСІ рівні-кандидати (старий SL вже відмінено) —
+        # останній рубіж: last_positive_stop_price -> initial_stop_loss_price.
+        # При rate limit НЕ пробуємо fallback — той самий виклик create_order
+        # майже напевно теж впаде в 109429, лише витратимо ліміт запитів.
+        if rate_limited:
+            return None
+
+        logger.error(
+            f"TrailingStop: ALL {len(candidates)} level candidates failed for {position_key} "
+            f"(old SL already cancelled) — escalating to last_positive/initial fallback"
         )
-
-        event_leverage = position.get('leverage') or 1
-        try:
-            event_leverage = float(event_leverage)
-        except (TypeError, ValueError):
-            event_leverage = 1.0
-        if event_leverage <= 0:
-            event_leverage = 1.0
-
-        try:
-            await self.event_bus.publish(Event(
-                type=EventType.STOP_LOSS_MOVED,
-                data={
-                    'symbol': symbol,
-                    'side': side,
-                    'stage': f"level_{level_roi_percent:g}pct_roi",
-                    'entry_price': position.get('entry_price'),
-                    'old_stop_price': old_stop_price,
-                    'new_stop_price': new_stop_price,
-                    'leverage': event_leverage,
-                    'strategy': position.get('strategy'),
-                },
-                source="TrailingStopManager",
-            ))
-        except Exception as e:
-            logger.error(f"TrailingStop: failed to publish STOP_LOSS_MOVED event: {e}")
-
-        return True
+        ok = await self._place_fallback_to_last_stop(position_key, position)
+        return state.last_applied_level_index if ok else None
 
     # ---------- автоматичний fallback: last positive -> initial ----------
 
