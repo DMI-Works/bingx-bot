@@ -31,7 +31,7 @@ trading:
   # Risk Management — акаунт-рівневий, застосовується до всіх стратегій
   # одразу (не per-strategy), тому лишається тут
   risk:
-    max_open_positions: 3
+    max_open_positions: 15
     max_positions_per_symbol: 1
     max_total_risk_percent: 5.0
     max_consecutive_losses: 3
