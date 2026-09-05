@@ -71,7 +71,7 @@ class TelegramBot:
         self.event_bus.subscribe(EventType.ERROR, self._on_error)
         self.event_bus.subscribe(EventType.CRITICAL_ERROR, self._on_critical_error)
         self.event_bus.subscribe(EventType.SYMBOLS_ROTATED, self._on_symbols_rotated)
-        self.event_bus.subscribe(EventType.WALL_DETECTED, self._on_wall_detected)
+        # self.event_bus.subscribe(EventType.WALL_DETECTED, self._on_wall_detected)
         self.event_bus.subscribe(EventType.WALL_BREAKOUT, self._on_wall_breakout)
         
 
