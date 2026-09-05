@@ -14,6 +14,7 @@ from core.state import SettingsManager
 from core.risk import RiskManager, TrailingStopManager
 from core.trading import SimpleTrader
 from core.strategies import StrategyManager, SignalActivityTracker
+from core.orderbook_analyzer import OrderBookAnalyzer
 from core.telegram import TelegramBot
 
 
@@ -115,6 +116,10 @@ async def main():
     signal_activity_tracker = SignalActivityTracker(event_bus)
     symbol_selector = SymbolSelector(exchange, filters_config, signal_tracker=signal_activity_tracker, event_bus=event_bus)
     logger.info("[OK] Symbol Selector initialized (signal-activity-aware rotation, notifies Telegram)")
+
+    orderbook_config = config.get('trading.orderbook', {})
+    orderbook_analyzer = OrderBookAnalyzer(event_bus, orderbook_config)
+    logger.info("[OK] OrderBookAnalyzer initialized (detect+log only, not wired to trading)")
 
     # --- Strategy settings + live strategy manager створюються ДО
     # TelegramBot, бо SettingsMenu всередині нього має отримати вже готовий

@@ -43,11 +43,18 @@ trading:
     use_risk_based_sizing: false
     risk_per_trade_percent: 0.5
 
-  # Filters — відбір монет для торгівлі, не залежить від стратегії
+  # Filters — відбір монет для торгівлі, не залежить від стратегії.
+  # СПІЛЬНИЙ пул для SMA/RejectionBlock/TrailingStop І OrderBookAnalyzer
+  # (свідоме архітектурне рішення з ТЗ на OrderBook-модуль — один список
+  # символів замість двох незалежних пулів з різними лімітами).
   filters:
     whitelist_symbols: ["BSB-USDT", "CLO-USDT", "VINE-USDT", "DEXE-USDT", "BEAT-USDT", "XPIN-USDT"]
     blacklist_symbols: []
-    max_symbols: 7
+    # ліміт з ТЗ на OrderBook-модуль (не більше 20 активних підписок).
+    # На одному WS-з'єднанні це max_symbols трейд-підписок + max_symbols
+    # depth-підписок = до 40 сумарно — з великим запасом нижче будь-якого
+    # відомого ліміту BingX (офіційно задокументовано лише для spot: 200/з'єднання).
+    max_symbols: 20
     min_price: {}
     max_price: {}
     min_volume_24h: 1000000
@@ -60,12 +67,35 @@ trading:
     #   давав сигнал за останні no_signal_replace_after_seconds
     # - "тихий" (без сигналу за цей час) непридбаний символ — замінюється
     #   свіжим кандидатом за 24h об'ємом
-    no_signal_replace_after_seconds: 3600
+    # 1800с (30хв) — точне значення з ТЗ на OrderBook/SubscriptionManager
+    # (раніше було 3600с, змінено при об'єднанні пулів)
+    no_signal_replace_after_seconds: 1800
 
   time_filters:
     enabled: false
     allowed_hours: []
     timezone: "UTC"
+
+  # OrderBookAnalyzer (core/orderbook_analyzer.py) — детект "стін" і їх
+  # пробою по partial book depth (@depth20). ФАЗА 1: лише детект + лог +
+  # повідомлення в Telegram, НЕ підключено до торгівлі.
+  orderbook:
+    enabled: true
+    # рівень книги вважається "стіною", якщо його обсяг у wall_multiplier
+    # разів більший за середній обсяг рівня в тому ж боці книги
+    wall_multiplier: 5.0
+    # додатковий абсолютний поріг обсягу (0 — вимкнено), щоб відсіяти
+    # "стіни" на мікрооб'ємах у неліквідних інструментах
+    min_wall_quantity: 0.0
+    # наскільки близько (%) ціна має підійти до стіни, щоб почати
+    # перевірку на пробій
+    approach_threshold_pct: 0.5
+    # скільки % початкового обсягу стіни має "з'їстись", щоб перетин
+    # рівня рахувався пробоєм, а не шумом
+    breakout_consumption_pct: 30.0
+    # через скільки секунд неактуальна стіна прибирається зі стану,
+    # якщо пробою так і не відбулось
+    wall_stale_seconds: 300.0
 
   # ВАЖНО: main.py читает этот блок как config.get('trading.trailing_stop'),
   # поэтому он ОБЯЗАН быть вложен под trading: (а не на верхнем уровне, как

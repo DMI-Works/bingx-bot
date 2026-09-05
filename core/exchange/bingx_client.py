@@ -51,6 +51,7 @@ class BingXClient:
 
         self.ws_client: Optional[WebSocketClient] = None
         self.subscribed_symbols: set = set()
+        self.depth_subscribed_symbols: set = set()
 
         logger.info(f"BingXClient initialized (testnet={testnet})")
 
@@ -85,10 +86,15 @@ class BingXClient:
                 await self._handle_order_update(data)
                 return
 
-            # Рыночные данные
+            # Рыночні дані. Ізольована маршрутизація за суфіксом dataType —
+            # існуючі обробники (@trade) не зачіпаються.
             data_type = data.get("dataType")
-            if data_type and data_type.endswith("@trade"):
+            if not data_type:
+                return
+            if data_type.endswith("@trade"):
                 await self._handle_price_update(data)
+            elif "@depth" in data_type:
+                await self._handle_depth_update(data)
 
         except Exception as e:
             logger.error(f"Error handling WebSocket message: {e}", exc_info=True)
@@ -119,6 +125,26 @@ class BingXClient:
                 source="BingXClient"
             ))
 
+    async def _handle_depth_update(self, data: Dict[str, Any]) -> None:
+        """dataType='<symbol>@depth20' (снепшот топ-N рівнів, не інкремент —
+        BingX пушить повний bids/asks-зріз щосекунди, тому окремої логіки
+        синхронізації порядкового номера тут НЕ потрібно)."""
+        if not self.event_bus or 'data' not in data:
+            return
+        depth_data = data['data']
+        data_type = data.get('dataType', '')
+        # символ не завжди присутній у самому payload depth — витягуємо з dataType
+        symbol = data_type.split('@', 1)[0] if '@' in data_type else depth_data.get('s')
+        await self.event_bus.publish(Event(
+            type=EventType.ORDERBOOK_UPDATED,
+            data={
+                'symbol': symbol,
+                'bids': depth_data.get('bids', []),
+                'asks': depth_data.get('asks', []),
+            },
+            source="BingXClient"
+        ))
+
     async def start_websocket(self) -> None:
         self.ws_client = WebSocketClient(
             url=self.ws_url,
@@ -148,6 +174,23 @@ class BingXClient:
         if self.ws_client:
             await self.ws_client.subscribe(f"{symbol}@trade", symbol)
             self.subscribed_symbols.add(symbol)
+
+    async def unsubscribe_trades(self, symbol: str) -> None:
+        if self.ws_client:
+            await self.ws_client.unsubscribe(f"{symbol}@trade", symbol)
+            self.subscribed_symbols.discard(symbol)
+
+    async def subscribe_depth(self, symbol: str, level: int = 20) -> None:
+        """Підписка на partial book depth (знепшот топ-N рівнів, оновлюється
+        ~раз/сек). level: 5, 20 або 100 (підтримувані BingX варіанти)."""
+        if self.ws_client:
+            await self.ws_client.subscribe(f"{symbol}@depth{level}", symbol)
+            self.depth_subscribed_symbols.add(symbol)
+
+    async def unsubscribe_depth(self, symbol: str, level: int = 20) -> None:
+        if self.ws_client:
+            await self.ws_client.unsubscribe(f"{symbol}@depth{level}", symbol)
+            self.depth_subscribed_symbols.discard(symbol)
 
     async def start_user_data_stream(self) -> None:
         self.listen_key = await self.get_listen_key()
@@ -394,11 +437,7 @@ class BingXClient:
             logger.error(f"Failed to get all tickers: {e}")
             raise
 
-    async def unsubscribe_trades(self, symbol: str) -> None:
-        if self.ws_client:
-            await self.ws_client.unsubscribe(f"{symbol}@trade", symbol)
-            self.subscribed_symbols.discard(symbol)
-    
+
     async def get_klines(
         self,
         symbol: str,

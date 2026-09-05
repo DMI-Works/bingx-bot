@@ -47,6 +47,11 @@ class EventType(Enum):
     # Symbol Selection Events
     SYMBOLS_ROTATED = "symbols_rotated"
 
+    # OrderBook Events
+    ORDERBOOK_UPDATED = "orderbook_updated"
+    WALL_DETECTED = "wall_detected"
+    WALL_BREAKOUT = "wall_breakout"
+
     # Recovery Events
     # RECOVERY_STARTED = "recovery_started"
     # RECOVERY_COMPLETED = "recovery_completed"

@@ -130,7 +130,13 @@ class SymbolSelector:
         return sorted(selected)
 
     async def apply(self) -> Set[str]:
-        """Обчислює актуальний список символів, підписує нові, відписує зайві."""
+        """Обчислює актуальний список символів, підписує нові, відписує зайві.
+
+        Спільний пул: кожен символ у `selected` отримує ОБИДВІ підписки —
+        @trade (для SMA/RejectionBlock/TrailingStop) і @depth20 (для
+        OrderBookAnalyzer). Це свідоме архітектурне рішення — один список
+        символів, одна ротація, замість двох незалежних пулів з різними
+        лімітами/таймаутами."""
         selected = set(await self.select())
         current = set(self.exchange.subscribed_symbols)
 
@@ -146,6 +152,10 @@ class SymbolSelector:
                 subscribed_ok.add(symbol)
             except Exception as e:
                 logger.error(f"Failed to subscribe {symbol}: {e}")
+            try:
+                await self.exchange.subscribe_depth(symbol)
+            except Exception as e:
+                logger.error(f"Failed to subscribe depth for {symbol}: {e}")
 
         for symbol in to_unsubscribe:
             try:
@@ -154,6 +164,10 @@ class SymbolSelector:
                 unsubscribed_ok.add(symbol)
             except Exception as e:
                 logger.error(f"Failed to unsubscribe {symbol}: {e}")
+            try:
+                await self.exchange.unsubscribe_depth(symbol)
+            except Exception as e:
+                logger.error(f"Failed to unsubscribe depth for {symbol}: {e}")
 
         if not to_subscribe and not to_unsubscribe:
             logger.info(f"[SYMBOLS] No changes, {len(selected)} symbols active")
