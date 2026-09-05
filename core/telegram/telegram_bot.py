@@ -72,7 +72,7 @@ class TelegramBot:
         self.event_bus.subscribe(EventType.CRITICAL_ERROR, self._on_critical_error)
         self.event_bus.subscribe(EventType.SYMBOLS_ROTATED, self._on_symbols_rotated)
         # self.event_bus.subscribe(EventType.WALL_DETECTED, self._on_wall_detected)
-        self.event_bus.subscribe(EventType.WALL_BREAKOUT, self._on_wall_breakout)
+        # self.event_bus.subscribe(EventType.WALL_BREAKOUT, self._on_wall_breakout)
         
 
     async def start(self) -> None:
@@ -523,35 +523,35 @@ class TelegramBot:
 # """
 #         await self.send_message(text)
 
-    async def _on_wall_breakout(self, event: Event) -> None:
-        data = event.data
-        symbol = data.get('symbol', 'N/A')
-        side = data.get('side', '?')
-        wall_price = data.get('wall_price', 0)
-        current_price = data.get('current_price', 0)
-        consumed_pct = data.get('consumed_pct', 0)
-        direction = "⬆️ вгору (пробито ASK)" if side == 'ask' else "⬇️ вниз (пробито BID)"
+#     async def _on_wall_breakout(self, event: Event) -> None:
+#         data = event.data
+#         symbol = data.get('symbol', 'N/A')
+#         side = data.get('side', '?')
+#         wall_price = data.get('wall_price', 0)
+#         current_price = data.get('current_price', 0)
+#         consumed_pct = data.get('consumed_pct', 0)
+#         direction = "⬆️ вгору (пробито ASK)" if side == 'ask' else "⬇️ вниз (пробито BID)"
 
-        wall_strategy = self.strategy_manager.get('WallBreakoutStrategy') if self.strategy_manager else None
-        if wall_strategy and wall_strategy.is_enabled():
-            footer = "🤖 WallBreakoutStrategy увімкнена — угоду буде відкрито автоматично."
-        else:
-            footer = (
-                "[INFO]: Це лише аналітичний сигнал, угода НЕ відкривається — "
-                "WallBreakoutStrategy вимкнена. Увімкнути: /settings → WallBreakoutStrategy."
-            )
+#         wall_strategy = self.strategy_manager.get('WallBreakoutStrategy') if self.strategy_manager else None
+#         if wall_strategy and wall_strategy.is_enabled():
+#             footer = "🤖 WallBreakoutStrategy увімкнена — угоду буде відкрито автоматично."
+#         else:
+#             footer = (
+#                 "[INFO]: Це лише аналітичний сигнал, угода НЕ відкривається — "
+#                 "WallBreakoutStrategy вимкнена. Увімкнути: /settings → WallBreakoutStrategy."
+#             )
 
-        text = f"""
-💥 <b>Пробій стіни</b>
+#         text = f"""
+# 💥 <b>Пробій стіни</b>
 
-<b>{symbol}</b> {direction}
-├ Рівень стіни: <code>${wall_price:.6f}</code>
-├ Поточна ціна: <code>${current_price:.6f}</code>
-└ Стіну з'їдено: <code>{consumed_pct:.0f}%</code>
+# <b>{symbol}</b> {direction}
+# ├ Рівень стіни: <code>${wall_price:.6f}</code>
+# ├ Поточна ціна: <code>${current_price:.6f}</code>
+# └ Стіну з'їдено: <code>{consumed_pct:.0f}%</code>
 
-{footer}
-"""
-        await self.send_message(text)
+# {footer}
+# """
+#         await self.send_message(text)
 
     async def notify_startup(
         self,
