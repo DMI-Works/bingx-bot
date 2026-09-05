@@ -14,7 +14,7 @@ from core.state import SettingsManager
 from core.risk import RiskManager, TrailingStopManager
 from core.trading import SimpleTrader
 from core.strategies import StrategyManager, SignalActivityTracker
-from core.orderbook_analyzer import OrderBookAnalyzer
+from core.strategies.orderbook_analyzer import OrderBookAnalyzer
 from core.telegram import TelegramBot
 
 
