@@ -49,7 +49,7 @@ class WallBreakoutStrategy(BaseStrategy):
         self.leverage: int = config.get('leverage', 20)
         self.stop_loss_percent: float = config.get('stop_loss_percent', 1.0)
         self.take_profit_levels_config = config.get(
-            'take_profit_levels', [{'percent': 2.0, 'close_percent': 100}]
+            'take_profit_levels', [{'percent': 30.0, 'close_percent': 100}]
         )
         self.cooldown_seconds: float = config.get('cooldown_seconds', 300)
 
@@ -67,7 +67,7 @@ class WallBreakoutStrategy(BaseStrategy):
     def build_config(cls, app_config) -> dict:
         return {
             'position_size': app_config.get('trading.position_size.value', 100),
-            'leverage': app_config.get('trading.leverage', 10),
+            'leverage': app_config.get('trading.leverage', 20),
             'stop_loss_percent': app_config.get('trading.wall_breakout.stop_loss_percent', 1.0),
             'take_profit_levels': app_config.get(
                 'trading.wall_breakout.take_profit_levels',
