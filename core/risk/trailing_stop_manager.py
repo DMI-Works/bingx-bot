@@ -33,6 +33,7 @@ class _TrailState:
     в SimpleTrader.open_positions (position['sl_order_id'] / ['stop_loss_price']),
     цей модуль лише читає й (при переміщенні) оновлює ці поля."""
     last_applied_level_index: int = -1     # індекс останнього застосованого порогу в trail_levels_percent; -1 = жодного ще не застосовано
+    initial_stop_price: Optional[float] = None  # найперший SL позиції; незмінний fallback
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -68,12 +69,6 @@ class TrailingStopManager:
         if self.enabled:
             self.event_bus.subscribe(EventType.PRICE_UPDATED, self._on_price_update)
             self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
-            logger.info(
-                f"TrailingStopManager initialized: levels={self.trail_levels_percent}%ROI, "
-                f"buffer={self.stop_buffer_percent}%ROI (capped at {self.max_buffer_fraction_of_level:.0%} of level) "
-                f"(single SL slot, moved via cancel+create on level crossings; "
-                f"on any move failure -> single fallback to the last known stop)"
-            )
         else:
             logger.info("TrailingStopManager initialized but disabled via config")
 
@@ -176,6 +171,23 @@ class TrailingStopManager:
         favorable_roi_percent = favorable_fraction * leverage * 100.0
 
         state = self._states.setdefault(position_key, _TrailState())
+
+        # Запоминаем самый первый SL ДО любого trailing-перемещения.
+        # Это последний автоматический fallback, если даже предыдущий
+        # плюсовой SL не удается восстановить.
+        if state.initial_stop_price is None:
+            initial_stop = position.get('initial_stop_loss_price')
+            if initial_stop is None:
+                initial_stop = position.get('stop_loss_price')
+            try:
+                if initial_stop is not None:
+                    state.initial_stop_price = float(initial_stop)
+                    position.setdefault('initial_stop_loss_price', state.initial_stop_price)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"TrailingStop: {position_key} invalid initial stop={initial_stop!r}; "
+                    f"will use current SL as fallback source"
+                )
 
         # --- єдиний лог "серцебиття" позиції: показує, куди рухається
         # ціна відносно входу та наступного порогу сходинки (в ROI%, щоб
@@ -321,10 +333,9 @@ class TrailingStopManager:
             logger.error(f"TrailingStop: unexpected error cancelling SL for {position_key}: {e}", exc_info=True)
             return False
 
-        # 2) створюємо новий SL — ОДНА спроба, без перерахунку від live price
-        # і без каскаду ретраїв. Якщо не вдалось — одразу fallback на
-        # initial_stop_loss_price (найпростіший надійний варіант замість
-        # нарощування ще однієї гілки розрахункової логіки).
+        # 2) создаем новый SL — одна попытка. Если не удалось, fallback
+        # автоматически выберет последний плюсовой SL, а при его провале —
+        # самый первый SL позиции.
         client_order_id = f"sl-{int(time.time() * 1000)}"
         try:
             response = await self.exchange.create_order(
@@ -342,9 +353,10 @@ class TrailingStopManager:
                 self._apply_rate_limit_backoff(position_key, e.msg)
                 logger.error(
                     f"TrailingStop: rate limited (109429) creating new SL for {position_key} "
-                    f"AFTER cancelling the old one — falling back to initial stop!"
+                    f"AFTER cancelling the old one — automatic fallback chain starts"
                 )
-                return await self._place_fallback_to_last_stop(position_key, position)
+                await self._place_fallback_to_last_stop(position_key, position)
+                return False
             if self._is_gone_error(e):
                 # позиція закрилась між cancel і create — нема куди ставити
                 # SL, це не помилка
@@ -364,20 +376,17 @@ class TrailingStopManager:
             logger.error(
                 f"TrailingStop: failed to create new SL for {position_key} at {desired_stop_price:.6f} "
                 f"(level {level_roi_percent:g}%ROI, old SL already cancelled): {e.code} {e.msg}. "
-                f"Falling back to initial strategy stop..."
+                f"Starting automatic fallback chain"
             )
-            await self._notify_critical(
-                f"⚠️ Не вдалося перевиставити SL для {symbol} {side} на {desired_stop_price:.6f} "
-                f"(рівень {level_roi_percent:g}% ROI, старий SL вже відмінено): {e.code} {e.msg}. "
-                f"Повертаю початковий SL стратегії..."
-            )
-            return await self._place_fallback_to_last_stop(position_key, position)
+            await self._place_fallback_to_last_stop(position_key, position)
+            return False
         except Exception as e:
             logger.error(f"TrailingStop: unexpected error creating new SL for {position_key}: {e}", exc_info=True)
             logger.error(
-                f"TrailingStop: falling back to initial strategy stop for {position_key} after unexpected error"
+                f"TrailingStop: starting automatic fallback chain for {position_key}"
             )
-            return await self._place_fallback_to_last_stop(position_key, position)
+            await self._place_fallback_to_last_stop(position_key, position)
+            return False
 
         new_stop_price = desired_stop_price
         new_order_id = None
@@ -443,103 +452,137 @@ class TrailingStopManager:
     # ---------- аварійний fallback до останнього стопа (last resort) ----------
 
     async def _place_fallback_to_last_stop(self, position_key: str, position: dict) -> bool:
-        """Аварійний fallback: повертає ОСТАННІЙ відомий SL позиції.
+        """Автоматический fallback без ручного вмешательства.
 
-        Важливо: не повертаємось до initial_stop_loss_price. Перед cancel старого
-        ордера position['stop_loss_price'] містить останній фактично застосований
-        стоп. Якщо створення нового trailing SL не вдалося, саме цей рівень треба
-        відновити, щоб не відкотити захист далеко в мінус.
+        Порядок:
+        1. Последний фактически примененный плюсовой SL (например +3% ROI).
+        2. Если его тоже не удалось создать — самый первый SL позиции.
+
+        Поэтому при провале перехода +3 -> +16 система сначала возвращает +3,
+        а не откатывает защиту сразу в исходные -20.
         """
         symbol = position['symbol']
         side = position['side']
         quantity = position.get('remaining_quantity') or position.get('quantity')
         close_side = 'SELL' if side == 'LONG' else 'BUY'
+        entry_price = position.get('entry_price')
 
+        state = self._states.setdefault(position_key, _TrailState())
+
+        # Это последний фактически примененный стоп перед cancel старого ордера.
         last_stop_price = position.get('stop_loss_price')
-        if last_stop_price is None:
+        try:
+            last_stop_price = float(last_stop_price) if last_stop_price is not None else None
+        except (TypeError, ValueError):
+            last_stop_price = None
+
+        # Совместимость со state, созданным до первого тика: первый известный
+        # SL фиксируем как initial fallback.
+        if state.initial_stop_price is None:
+            persisted_initial = position.get('initial_stop_loss_price')
+            try:
+                if persisted_initial is not None:
+                    state.initial_stop_price = float(persisted_initial)
+            except (TypeError, ValueError):
+                pass
+        if state.initial_stop_price is None and last_stop_price is not None:
+            state.initial_stop_price = last_stop_price
+            position.setdefault('initial_stop_loss_price', state.initial_stop_price)
+
+        candidates = []
+
+        # Сначала пробуем только реально плюсовой последний SL.
+        if last_stop_price is not None and entry_price:
+            try:
+                entry = float(entry_price)
+                is_profit_stop = (
+                    last_stop_price > entry if side == 'LONG'
+                    else last_stop_price < entry
+                )
+                if is_profit_stop:
+                    candidates.append(('last_positive', last_stop_price))
+            except (TypeError, ValueError):
+                pass
+
+        # Второй кандидат — самый первый SL позиции.
+        initial_stop_price = state.initial_stop_price
+        if initial_stop_price is not None:
+            try:
+                initial_stop_price = float(initial_stop_price)
+                if not candidates or abs(initial_stop_price - candidates[-1][1]) > 1e-12:
+                    candidates.append(('initial', initial_stop_price))
+            except (TypeError, ValueError):
+                initial_stop_price = None
+
+        if not candidates:
             logger.error(
-                f"TrailingStop: {position_key} has no last stop_loss_price to fall back to — "
-                f"position may be WITHOUT protection, manual check needed!"
+                f"TrailingStop: {position_key} has no valid fallback SL; "
+                f"automatic protection cannot be recreated"
             )
             await self._notify_critical(
-                f"🚨 КРИТИЧНО: {symbol} {side} без захисту після невдалого перевиставлення "
-                f"SL — немає останньої відомої ціни стопа. ПОТРІБНЕ РУЧНЕ втручання!"
+                f"🚨 КРИТИЧНО: не знайдено жодного fallback SL для {symbol} {side}. "
+                f"Система не має ціни, яку може автоматично виставити."
             )
             return False
 
-        try:
-            last_stop_price = float(last_stop_price)
-        except (TypeError, ValueError):
-            logger.error(
-                f"TrailingStop: {position_key} has invalid last stop_loss_price={last_stop_price!r}"
-            )
-            return False
+        # Пробуем fallback-кандидатов последовательно. Никакого ручного выбора.
+        for candidate_name, stop_price in candidates:
+            client_order_id = f"sl-fallback-{candidate_name}-{int(time.time() * 1000)}"
+            try:
+                response = await self.exchange.create_order(
+                    symbol=symbol,
+                    side=close_side,
+                    order_type='STOP_MARKET',
+                    quantity=quantity,
+                    stop_price=stop_price,
+                    position_side=side,
+                    close_position=True,
+                    client_order_id=client_order_id,
+                )
+            except Exception as e:
+                code = getattr(e, 'code', '?')
+                msg = getattr(e, 'msg', str(e))
+                logger.error(
+                    f"TrailingStop: fallback {candidate_name} failed for {position_key}: "
+                    f"{code} {msg}"
+                )
+                continue
 
-        client_order_id = f"sl-fallback-last-{int(time.time() * 1000)}"
-        try:
-            response = await self.exchange.create_order(
-                symbol=symbol,
-                side=close_side,
-                order_type='STOP_MARKET',
-                quantity=quantity,
-                stop_price=last_stop_price,
-                position_side=side,
-                close_position=True,
-                client_order_id=client_order_id,
-            )
-        except Exception as e:
-            code = getattr(e, 'code', '?')
-            msg = getattr(e, 'msg', str(e))
-            logger.error(
-                f"TrailingStop: fallback to LAST stop FAILED for {position_key}: "
-                f"{code} {msg}"
+            new_order_id = None
+            if response and 'data' in response and 'order' in response['data']:
+                new_order_id = response['data']['order'].get('orderId')
+
+            position['stop_loss_price'] = stop_price
+            position['sl_order_id'] = str(new_order_id) if new_order_id else None
+            position['sl_client_order_id'] = client_order_id
+
+            try:
+                self.db.update_position_metadata(
+                    order_id=position['order_id'],
+                    metadata=json.dumps(position),
+                )
+            except Exception as e:
+                logger.error(
+                    f"TrailingStop: failed to persist fallback SL for {position_key}: {e}",
+                    exc_info=True,
+                )
+
+            logger.warning(
+                f"TrailingStop: {position_key} automatic fallback -> "
+                f"{candidate_name} SL {stop_price:.6f}"
             )
             await self._notify_critical(
-                f"🚨 КРИТИЧНО: не вдалось відновити останній SL {last_stop_price:.6f} "
-                f"для {symbol} {side} ({code} {msg})"
+                f"⚠️ Автоматично відновлено SL для {symbol} {side}: "
+                f"{candidate_name} = {stop_price:.6f}. Ручне втручання не потрібне."
             )
-            return False
+            return True
 
-        new_order_id = None
-        if response and 'data' in response and 'order' in response['data']:
-            new_order_id = response['data']['order'].get('orderId')
-
-        position['stop_loss_price'] = last_stop_price
-        position['sl_order_id'] = str(new_order_id) if new_order_id else None
-        position['sl_client_order_id'] = client_order_id
-
-        try:
-            self.db.update_position_metadata(
-                order_id=position['order_id'],
-                metadata=json.dumps(position),
-            )
-        except Exception as e:
-            logger.error(
-                f"TrailingStop: failed to persist fallback SL to DB for {position_key}: {e}",
-                exc_info=True,
-            )
-
-        stop_leverage = position.get('leverage') or 1
-        try:
-            stop_leverage = float(stop_leverage)
-        except (TypeError, ValueError):
-            stop_leverage = 1.0
-        if stop_leverage <= 0:
-            stop_leverage = 1.0
-
-        last_stop_roi = (
-            (initial_stop_price - position['entry_price']) / position['entry_price']
-            if side == 'LONG'
-            else (position['entry_price'] - initial_stop_price) / position['entry_price']
-        ) * stop_leverage * 100.0
-
+        logger.error(f"TrailingStop: ALL automatic fallbacks failed for {position_key}")
         await self._notify_critical(
-            f"⚠️ Основне перевиставлення SL для {symbol} {side} провалилось — "
-            f"відновили ОСТАННІЙ стоп {last_stop_roi:+.2f}% ROI. "
-            f"Початковий стоп більше НЕ використовується як fallback."
+            f"🚨 КРИТИЧНО: всі автоматичні fallback SL для {symbol} {side} "
+            f"не вдалося виставити. Система продовжить автоматичні спроби."
         )
-
-        return True
+        return False
 
     # ---------- допоміжне ----------
 

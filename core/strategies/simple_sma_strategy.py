@@ -75,7 +75,7 @@ class SimpleMovingAverageStrategy(CandleWarmupMixin, BaseStrategy):
 
             'stop_loss_percent': app_config.get('trading.stop_loss.value', 2.0),
             'take_profit_levels': app_config.get(
-                'trading.take_profit.levels', [{'percent': 3.0, 'close_percent': 100}]
+                'trading.take_profit.levels', [{'percent': 30.0, 'close_percent': 100}]
             ),
         }
 
