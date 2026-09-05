@@ -519,15 +519,26 @@ class TrailingStopManager:
                 exc_info=True,
             )
 
-        logger.warning(
-            f"TrailingStop: fallback to LAST known SL placed for {position_key} -> "
-            f"{last_stop_price:.6f}, order={new_order_id}"
-        )
+        stop_leverage = position.get('leverage') or 1
+        try:
+            stop_leverage = float(stop_leverage)
+        except (TypeError, ValueError):
+            stop_leverage = 1.0
+        if stop_leverage <= 0:
+            stop_leverage = 1.0
+
+        last_stop_roi = (
+            (initial_stop_price - position['entry_price']) / position['entry_price']
+            if side == 'LONG'
+            else (position['entry_price'] - initial_stop_price) / position['entry_price']
+        ) * stop_leverage * 100.0
+
         await self._notify_critical(
             f"⚠️ Основне перевиставлення SL для {symbol} {side} провалилось — "
-            f"відновили ОСТАННІЙ стоп {last_stop_price:.6f}. Початковий стоп "
-            f"більше НЕ використовується як fallback."
+            f"відновили ОСТАННІЙ стоп {last_stop_roi:+.2f}% ROI. "
+            f"Початковий стоп більше НЕ використовується як fallback."
         )
+
         return True
 
     # ---------- допоміжне ----------
