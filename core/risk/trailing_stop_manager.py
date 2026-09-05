@@ -34,6 +34,10 @@ class _TrailState:
     цей модуль лише читає й (при переміщенні) оновлює ці поля."""
     last_applied_level_index: int = -1     # індекс останнього застосованого порогу в trail_levels_percent; -1 = жодного ще не застосовано
     initial_stop_price: Optional[float] = None  # найперший SL позиції; незмінний fallback
+    last_positive_stop_price: Optional[float] = None  # останній ФАКТИЧНО застосований SL вище входу
+    last_positive_roi_percent: Optional[float] = None  # ROI% цього SL для повідомлень
+    fallback_notice_key: Optional[str] = None  # не спамимо одним і тим же fallback на кожному retry
+    critical_notice_key: Optional[str] = None  # не спамимо критичною помилкою на кожному retry
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -172,21 +176,25 @@ class TrailingStopManager:
 
         state = self._states.setdefault(position_key, _TrailState())
 
-        # Запоминаем самый первый SL ДО любого trailing-перемещения.
-        # Это последний автоматический fallback, если даже предыдущий
-        # плюсовой SL не удается восстановить.
-        if state.initial_stop_price is None:
-            initial_stop = position.get('initial_stop_loss_price')
-            if initial_stop is None:
-                initial_stop = position.get('stop_loss_price')
-            try:
-                if initial_stop is not None:
-                    state.initial_stop_price = float(initial_stop)
-                    position.setdefault('initial_stop_loss_price', state.initial_stop_price)
-            except (TypeError, ValueError):
-                logger.warning(
-                    f"TrailingStop: {position_key} invalid initial stop={initial_stop!r}; "
-                    f"will use current SL as fallback source"
+        # Якщо менеджер піднявся вже після відкриття позиції, відновлюємо
+        # останній позитивний SL з поточного стану позиції. Після цього всі
+        # успішні trailing-перестановки оновлюють це поле явно.
+        current_known_stop = position.get('stop_loss_price')
+        try:
+            current_known_stop = float(current_known_stop) if current_known_stop is not None else None
+        except (TypeError, ValueError):
+            current_known_stop = None
+        if state.last_positive_stop_price is None and current_known_stop is not None:
+            is_positive = (
+                current_known_stop > float(entry_price) if side == 'LONG'
+                else current_known_stop < float(entry_price)
+            )
+            if is_positive:
+                state.last_positive_stop_price = current_known_stop
+                state.last_positive_roi_percent = (
+                    ((current_known_stop - float(entry_price)) / float(entry_price) if side == 'LONG'
+                     else (float(entry_price) - current_known_stop) / float(entry_price))
+                    * leverage * 100.0
                 )
 
         # --- єдиний лог "серцебиття" позиції: показує, куди рухається
@@ -275,6 +283,21 @@ class TrailingStopManager:
             success = await self._move_stop_loss(position_key, position, desired_stop, level_roi_percent)
             if success:
                 state.last_applied_level_index = target_index
+
+                # Зберігаємо саме ФАКТИЧНУ ціну останнього позитивного SL.
+                # Це і є перший fallback при наступному невдалому move.
+                stop_fraction = (
+                    (desired_stop - entry_price) / entry_price if side == 'LONG'
+                    else (entry_price - desired_stop) / entry_price
+                )
+                stop_roi_percent = stop_fraction * leverage * 100.0
+                if stop_fraction > 0:
+                    state.last_positive_stop_price = desired_stop
+                    state.last_positive_roi_percent = stop_roi_percent
+
+                # Новий успішний trailing-рівень = новий цикл повідомлень.
+                state.fallback_notice_key = None
+                state.critical_notice_key = None
             else:
                 # НЕ позначаємо рівень застосованим — спробуємо ще раз
                 # пізніше (після короткого кулдауну, щоб не спамити біржу)
@@ -293,13 +316,10 @@ class TrailingStopManager:
         і намагається ще раз пізніше).
 
         Якщо старий SL вже відмінено, а новий створити не вдалось —
-        позиція фізично без захисту на біржі. У цьому випадку робиться
-        ОДНА остання спроба: повернути SL до initial_stop_loss_price —
-        того самого стопу, який стратегія порахувала на вході
-        (_place_fallback_to_initial_stop). Якщо і це не
-        вдалось — повертається False і йде критичне сповіщення без
-        подальшого автоматичного відновлення (тут вже потрібне ручне
-        втручання)."""
+        автоматично запускається fallback-ланцюжок: останній позитивний SL,
+        а якщо він не створюється — найперший SL позиції. Якщо обидва варіанти
+        не вдалися, повертається False; наступні тики автоматично повторюють
+        спробу після cooldown, без ручного втручання."""
         symbol = position['symbol']
         side = position['side']
         quantity = position.get('remaining_quantity') or position.get('quantity')
@@ -333,9 +353,10 @@ class TrailingStopManager:
             logger.error(f"TrailingStop: unexpected error cancelling SL for {position_key}: {e}", exc_info=True)
             return False
 
-        # 2) создаем новый SL — одна попытка. Если не удалось, fallback
-        # автоматически выберет последний плюсовой SL, а при его провале —
-        # самый первый SL позиции.
+        # 2) створюємо новий SL — ОДНА спроба, без перерахунку від live price
+        # і без каскаду ретраїв. Якщо не вдалось — одразу fallback на
+        # initial_stop_loss_price (найпростіший надійний варіант замість
+        # нарощування ще однієї гілки розрахункової логіки).
         client_order_id = f"sl-{int(time.time() * 1000)}"
         try:
             response = await self.exchange.create_order(
@@ -353,10 +374,9 @@ class TrailingStopManager:
                 self._apply_rate_limit_backoff(position_key, e.msg)
                 logger.error(
                     f"TrailingStop: rate limited (109429) creating new SL for {position_key} "
-                    f"AFTER cancelling the old one — automatic fallback chain starts"
+                    f"AFTER cancelling the old one — falling back to initial stop!"
                 )
-                await self._place_fallback_to_last_stop(position_key, position)
-                return False
+                return await self._place_fallback_to_last_stop(position_key, position)
             if self._is_gone_error(e):
                 # позиція закрилась між cancel і create — нема куди ставити
                 # SL, це не помилка
@@ -376,17 +396,20 @@ class TrailingStopManager:
             logger.error(
                 f"TrailingStop: failed to create new SL for {position_key} at {desired_stop_price:.6f} "
                 f"(level {level_roi_percent:g}%ROI, old SL already cancelled): {e.code} {e.msg}. "
-                f"Starting automatic fallback chain"
+                f"Falling back to initial strategy stop..."
             )
-            await self._place_fallback_to_last_stop(position_key, position)
-            return False
+            await self._notify_critical(
+                f"⚠️ Не вдалося перевиставити SL для {symbol} {side} на {desired_stop_price:.6f} "
+                f"(рівень {level_roi_percent:g}% ROI, старий SL вже відмінено): {e.code} {e.msg}. "
+                f"Повертаю початковий SL стратегії..."
+            )
+            return await self._place_fallback_to_last_stop(position_key, position)
         except Exception as e:
             logger.error(f"TrailingStop: unexpected error creating new SL for {position_key}: {e}", exc_info=True)
             logger.error(
-                f"TrailingStop: starting automatic fallback chain for {position_key}"
+                f"TrailingStop: falling back to initial strategy stop for {position_key} after unexpected error"
             )
-            await self._place_fallback_to_last_stop(position_key, position)
-            return False
+            return await self._place_fallback_to_last_stop(position_key, position)
 
         new_stop_price = desired_stop_price
         new_order_id = None
@@ -449,17 +472,18 @@ class TrailingStopManager:
 
         return True
 
-    # ---------- аварійний fallback до останнього стопа (last resort) ----------
+    # ---------- автоматичний fallback: last positive -> initial ----------
 
     async def _place_fallback_to_last_stop(self, position_key: str, position: dict) -> bool:
-        """Автоматический fallback без ручного вмешательства.
+        """Автоматичний fallback без ручного втручання.
 
-        Порядок:
-        1. Последний фактически примененный плюсовой SL (например +3% ROI).
-        2. Если его тоже не удалось создать — самый первый SL позиции.
+        Порядок завжди жорсткий:
+        1. останній ФАКТИЧНО застосований позитивний SL;
+        2. якщо його не вдалося створити — найперший SL позиції.
 
-        Поэтому при провале перехода +3 -> +16 система сначала возвращает +3,
-        а не откатывает защиту сразу в исходные -20.
+        Важливо: успішний fallback НЕ позначає trailing-рівень виконаним.
+        Тому після відновлення, наприклад, +2.50% ROI бот продовжить
+        автоматично намагатися виставити наступний рівень +16% ROI.
         """
         symbol = position['symbol']
         side = position['side']
@@ -469,43 +493,59 @@ class TrailingStopManager:
 
         state = self._states.setdefault(position_key, _TrailState())
 
-        # Это последний фактически примененный стоп перед cancel старого ордера.
-        last_stop_price = position.get('stop_loss_price')
         try:
-            last_stop_price = float(last_stop_price) if last_stop_price is not None else None
+            entry = float(entry_price) if entry_price is not None else None
         except (TypeError, ValueError):
-            last_stop_price = None
-
-        # Совместимость со state, созданным до первого тика: первый известный
-        # SL фиксируем как initial fallback.
-        if state.initial_stop_price is None:
-            persisted_initial = position.get('initial_stop_loss_price')
-            try:
-                if persisted_initial is not None:
-                    state.initial_stop_price = float(persisted_initial)
-            except (TypeError, ValueError):
-                pass
-        if state.initial_stop_price is None and last_stop_price is not None:
-            state.initial_stop_price = last_stop_price
-            position.setdefault('initial_stop_loss_price', state.initial_stop_price)
+            entry = None
 
         candidates = []
 
-        # Сначала пробуем только реально плюсовой последний SL.
-        if last_stop_price is not None and entry_price:
+        # 1) Тільки останній позитивний SL, який реально був застосований.
+        last_positive = state.last_positive_stop_price
+        if last_positive is not None and entry:
             try:
-                entry = float(entry_price)
-                is_profit_stop = (
-                    last_stop_price > entry if side == 'LONG'
-                    else last_stop_price < entry
+                last_positive = float(last_positive)
+                is_positive = (
+                    last_positive > entry if side == 'LONG'
+                    else last_positive < entry
                 )
-                if is_profit_stop:
-                    candidates.append(('last_positive', last_stop_price))
+                if is_positive:
+                    candidates.append(('last_positive', last_positive))
             except (TypeError, ValueError):
                 pass
 
-        # Второй кандидат — самый первый SL позиции.
+        # Сумісність/відновлення для старого стану: якщо окреме поле ще не
+        # заповнене, беремо поточний SL, але тільки якщо він реально в плюсі.
+        if not candidates:
+            current_stop = position.get('stop_loss_price')
+            try:
+                current_stop = float(current_stop) if current_stop is not None else None
+            except (TypeError, ValueError):
+                current_stop = None
+            if current_stop is not None and entry:
+                is_positive = (
+                    current_stop > entry if side == 'LONG'
+                    else current_stop < entry
+                )
+                if is_positive:
+                    state.last_positive_stop_price = current_stop
+                    state.last_positive_roi_percent = (
+                        ((current_stop - entry) / entry if side == 'LONG'
+                         else (entry - current_stop) / entry) * float(position.get('leverage') or 1) * 100.0
+                    )
+                    candidates.append(('last_positive', current_stop))
+
+        # 2) Найперший SL — тільки якщо останній позитивний не вдалося створити.
         initial_stop_price = state.initial_stop_price
+        if initial_stop_price is None:
+            persisted_initial = position.get('initial_stop_loss_price')
+            try:
+                if persisted_initial is not None:
+                    initial_stop_price = float(persisted_initial)
+                    state.initial_stop_price = initial_stop_price
+            except (TypeError, ValueError):
+                initial_stop_price = None
+
         if initial_stop_price is not None:
             try:
                 initial_stop_price = float(initial_stop_price)
@@ -519,13 +559,15 @@ class TrailingStopManager:
                 f"TrailingStop: {position_key} has no valid fallback SL; "
                 f"automatic protection cannot be recreated"
             )
-            await self._notify_critical(
-                f"🚨 КРИТИЧНО: не знайдено жодного fallback SL для {symbol} {side}. "
-                f"Система не має ціни, яку може автоматично виставити."
-            )
+            notice_key = f"no_fallback:{position_key}"
+            if state.critical_notice_key != notice_key:
+                state.critical_notice_key = notice_key
+                await self._notify_critical(
+                    f"🚨 КРИТИЧНО: не знайдено fallback SL для {symbol} {side}. "
+                    f"Система не має ціни для автоматичного захисту."
+                )
             return False
 
-        # Пробуем fallback-кандидатов последовательно. Никакого ручного выбора.
         for candidate_name, stop_price in candidates:
             client_order_id = f"sl-fallback-{candidate_name}-{int(time.time() * 1000)}"
             try:
@@ -567,21 +609,54 @@ class TrailingStopManager:
                     exc_info=True,
                 )
 
+            # ROI стопа, а не його абсолютна біржова ціна.
+            leverage = position.get('leverage') or 1
+            try:
+                leverage = float(leverage)
+            except (TypeError, ValueError):
+                leverage = 1.0
+            if leverage <= 0:
+                leverage = 1.0
+
+            if entry:
+                stop_fraction = (
+                    (stop_price - entry) / entry if side == 'LONG'
+                    else (entry - stop_price) / entry
+                )
+                stop_roi = stop_fraction * leverage * 100.0
+            else:
+                stop_roi = 0.0
+
+            # Якщо fallback був позитивним — він залишається нашим last_positive.
+            if stop_roi > 0:
+                state.last_positive_stop_price = stop_price
+                state.last_positive_roi_percent = stop_roi
+
+            notice_key = f"fallback:{position_key}:{candidate_name}:{stop_price:.12g}"
+            if state.fallback_notice_key != notice_key:
+                state.fallback_notice_key = notice_key
+                state.critical_notice_key = None
+                await self._notify_critical(
+                    f"⚠️ Автоматично відновлено SL для {symbol} {side}: "
+                    f"{candidate_name} = {stop_roi:+.2f}% ROI. Ручне втручання не потрібне."
+                )
+
             logger.warning(
                 f"TrailingStop: {position_key} automatic fallback -> "
-                f"{candidate_name} SL {stop_price:.6f}"
-            )
-            await self._notify_critical(
-                f"⚠️ Автоматично відновлено SL для {symbol} {side}: "
-                f"{candidate_name} = {stop_price:.6f}. Ручне втручання не потрібне."
+                f"{candidate_name} SL {stop_roi:+.2f}% ROI (price={stop_price:.10f})"
             )
             return True
 
+        # Навіть коли fallback повністю провалився, не спамимо однаковою
+        # критичною помилкою на кожному наступному retry.
         logger.error(f"TrailingStop: ALL automatic fallbacks failed for {position_key}")
-        await self._notify_critical(
-            f"🚨 КРИТИЧНО: всі автоматичні fallback SL для {symbol} {side} "
-            f"не вдалося виставити. Система продовжить автоматичні спроби."
-        )
+        notice_key = f"all_fallbacks_failed:{position_key}"
+        if state.critical_notice_key != notice_key:
+            state.critical_notice_key = notice_key
+            await self._notify_critical(
+                f"🚨 КРИТИЧНО: всі автоматичні fallback SL для {symbol} {side} "
+                f"не вдалося виставити. Система продовжить автоматичні спроби."
+            )
         return False
 
     # ---------- допоміжне ----------
