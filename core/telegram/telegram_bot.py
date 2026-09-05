@@ -504,24 +504,24 @@ class TelegramBot:
 
         await self.send_message("\n".join(lines))
 
-    async def _on_wall_detected(self, event: Event) -> None:
-        data = event.data
-        symbol = data.get('symbol', 'N/A')
-        side = data.get('side', '?')
-        price = data.get('price', 0)
-        quantity = data.get('quantity', 0)
-        imbalance = data.get('imbalance', 0.0)
-        side_label = "🟢 BID (підтримка)" if side == 'bid' else "🔴 ASK (опір)"
+#     async def _on_wall_detected(self, event: Event) -> None:
+#         data = event.data
+#         symbol = data.get('symbol', 'N/A')
+#         side = data.get('side', '?')
+#         price = data.get('price', 0)
+#         quantity = data.get('quantity', 0)
+#         imbalance = data.get('imbalance', 0.0)
+#         side_label = "🟢 BID (підтримка)" if side == 'bid' else "🔴 ASK (опір)"
 
-        text = f"""
-🧱 <b>Виявлено стіну в стакані</b>
+#         text = f"""
+# 🧱 <b>Виявлено стіну в стакані</b>
 
-<b>{symbol}</b> {side_label}
-├ Ціна: <code>${price:.6f}</code>
-├ Обсяг: <code>{quantity:.4f}</code>
-└ Дисбаланс книги: <code>{imbalance:+.1%}</code>
-"""
-        await self.send_message(text)
+# <b>{symbol}</b> {side_label}
+# ├ Ціна: <code>${price:.6f}</code>
+# ├ Обсяг: <code>{quantity:.4f}</code>
+# └ Дисбаланс книги: <code>{imbalance:+.1%}</code>
+# """
+#         await self.send_message(text)
 
     async def _on_wall_breakout(self, event: Event) -> None:
         data = event.data
