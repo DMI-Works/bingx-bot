@@ -46,7 +46,7 @@ class WallBreakoutStrategy(BaseStrategy):
         super().__init__("WallBreakoutStrategy", event_bus, config)
 
         self.position_size: float = config.get('position_size', 100)
-        self.leverage: int = config.get('leverage', 10)
+        self.leverage: int = config.get('leverage', 20)
         self.stop_loss_percent: float = config.get('stop_loss_percent', 1.0)
         self.take_profit_levels_config = config.get(
             'take_profit_levels', [{'percent': 2.0, 'close_percent': 100}]
