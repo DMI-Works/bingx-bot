@@ -1,9 +1,7 @@
 # webapp/backend/api.py
 
 import json
-import os
 import sqlite3
-import asyncio
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -12,10 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .auth import validate_init_data
-from .bingx_client import BingXClient, BingXAPIError
 
 
-DB_PATH = Path("../../data/trading_bot.db")
+DB_PATH = Path("data/trading_bot.db")
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(title="Ruflo Mini App API")
@@ -26,72 +23,6 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
-
-
-def _load_exchange_config():
-    """Load BingX settings from config.yaml, with env vars taking precedence."""
-    testnet = os.getenv("BINGX_TESTNET")
-    api_key = os.getenv("BINGX_API_KEY")
-    api_secret = os.getenv("BINGX_API_SECRET")
-
-    config_candidates = [
-        Path(os.getenv("TRADING_BOT_CONFIG", "config.yaml")),
-        Path(__file__).resolve().parents[2] / "config.yaml",
-        Path(__file__).resolve().parents[3] / "config.yaml",
-    ]
-    config = {}
-    for candidate in config_candidates:
-        if candidate.exists():
-            try:
-                import yaml
-                config = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
-            except Exception as exc:
-                raise RuntimeError(f"Cannot read config.yaml: {exc}") from exc
-            break
-
-    exchange = config.get("exchange", {}) if isinstance(config, dict) else {}
-    api_key = api_key or exchange.get("api_key", "")
-    api_secret = api_secret or exchange.get("api_secret", "")
-    if isinstance(api_key, str) and api_key.startswith("${"):
-        api_key = os.getenv(api_key[2:-1], "")
-    if isinstance(api_secret, str) and api_secret.startswith("${"):
-        api_secret = os.getenv(api_secret[2:-1], "")
-
-    if testnet is None:
-        value = exchange.get("testnet", True)
-        testnet = str(value).lower() in {"1", "true", "yes", "on"}
-    else:
-        testnet = str(testnet).lower() in {"1", "true", "yes", "on"}
-
-    if not api_key or not api_secret:
-        raise RuntimeError("BingX API credentials are not configured")
-    return api_key, api_secret, testnet
-
-
-_BINGX_CLIENT = None
-_BINGX_LOCK = asyncio.Lock()
-
-
-async def get_bingx_client() -> BingXClient:
-    global _BINGX_CLIENT
-    if _BINGX_CLIENT is None:
-        async with _BINGX_LOCK:
-            if _BINGX_CLIENT is None:
-                api_key, api_secret, testnet = _load_exchange_config()
-                _BINGX_CLIENT = BingXClient(
-                    api_key=api_key,
-                    api_secret=api_secret,
-                    testnet=testnet,
-                )
-    return _BINGX_CLIENT
-
-
-@app.on_event("shutdown")
-async def shutdown_bingx():
-    global _BINGX_CLIENT
-    if _BINGX_CLIENT is not None:
-        await _BINGX_CLIENT.close()
-        _BINGX_CLIENT = None
 
 
 @contextmanager
@@ -177,23 +108,24 @@ def strategy_from_metadata(metadata):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/profile")
-async def get_profile(
+def get_profile(
     user: dict = Depends(require_telegram_user),
 ):
-    client = await get_bingx_client()
-    try:
-        response = await client.get_account_balance()
-    except (BingXAPIError, Exception) as exc:
-        raise HTTPException(status_code=502, detail=f"BingX balance error: {exc}") from exc
+    with get_db() as db:
+        balance = db.execute(
+            """
+            SELECT asset, free, locked, total, timestamp
+            FROM balance
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """
+        ).fetchone()
 
-    data = response.get("data", {}) if isinstance(response, dict) else {}
-    balance = data.get("balance", data) if isinstance(data, dict) else {}
     return {
         "telegram_user": user,
         "exchange": "BingX",
-        "mode": "testnet" if client.testnet else "live",
-        "balance": balance,
-        "raw": response,
+        "mode": "testnet",
+        "balance": dict(balance) if balance else None,
     }
 
 
@@ -202,41 +134,45 @@ async def get_profile(
 # ---------------------------------------------------------------------------
 
 @app.get("/api/positions")
-async def get_positions(
+def get_positions(
     user: dict = Depends(require_telegram_user),
 ):
-    client = await get_bingx_client()
-    try:
-        rows = await client.get_positions()
-    except (BingXAPIError, Exception) as exc:
-        raise HTTPException(status_code=502, detail=f"BingX positions error: {exc}") from exc
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT
+                id,
+                order_id,
+                symbol,
+                side,
+                status,
+                created_at,
+                entry_price,
+                close_price,
+                realized_pnl,
+                roe_percent,
+                margin_usdt,
+                commission_usdt,
+                net_pnl,
+                metadata
+            FROM positions
+            WHERE status = 'OPEN'
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
 
     result = []
-    for row in rows or []:
-        amount = float(row.get("positionAmt") or row.get("positionAmount") or 0)
-        if amount == 0:
-            continue
-        side = str(row.get("positionSide") or row.get("side") or ("LONG" if amount > 0 else "SHORT")).upper()
-        entry = float(row.get("avgPrice") or row.get("entryPrice") or 0)
-        mark = float(row.get("markPrice") or 0)
-        pnl = float(row.get("unrealizedProfit") or row.get("unrealizedPnl") or 0)
-        margin = float(row.get("initialMargin") or row.get("positionInitialMargin") or 0)
-        pnl_pct = (pnl / margin * 100) if margin else 0.0
-        result.append({
-            "symbol": row.get("symbol"),
-            "side": side,
-            "entry": entry,
-            "mark": mark,
-            "pnl": pnl,
-            "pnl_usdt": pnl,
-            "pnl_pct": pnl_pct,
-            "sl": None,
-            "tp": None,
-            "quantity": abs(amount),
-            "leverage": row.get("leverage"),
-            "margin_usdt": margin,
-            "raw": row,
-        })
+
+    for row in rows:
+        item = dict(row)
+
+        item["pnl"] = item["net_pnl"]
+        item["pnl_usdt"] = item["net_pnl"]
+        item["pnl_pct"] = item["roe_percent"]
+        item["strategy"] = strategy_from_metadata(item["metadata"])
+
+        result.append(item)
+
     return result
 
 
