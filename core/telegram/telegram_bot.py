@@ -37,6 +37,7 @@ class TelegramBot:
         strategy_manager=None,
     ):
         self.webapp_url = os.getenv('WEBAPP_URL', '')
+        logger.info(f"TelegramBot WEBAPP_URL: {self.webapp_url}")
         self.token = token
         self.chat_id = chat_id
         self.event_bus = event_bus
