@@ -74,8 +74,8 @@ class TrailingStopManager:
             self.event_bus.subscribe(EventType.PRICE_UPDATED, self._on_price_update)
             self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
         else:
-            logger.info("TrailingStopManager initialized but disabled via config")
-
+            pass
+            
     # ---------- вхідна точка: ціна оновилась ----------
 
     async def _on_price_update(self, event: Event) -> None:
@@ -238,12 +238,6 @@ class TrailingStopManager:
             current_sl_str = f"{current_sl_fraction:+.3%}price/{current_sl_roi_percent:+.2f}%ROI ({current_sl_price:.6f})"
         else:
             current_sl_str = "None"
-        logger.info(
-            f"TrailingStop: {position_key} price={price:.6f} entry={entry_price:.6f} "
-            f"favorable_price={favorable_fraction:+.3%} favorable_roi={favorable_roi_percent:+.2f}% "
-            f"leverage={leverage:g}x applied_level={applied_level}%ROI "
-            f"next_level={next_level}%ROI current_sl={current_sl_str}"
-        )
 
         if favorable_fraction <= 0:
             # позиція в мінусі або рівно на вході — НІКОЛИ не рухаємо SL у
@@ -346,10 +340,6 @@ class TrailingStopManager:
                 logger.warning(f"TrailingStop: rate limited (109429) cancelling SL for {position_key}")
                 return None
             if self._is_gone_error(e):
-                logger.info(
-                    f"TrailingStop: {position_key} SL/position already gone "
-                    f"(orderId={old_sl_order_id}): {e.code} {e.msg}, skipping"
-                )
                 return None
             logger.error(f"TrailingStop: failed to cancel SL for {position_key}: {e.code} {e.msg}")
             return None
@@ -383,7 +373,6 @@ class TrailingStopManager:
                     rate_limited = True
                     break
                 if self._is_gone_error(e):
-                    logger.info(f"TrailingStop: {position_key} position gone before SL could be created, skipping")
                     return None
                 if e.code == 110406:
                     logger.warning(
@@ -447,11 +436,6 @@ class TrailingStopManager:
                     f"застосовано найближчий доступний {level_roi_percent:g}%ROI)"
                 )
 
-            logger.info(
-                f"TrailingStop: SL for {position_key} -> {desired_stop_price:.6f} "
-                f"(trigger_level={level_roi_percent:g}%ROI{skipped_note}, "
-                f"old_order={old_sl_order_id}, new_order={new_order_id})"
-            )
 
             try:
                 await self.event_bus.publish(Event(
