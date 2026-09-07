@@ -161,3 +161,7 @@ telegram:
     position_opened: true
     position_closed: true
     take_profit_hit: true
+
+webapp:
+  enabled: true
+  port: 8000

@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
+import uvicorn
+
 from config import ConfigLoader
 from core.database import Database, StrategySettingsStore
 from core.events import EventBus
@@ -16,6 +18,7 @@ from core.trading import SimpleTrader
 from core.strategies import StrategyManager, SignalActivityTracker
 from core.strategies.orderbook_analyzer import OrderBookAnalyzer
 from core.telegram import TelegramBot
+from webapp.backend.api import app as webapp_app
 
 
 def setup_logging(config: ConfigLoader) -> None:
@@ -172,6 +175,25 @@ async def main():
 
         await symbol_selector.start_refresh_loop(refresh_interval)
 
+    # --- Mini App (webapp) ---
+    # Поднимаем FastAPI как фоновую задачу того же event loop — отдельный
+    # процесс/сервис на Railway не нужен, порт берём из PORT (его подставляет
+    # сам Railway), локально — 8000.
+    webapp_server = None
+    webapp_task = None
+
+    if config.get('webapp.enabled', True):
+        port = int(os.getenv('PORT', config.get('webapp.port', 8000)))
+        uvicorn_config = uvicorn.Config(
+            webapp_app,
+            host='0.0.0.0',
+            port=port,
+            log_level='warning',  # не дублируем шум uvicorn поверх логов бота
+        )
+        webapp_server = uvicorn.Server(uvicorn_config)
+        webapp_task = asyncio.create_task(webapp_server.serve())
+        logger.info(f"[OK] Web App API started on port {port}")
+
     # --- Стартове повідомлення в Telegram — ЛИШЕ після того, як усе
     # реально готове (біржа, стратегії, символи), щоб цифри в ньому
     # відповідали дійсності. Якщо Telegram вимкнено — просто пропускаємо. ---
@@ -202,6 +224,11 @@ async def main():
     if telegram_bot:
         await telegram_bot.stop()
         logger.info("[OK] Telegram Bot stopped")
+
+    if webapp_server:
+        webapp_server.should_exit = True
+        await webapp_task
+        logger.info("[OK] Web App API stopped")
 
     await symbol_selector.stop_refresh_loop()
     logger.info("[OK] Symbol selector stopped")
