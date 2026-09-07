@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   AreaChart, Area, XAxis, Tooltip, ResponsiveContainer,
 } from "recharts";
@@ -7,35 +7,6 @@ import {
   KeyRound, LogOut, AlertTriangle, Wallet, Activity, BarChart3,
   User, SettingsIcon, ArrowUpRight, ArrowDownRight, Circle,
 } from "lucide-react";
-
-// ---------------------------------------------------------------------------
-// Mock data — swap for real API responses from webapp/backend later
-// ---------------------------------------------------------------------------
-
-const EQUITY_SERIES = {
-  "1D": [
-    12138, 12160, 12142, 12190, 12210, 12180, 12240, 12270, 12255, 12310,
-    12290, 12340, 12380, 12360, 12410, 12440, 12480,
-  ],
-  "1W": [
-    11820, 11940, 11890, 12010, 12080, 12040, 12160, 12210, 12180, 12290,
-    12340, 12310, 12400, 12440, 12480,
-  ],
-  "1M": [
-    10600, 10820, 10740, 11020, 11180, 11090, 11340, 11500, 11420, 11680,
-    11840, 11790, 12040, 12200, 12480,
-  ],
-  ALL: [
-    8200, 8600, 8420, 9040, 9380, 9210, 9740, 10120, 9960, 10480, 10820,
-    10690, 11340, 11980, 12480,
-  ],
-};
-
-const OPEN_POSITIONS = [
-  { symbol: "BTC-USDT", side: "LONG", entry: 61240, mark: 62180, pnlPct: 1.53, pnlUsd: 94.2, sl: 60100, tp: 64500 },
-  { symbol: "ETH-USDT", side: "SHORT", entry: 3180, mark: 3210, pnlPct: -0.94, pnlUsd: -28.4, sl: 3260, tp: 3050 },
-  { symbol: "SOL-USDT", side: "LONG", entry: 142.3, mark: 148.9, pnlPct: 4.64, pnlUsd: 139.8, sl: 136.0, tp: 158.0 },
-];
 
 // ---------------------------------------------------------------------------
 // API layer — talks to webapp/backend/api.py, falls back to mocks above if
@@ -55,20 +26,6 @@ async function apiGet(path) {
   return res.json();
 }
 
-// Пока используем моки напрямую. Когда бэкенд будет готов — раскомментируйте
-// вызовы apiGet(...) внутри компонентов ниже (см. TODO по коду).
-
-const TRADE_HISTORY = [
-  { symbol: "BTC-USDT", side: "LONG", date: "06 сен, 14:22", pnlUsd: 61.4, pnlPct: 1.02 },
-  { symbol: "ARB-USDT", side: "SHORT", date: "06 сен, 09:05", pnlUsd: -18.9, pnlPct: -1.4 },
-  { symbol: "SOL-USDT", side: "LONG", date: "05 сен, 22:47", pnlUsd: 44.3, pnlPct: 2.1 },
-  { symbol: "ETH-USDT", side: "LONG", date: "05 сен, 11:30", pnlUsd: 12.7, pnlPct: 0.4 },
-  { symbol: "BTC-USDT", side: "SHORT", date: "04 сен, 19:12", pnlUsd: -33.5, pnlPct: -1.9 },
-];
-
-// ---------------------------------------------------------------------------
-// Shared bits
-// ---------------------------------------------------------------------------
 
 const fmtUsd = (n) =>
   `${n >= 0 ? "+" : "−"}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -95,155 +52,103 @@ function SideBadge({ side }) {
 
 function StatisticsTab() {
   const [period, setPeriod] = useState("1W");
-  const series = EQUITY_SERIES[period];
-  const chartData = useMemo(() => series.map((v, i) => ({ i, v })), [series]);
+  const [stats, setStats] = useState(null);
+  const [positions, setPositions] = useState([]);
+  const [trades, setTrades] = useState([]);
+  const [error, setError] = useState("");
 
-  const first = series[0];
-  const last = series[series.length - 1];
+  useEffect(() => {
+    let cancelled = false;
+    setError("");
+    Promise.all([
+      apiGet(`/stats?period=${period}`),
+      apiGet(`/positions`),
+      apiGet(`/trades?period=${period}&limit=20`),
+    ]).then(([nextStats, nextPositions, nextTrades]) => {
+      if (cancelled) return;
+      setStats(nextStats);
+      setPositions(nextPositions || []);
+      setTrades(nextTrades || []);
+    }).catch((err) => {
+      if (!cancelled) setError(err.message || "Не удалось получить данные");
+    });
+    return () => { cancelled = true; };
+  }, [period]);
+
+  const equity = stats?.equity || [];
+  const chartData = useMemo(() => equity.map((point, i) => ({
+    i, v: Number(point.v || 0), t: point.t,
+  })), [equity]);
+  const first = chartData[0]?.v || 0;
+  const last = chartData[chartData.length - 1]?.v || 0;
   const changeUsd = last - first;
-  const changePct = (changeUsd / first) * 100;
+  const changePct = first ? (changeUsd / first) * 100 : 0;
   const up = changeUsd >= 0;
+  const summary = stats?.summary || {};
 
   return (
     <div className="tab-pane">
-      {/* Hero */}
+      {error && <div className="error-box">{error}</div>}
       <div className="hero">
         <div className="hero-top">
           <span className="hero-label">Общий баланс</span>
           <div className="period-pills">
-            {Object.keys(EQUITY_SERIES).map((p) => (
-              <button
-                key={p}
-                className={`pill ${p === period ? "pill-active" : ""}`}
-                onClick={() => setPeriod(p)}
-              >
-                {p}
-              </button>
+            {["1D", "1W", "1M", "ALL"].map((p) => (
+              <button key={p} className={`pill ${p === period ? "pill-active" : ""}`} onClick={() => setPeriod(p)}>{p}</button>
             ))}
           </div>
         </div>
-
-        <div className="hero-figure">
-          $
-          {last.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-        </div>
-
+        <div className="hero-figure">${last.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
         <div className={`hero-change ${up ? "text-profit" : "text-loss"}`}>
           {up ? <TrendingUp size={15} /> : <TrendingDown size={15} />}
           <span>{fmtUsd(changeUsd)}</span>
           <span className="hero-change-pct">({fmtPct(changePct)})</span>
           <span className="hero-change-period">за период</span>
         </div>
-
         <div className="chart-wrap">
-          <ResponsiveContainer width="100%" height={120}>
-            <AreaChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
-              <defs>
-                <linearGradient id="fillProfit" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#35D68A" stopOpacity={0.35} />
-                  <stop offset="100%" stopColor="#35D68A" stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="fillLoss" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#F1495B" stopOpacity={0.35} />
-                  <stop offset="100%" stopColor="#F1495B" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <XAxis dataKey="i" hide />
-              <Tooltip
-                cursor={{ stroke: "#3A4354", strokeWidth: 1 }}
-                contentStyle={{
-                  background: "#1A2029",
-                  border: "1px solid #232A35",
-                  borderRadius: 8,
-                  fontSize: 12,
-                  fontFamily: "JetBrains Mono, monospace",
-                  color: "#EDEFF3",
-                }}
-                labelFormatter={() => ""}
-                formatter={(v) => [`$${v.toLocaleString()}`, "Баланс"]}
-              />
-              <Area
-                type="monotone"
-                dataKey="v"
-                stroke={up ? "#35D68A" : "#F1495B"}
-                strokeWidth={2}
-                fill={up ? "url(#fillProfit)" : "url(#fillLoss)"}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
+          {chartData.length ? (
+            <ResponsiveContainer width="100%" height={120}>
+              <AreaChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
+                <XAxis dataKey="i" hide />
+                <Tooltip formatter={(v) => [`$${Number(v).toLocaleString("en-US", { maximumFractionDigits: 2 })}`, "Баланс"]} />
+                <Area type="monotone" dataKey="v" stroke={up ? "#35D68A" : "#F1495B"} strokeWidth={2} fillOpacity={0.15} />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : <div className="empty-state">Нет данных по балансу за период</div>}
         </div>
       </div>
 
-      {/* Stat chips */}
       <div className="chip-row">
-        <div className="chip">
-          <span className="chip-label">Win rate</span>
-          <span className="chip-value text-profit">63%</span>
-        </div>
-        <div className="chip">
-          <span className="chip-label">Сделок</span>
-          <span className="chip-value">128</span>
-        </div>
-        <div className="chip">
-          <span className="chip-label">Просадка</span>
-          <span className="chip-value text-loss">−8.4%</span>
+        <div className="chip"><span className="chip-label">Win rate</span><span className="chip-value text-profit">{Number(summary.win_rate || 0).toFixed(1)}%</span></div>
+        <div className="chip"><span className="chip-label">Сделок</span><span className="chip-value">{summary.total_trades || 0}</span></div>
+        <div className="chip"><span className="chip-label">PnL</span><span className={`chip-value ${Number(summary.total_pnl || 0) >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(Number(summary.total_pnl || 0))}</span></div>
+      </div>
+
+      <div className="section">
+        <div className="section-head"><span className="section-title">Открытые позиции</span><span className="section-count">{positions.length}</span></div>
+        <div className="list">
+          {positions.length ? positions.map((p, idx) => (
+            <div className="row" key={`${p.symbol}-${p.side}-${idx}`}>
+              <div className="row-main">
+                <div className="row-title-line"><span className="symbol">{p.symbol}</span><SideBadge side={p.side} /></div>
+                <div className="row-sub">вход {Number(p.entry || 0).toLocaleString()} · маркировка {Number(p.mark || 0).toLocaleString()}</div>
+                <div className="row-sub row-sub-faint">SL {p.sl == null ? "—" : Number(p.sl).toLocaleString()} · TP {p.tp == null ? "—" : Number(p.tp).toLocaleString()}</div>
+              </div>
+              <div className="row-end"><span className={`row-usd ${Number(p.pnl_usdt || 0) >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(Number(p.pnl_usdt || 0))}</span><PnlTag value={Number(p.pnl_usdt || 0)} pct={Number(p.pnl_pct || 0)} /></div>
+            </div>
+          )) : <div className="empty-state">Нет открытых позиций</div>}
         </div>
       </div>
 
-      {/* Open positions */}
       <div className="section">
-        <div className="section-head">
-          <span className="section-title">Открытые позиции</span>
-          <span className="section-count">{OPEN_POSITIONS.length}</span>
-        </div>
+        <div className="section-head"><span className="section-title">История сделок</span></div>
         <div className="list">
-          {OPEN_POSITIONS.map((p) => (
-            <div className="row" key={p.symbol}>
-              <div className="row-main">
-                <div className="row-title-line">
-                  <span className="symbol">{p.symbol}</span>
-                  <SideBadge side={p.side} />
-                </div>
-                <div className="row-sub">
-                  вход {p.entry.toLocaleString()} · маркировка {p.mark.toLocaleString()}
-                </div>
-                <div className="row-sub row-sub-faint">
-                  SL {p.sl.toLocaleString()} · TP {p.tp.toLocaleString()}
-                </div>
-              </div>
-              <div className="row-end">
-                <span className={`row-usd ${p.pnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
-                  {fmtUsd(p.pnlUsd)}
-                </span>
-                <PnlTag value={p.pnlUsd} pct={p.pnlPct} />
-              </div>
+          {trades.length ? trades.map((t, idx) => (
+            <div className="row row-compact" key={`${t.id || t.order_id || idx}`}>
+              <div className="row-main"><div className="row-title-line"><span className="symbol">{t.symbol}</span><SideBadge side={t.side} /></div><div className="row-sub">{t.closed_at || t.created_at || "—"}</div></div>
+              <div className="row-end"><span className={`row-usd ${Number(t.pnl_usdt || 0) >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(Number(t.pnl_usdt || 0))}</span></div>
             </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Trade history */}
-      <div className="section">
-        <div className="section-head">
-          <span className="section-title">История сделок</span>
-        </div>
-        <div className="list">
-          {TRADE_HISTORY.map((t, idx) => (
-            <div className="row row-compact" key={idx}>
-              <div className="row-main">
-                <div className="row-title-line">
-                  <span className="symbol">{t.symbol}</span>
-                  <SideBadge side={t.side} />
-                </div>
-                <div className="row-sub">{t.date}</div>
-              </div>
-              <div className="row-end">
-                <span className={`row-usd ${t.pnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
-                  {fmtUsd(t.pnlUsd)}
-                </span>
-              </div>
-            </div>
-          ))}
+          )) : <div className="empty-state">Нет закрытых сделок за период</div>}
         </div>
       </div>
     </div>
@@ -255,58 +160,24 @@ function StatisticsTab() {
 // ---------------------------------------------------------------------------
 
 function ProfileTab() {
+  const [profile, setProfile] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    apiGet("/profile").then(setProfile).catch((err) => setError(err.message || "Не удалось получить профиль"));
+  }, []);
+  const user = profile?.telegram_user || {};
+  const balance = profile?.balance || {};
+  const available = Number(balance.availableMargin ?? balance.availableBalance ?? balance.free ?? 0);
+  const total = Number(balance.equity ?? balance.balance ?? balance.total ?? 0);
+  const inPositions = Math.max(0, total - available);
+  const name = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username || "Telegram пользователь";
+  const initials = name.split(/\s+/).map((x) => x[0]).join("").slice(0, 2).toUpperCase();
   return (
     <div className="tab-pane">
-      <div className="profile-head">
-        <div className="avatar">ДМ</div>
-        <div>
-          <div className="profile-name">DMI Works</div>
-          <div className="profile-handle">@dmi_trader</div>
-        </div>
-      </div>
-
-      <div className="section">
-        <div className="section-head">
-          <span className="section-title">Подключение к бирже</span>
-        </div>
-        <div className="list">
-          <div className="row">
-            <div className="row-main">
-              <div className="row-title-line">
-                <span className="symbol">BingX</span>
-                <span className="mode-badge mode-testnet">Testnet</span>
-              </div>
-              <div className="row-sub">API-ключ подключён · только торговля</div>
-            </div>
-            <ChevronRight size={16} className="chev" />
-          </div>
-        </div>
-      </div>
-
-      <div className="section">
-        <div className="section-head">
-          <span className="section-title">Баланс аккаунта</span>
-        </div>
-        <div className="list">
-          <div className="kv-row">
-            <span className="kv-label">Доступно</span>
-            <span className="kv-value">$8,940.12</span>
-          </div>
-          <div className="kv-row">
-            <span className="kv-label">В позициях</span>
-            <span className="kv-value">$3,540.20</span>
-          </div>
-          <div className="kv-row">
-            <span className="kv-label">Всего</span>
-            <span className="kv-value kv-value-strong">$12,480.32</span>
-          </div>
-        </div>
-      </div>
-
-      <button className="danger-btn">
-        <LogOut size={16} />
-        Выйти из аккаунта
-      </button>
+      {error && <div className="error-box">{error}</div>}
+      <div className="profile-head"><div className="avatar">{initials || "TG"}</div><div><div className="profile-name">{name}</div><div className="profile-handle">{user.username ? `@${user.username}` : ""}</div></div></div>
+      <div className="section"><div className="section-head"><span className="section-title">Подключение к бирже</span></div><div className="list"><div className="row"><div className="row-main"><div className="row-title-line"><span className="symbol">{profile?.exchange || "BingX"}</span><span className={`mode-badge ${profile?.mode === "live" ? "mode-live" : "mode-testnet"}`}>{profile?.mode === "live" ? "Live" : "Testnet"}</span></div><div className="row-sub">API подключён · данные получены напрямую из BingX</div></div><ChevronRight size={16} className="chev" /></div></div></div>
+      <div className="section"><div className="section-head"><span className="section-title">Баланс аккаунта</span></div><div className="list"><div className="kv-row"><span className="kv-label">Доступно</span><span className="kv-value">${available.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div><div className="kv-row"><span className="kv-label">В позициях</span><span className="kv-value">${inPositions.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div><div className="kv-row"><span className="kv-label">Всего</span><span className="kv-value kv-value-strong">${total.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div></div></div>
     </div>
   );
 }
@@ -460,6 +331,8 @@ export default function App() {
 
         .text-profit { color: var(--profit); }
         .text-loss { color: var(--loss); }
+        .error-box { margin-bottom: 12px; padding: 10px 12px; border: 1px solid rgba(241,73,91,.35); border-radius: 8px; color: var(--loss); background: rgba(241,73,91,.08); font-size: 12px; }
+        .empty-state { padding: 16px; color: var(--text-faint); font-size: 12px; text-align: center; }
 
         .tab-pane {
           flex: 1;
