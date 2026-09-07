@@ -37,7 +37,6 @@ class TelegramBot:
         strategy_manager=None,
     ):
         self.webapp_url = os.getenv('WEBAPP_URL', '')
-        logger.info(f"TelegramBot WEBAPP_URL: {self.webapp_url}")
         self.token = token
         self.chat_id = chat_id
         self.event_bus = event_bus
@@ -137,6 +136,7 @@ class TelegramBot:
             [InlineKeyboardButton("🚨 Аварійна зупинка", callback_data="emergency")]
         ]
 
+        logger.info(f"DEBUG webapp_url = {self.webapp_url!r} (len={len(self.webapp_url)})")
         if self.webapp_url:
             keyboard.insert(0, [InlineKeyboardButton("👤 Профіль", web_app=WebAppInfo(url=self.webapp_url))])
 
