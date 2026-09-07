@@ -157,11 +157,6 @@ class OrderBookAnalyzer:
             existing = state.walls.get(key)
             if existing is None:
                 state.walls[key] = wall
-                logger.info(
-                    f"OrderBook: WALL detected {symbol} {wall.side.upper()} "
-                    f"price={wall.price:.6f} qty={wall.quantity:.4f} "
-                    f"(imbalance={imbalance:+.2%})"
-                )
                 await self._notify_wall(symbol, wall, imbalance)
             else:
                 # оновлюємо поточний обсяг — це і є "спостереження за
