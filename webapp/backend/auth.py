@@ -15,7 +15,7 @@ import os
 import time
 from urllib.parse import parse_qsl
 
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]  # тот же токен, что использует core/telegram
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')  # тот же токен, что использует core/telegram
 MAX_AGE_SECONDS = 3600  # initData считаем валидной 1 час
 
 
