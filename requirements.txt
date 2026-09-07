@@ -11,3 +11,5 @@ qrcode>=8.0.0
 # numpy>=1.24.0  # For advanced calculations
 # pandas>=2.0.0  # For data analysis
 
+fastapi
+uvicorn[standard]
