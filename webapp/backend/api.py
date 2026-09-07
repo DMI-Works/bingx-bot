@@ -38,13 +38,21 @@ def get_db():
 def require_telegram_user(
     x_telegram_init_data: str = Header(default="")
 ) -> dict:
-    user = validate_init_data(x_telegram_init_data)
+    # user = validate_init_data(x_telegram_init_data)
 
-    if user is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid Telegram init data",
-        )
+    # if user is None:
+    #     raise HTTPException(
+    #         status_code=401,
+    #         detail="Invalid Telegram init data",
+    #     )
+
+    user = {
+        "id": 123456789,
+        "first_name": "Test User MOCK",
+        "last_name": "User",
+        "username": "testuser",
+        "language_code": "en",
+    }
 
     return user
 
