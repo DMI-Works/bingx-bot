@@ -5,7 +5,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from typing import Optional
 
@@ -36,6 +36,7 @@ class TelegramBot:
         strategy_settings: StrategySettingsStore = None,
         strategy_manager=None,
     ):
+        self.webapp_url = os.getenv('WEBAPP_URL', '')
         self.token = token
         self.chat_id = chat_id
         self.event_bus = event_bus
@@ -134,6 +135,9 @@ class TelegramBot:
             [InlineKeyboardButton("⚙️ Налаштування", callback_data="settings")],
             [InlineKeyboardButton("🚨 Аварійна зупинка", callback_data="emergency")]
         ]
+
+        if self.webapp_url:
+            keyboard.insert(0, [InlineKeyboardButton("👤 Профіль", web_app=WebAppInfo(url=self.webapp_url))])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await self._reply(update, "Панель керування торговим ботом", reply_markup=reply_markup)
