@@ -73,7 +73,37 @@ class RejectionBlockStrategy(CandleWarmupMixin, BaseStrategy):
 
         # --- прогрів історії з біржі (див. CandleWarmupMixin) ---
         self.bingx_client = bingx_client
-        
+
+    def update_config(self, new_config: dict) -> None:
+        self.config = new_config
+        self.timeframe_seconds = new_config.get('timeframe_seconds', self.timeframe_seconds)
+        self.wick_to_body_ratio = new_config.get('wick_to_body_ratio', self.wick_to_body_ratio)
+        self.min_wick_ratio = new_config.get('min_wick_ratio', self.min_wick_ratio)
+        self.opposite_wick_max_ratio = new_config.get('opposite_wick_max_ratio', self.opposite_wick_max_ratio)
+        self.overlap_tolerance_percent = new_config.get(
+            'overlap_tolerance_percent', self.overlap_tolerance_percent
+        )
+        self.min_body_percent = new_config.get('min_body_percent', self.min_body_percent)
+
+        prev_sl_roi = self.stop_loss_buffer_percent * self.leverage
+        prev_tp_roi = self.take_profit_percent * self.leverage
+
+        self.position_size = new_config.get('position_size', self.position_size)
+        self.leverage = new_config.get('leverage', self.leverage)
+
+        sl_roi_percent = new_config.get('stop_loss_buffer_percent', prev_sl_roi)
+        tp_roi_percent = new_config.get('take_profit_percent', prev_tp_roi)
+        self.stop_loss_buffer_percent = sl_roi_percent / self.leverage
+        self.take_profit_percent = tp_roi_percent / self.leverage
+
+        self.cooldown_seconds = new_config.get('cooldown_seconds', self.cooldown_seconds)
+
+        logger.info(
+            f"RejectionBlockStrategy config updated: leverage={self.leverage}x, "
+            f"SL={sl_roi_percent}% ROI -> {self.stop_loss_buffer_percent:.8f}% price, "
+            f"TP={tp_roi_percent}% ROI -> {self.take_profit_percent:.8f}% price"
+        )
+
     @classmethod
     def build_config(cls, app_config) -> dict:
         return {

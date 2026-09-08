@@ -167,8 +167,12 @@ class TrailingStopManager:
             )
             return
         if not position.get('sl_order_id'):
-            # немає жодного SL на позиції — не наша задача його створювати
-            logger.debug(f"TrailingStop: {position_key} SKIP: no sl_order_id on position")
+            logger.warning(
+                f"TrailingStop: {position_key} has NO stop loss on the exchange — "
+                f"position is UNPROTECTED, attempting emergency recreation"
+            )
+            await self._place_fallback_to_last_stop(position_key, position)
+            self._retry_after[position_key] = time.time() + self.move_retry_cooldown_seconds
             return
 
         # trail_levels_percent задано в ROI% (аналогічно SL/TP стратегій),

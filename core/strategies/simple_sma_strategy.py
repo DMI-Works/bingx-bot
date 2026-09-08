@@ -40,8 +40,8 @@ class SimpleMovingAverageStrategy(CandleWarmupMixin, BaseStrategy):
 
         # --- риск / размер позиции ---
         self.position_size = config.get('position_size', 100)
-        self.leverage = config.get('trading.default_leverage', 10)
 
+        self.leverage = config.get('leverage', 10)
 
         # --- кулдаун ---
         self.cooldown_seconds = config.get('cooldown_seconds', 300)
@@ -54,6 +54,31 @@ class SimpleMovingAverageStrategy(CandleWarmupMixin, BaseStrategy):
         
         # --- прогрів історії з біржі (див. CandleWarmupMixin) ---
         self.bingx_client = bingx_client
+
+    def update_config(self, new_config: dict) -> None:
+        self.config = new_config
+
+        self.timeframe_seconds = new_config.get('timeframe_seconds', self.timeframe_seconds)
+
+        self.sma_period = new_config.get('sma_period', self.sma_period)
+        self.threshold_percent = new_config.get('threshold_percent', self.threshold_percent)
+        self.confirmation_candles = new_config.get('confirmation_candles', self.confirmation_candles)
+
+        self.atr_period = new_config.get('atr_period', self.atr_period)
+        self.use_atr_risk = new_config.get('use_atr_risk', self.use_atr_risk)
+        self.atr_stop_multiplier = new_config.get('atr_stop_multiplier', self.atr_stop_multiplier)
+        self.atr_tp_multipliers = new_config.get('atr_tp_multipliers', self.atr_tp_multipliers)
+        self.tp_close_percents = new_config.get('tp_close_percents', self.tp_close_percents)
+
+        self.stop_loss_percent = new_config.get('stop_loss_percent', self.stop_loss_percent)
+        self.take_profit_levels_config = new_config.get(
+            'take_profit_levels', self.take_profit_levels_config
+        )
+
+        self.position_size = new_config.get('position_size', self.position_size)
+        self.leverage = new_config.get('leverage', self.leverage)
+
+        self.cooldown_seconds = new_config.get('cooldown_seconds', self.cooldown_seconds)
 
     @classmethod
     def build_config(cls, app_config) -> dict:

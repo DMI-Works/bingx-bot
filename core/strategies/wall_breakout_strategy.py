@@ -76,6 +76,16 @@ class WallBreakoutStrategy(BaseStrategy):
             'cooldown_seconds': app_config.get('trading.wall_breakout.cooldown_seconds', 300),
         }
 
+    def update_config(self, new_config: dict) -> None:
+        self.config = new_config
+        self.position_size = new_config.get('position_size', self.position_size)
+        self.leverage = new_config.get('leverage', self.leverage)
+        self.stop_loss_percent = new_config.get('stop_loss_percent', self.stop_loss_percent)
+        self.take_profit_levels_config = new_config.get(
+            'take_profit_levels', self.take_profit_levels_config
+        )
+        self.cooldown_seconds = new_config.get('cooldown_seconds', self.cooldown_seconds)
+
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
         # Ця стратегія не реагує на прості оновлення ціни — сигнал
         # народжується виключно в _on_wall_breakout().

@@ -88,12 +88,12 @@ class StrategyManager:
         strategy.enable() if enabled else strategy.disable()
 
     def apply_params(self, name: str, params: dict) -> None:
-        """Підміняє config на живому інстансі стратегії новими значеннями."""
+    
         strategy = self.instances.get(name)
         if strategy is None:
             self.logger.warning(f"StrategyManager.apply_params: немає live-інстансу для '{name}'")
             return
-        strategy.config = params
+        strategy.update_config(params)
 
     def get(self, name: str) -> Optional[BaseStrategy]:
         return self.instances.get(name)
