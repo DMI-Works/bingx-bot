@@ -9,6 +9,7 @@ main.py при старте (см. секцию "Mini App" в main.py).
 
 import json
 import logging
+import os
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -236,12 +237,18 @@ async def get_profile(request: Request):
         raise HTTPException(status_code=502, detail=balance_data.get("msg", "Unknown exchange error"))
 
     b = balance_data["data"].get("balance", {})
+
+    api_key = os.getenv("BINGX_API_KEY", "")
+    api_key_suffix = api_key[-4:] if len(api_key) >= 4 else None
+
     return {
         "available": float(b.get("availableMargin", 0)),
         "total": float(b.get("balance", 0)),
         "unrealized_pnl": float(b.get("unrealizedProfit", 0)),
         "used_margin": float(b.get("usedMargin", 0)),
         "equity": float(b.get("equity", 0)),
+        "testnet": bool(getattr(exchange, "testnet", True)),
+        "api_key_suffix": api_key_suffix,
     }
 
 

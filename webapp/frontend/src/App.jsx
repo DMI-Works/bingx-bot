@@ -52,6 +52,9 @@ async function apiPost(path, body) {
 const fmtUsd = (n) =>
   `${n >= 0 ? "+" : "−"}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+const fmtUsdPlain = (n) =>
+  `$${(n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
 const fmtPct = (n) => `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(2)}%`;
 
 const fmtDate = (iso) => {
@@ -353,16 +356,51 @@ function StatisticsTab() {
 // Profile tab
 // ---------------------------------------------------------------------------
 
+function initialsOf(name) {
+  if (!name) return "??";
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase())
+    .join("") || "??";
+}
+
 function ProfileTab() {
+  const [profile, setProfile] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiGet("/profile")
+      .then((data) => !cancelled && setProfile(data))
+      .catch((e) => !cancelled && setError(e.message));
+    return () => { cancelled = true; };
+  }, []);
+
+  // Данные о самом пользователе даёт сам Telegram (initData) — не то, что
+  // отдаёт наш бэкенд про биржевой аккаунт. Вне Telegram (например, при
+  // локальной разработке в обычном браузере) tg будет null — тогда просто
+  // показываем заглушку вместо падения.
+  const tgUser = tg?.initDataUnsafe?.user;
+  const displayName = tgUser
+    ? [tgUser.first_name, tgUser.last_name].filter(Boolean).join(" ")
+    : "Профиль недоступен";
+  const handle = tgUser?.username ? `@${tgUser.username}` : "—";
+
   return (
     <div className="tab-pane">
       <div className="profile-head">
-        <div className="avatar">ДМ</div>
+        {tgUser?.photo_url
+          ? <img className="avatar avatar-photo" src={tgUser.photo_url} alt="" />
+          : <div className="avatar">{initialsOf(displayName)}</div>}
         <div>
-          <div className="profile-name">DMI Works</div>
-          <div className="profile-handle">@dmi_trader</div>
+          <div className="profile-name">{displayName}</div>
+          <div className="profile-handle">{handle}</div>
         </div>
       </div>
+
+      {error && <div className="error-banner">Не удалось загрузить данные: {error}</div>}
 
       <div className="section">
         <div className="section-head">
@@ -373,11 +411,18 @@ function ProfileTab() {
             <div className="row-main">
               <div className="row-title-line">
                 <span className="symbol">BingX</span>
-                <span className="mode-badge mode-testnet">Testnet</span>
+                {profile && (
+                  <span className={`mode-badge ${profile.testnet ? "mode-testnet" : "mode-live"}`}>
+                    {profile.testnet ? "Testnet" : "Live"}
+                  </span>
+                )}
               </div>
-              <div className="row-sub">API-ключ подключён · только торговля</div>
+              <div className="row-sub">
+                {profile?.api_key_suffix
+                  ? `API-ключ подключён · •••• ${profile.api_key_suffix}`
+                  : "API-ключ подключён"}
+              </div>
             </div>
-            <ChevronRight size={16} className="chev" />
           </div>
         </div>
       </div>
@@ -386,25 +431,38 @@ function ProfileTab() {
         <div className="section-head">
           <span className="section-title">Баланс аккаунта</span>
         </div>
-        <div className="list">
-          <div className="kv-row">
-            <span className="kv-label">Доступно</span>
-            <span className="kv-value">$8,940.12</span>
+        {!profile && !error && (
+          <div className="hero-loading"><Spinner /></div>
+        )}
+        {profile && (
+          <div className="list">
+            <div className="kv-row">
+              <span className="kv-label">Доступно</span>
+              <span className="kv-value">{fmtUsdPlain(profile.available)}</span>
+            </div>
+            <div className="kv-row">
+              <span className="kv-label">В позициях</span>
+              <span className="kv-value">{fmtUsdPlain(profile.used_margin)}</span>
+            </div>
+            {profile.unrealized_pnl !== 0 && (
+              <div className="kv-row">
+                <span className="kv-label">Нереализ. PnL</span>
+                <span className={`kv-value ${profile.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}`}>
+                  {fmtUsd(profile.unrealized_pnl)}
+                </span>
+              </div>
+            )}
+            <div className="kv-row">
+              <span className="kv-label">Всего</span>
+              <span className="kv-value kv-value-strong">{fmtUsdPlain(profile.equity)}</span>
+            </div>
           </div>
-          <div className="kv-row">
-            <span className="kv-label">В позициях</span>
-            <span className="kv-value">$3,540.20</span>
-          </div>
-          <div className="kv-row">
-            <span className="kv-label">Всего</span>
-            <span className="kv-value kv-value-strong">$12,480.32</span>
-          </div>
-        </div>
+        )}
       </div>
 
-      <button className="danger-btn">
+      <button className="danger-btn" onClick={() => tg?.close()} disabled={!tg}>
         <LogOut size={16} />
-        Выйти из аккаунта
+        Закрыть приложение
       </button>
     </div>
   );
@@ -978,6 +1036,7 @@ export default function App() {
           border-radius: 4px;
         }
         .mode-testnet { background: rgba(108,140,255,0.14); color: var(--accent); }
+        .mode-live { background: rgba(241,73,91,0.14); color: var(--loss); }
 
         .pnl-tag {
           display: flex;
@@ -1010,6 +1069,7 @@ export default function App() {
           font-size: 16px;
           font-family: 'JetBrains Mono', monospace;
         }
+        .avatar-photo { object-fit: cover; }
         .profile-name { font-size: 16px; font-weight: 600; }
         .profile-handle { font-size: 13px; color: var(--text-dim); margin-top: 1px; }
 
