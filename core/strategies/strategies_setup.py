@@ -9,7 +9,7 @@ from .base_strategy import BaseStrategy
 class StrategyManager:
     """
     Держит живі інстанси всіх зареєстрованих стратегій та є єдиною точкою,
-    через яку Telegram-меню (SettingsMenu) змінює їх стан у рантаймі —
+    через яку мініапп (webapp/backend/api.py) змінює їх стан у рантаймі —
     на відміну від StrategySettingsStore, який лише зберігає стан у БД.
 
     Інстанс створюється для КОЖНОЇ стратегії з реєстру одразу при setup(),
@@ -76,7 +76,7 @@ class StrategyManager:
 
         return kwargs
 
-    # ---------- виклики з SettingsMenu (миттєве застосування) ----------
+    # ---------- виклики з мініаппу (миттєве застосування) ----------
 
     def set_enabled(self, name: str, enabled: bool) -> None:
         """Оновлює enabled і в БД, і одразу на живому інстансі стратегії."""

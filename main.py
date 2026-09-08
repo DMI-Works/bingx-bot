@@ -90,6 +90,14 @@ async def main():
     settings_manager = SettingsManager(db, event_bus)
     logger.info("[OK] Settings Manager initialized")
 
+    # Раньше глобальный тумблер торговли (trading.enabled) нигде не
+    # проверялся перед исполнением сигналов — по факту бот всегда торговал,
+    # если стратегии были включены. Чтобы включение этого гейта в
+    # SimpleTrader ниже не остановило торговлю на уже работающих
+    # инсталляциях, при самом первом запуске (когда в БД ещё нет записи)
+    # сидируем trading.enabled=True — сохраняя прежнее поведение "по
+    # умолчанию торгуем". Дальше состоянием управляет только пользователь
+    # (через мини-апп) — это уже настоящий kill-switch, а не решаемый я.
     if db.get_setting('trading.enabled') is None:
         await settings_manager.set_trading_enabled(True)
         logger.info("[OK] trading.enabled not set yet — seeded to True (preserves prior always-on behavior)")
@@ -134,9 +142,9 @@ async def main():
     )
 
     # --- Strategy settings + live strategy manager створюються ДО
-    # TelegramBot, бо SettingsMenu всередині нього має отримати вже готовий
-    # strategy_manager (щоб тумблер enabled/зміна параметра/reset у меню
-    # застосовувались одразу, без рестарту бота) ---
+    # TelegramBot. StrategyManager — єдина точка, через яку миттєво
+    # застосовуються зміни з мініаппу (тумблер enabled, зміна параметра,
+    # reset), без рестарту бота — див. апдейти нижче через webapp_app.state ---
     strategy_settings = StrategySettingsStore(db)
     logger.info("[OK] Strategy Settings Store initialized")
 
