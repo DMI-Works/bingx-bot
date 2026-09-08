@@ -44,7 +44,7 @@ class WallBreakoutStrategy(BaseStrategy):
     DEFAULT_PARAMS: Dict[str, object] = {
         'position_size': 100,
         'leverage': 20,
-        'stop_loss_percent': 20.0,
+        'stop_loss_percent': 1,
         'cooldown_seconds': 300,
     }
 
