@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
+load_dotenv()  
+
 import uvicorn
 
 from config import ConfigLoader
@@ -53,8 +55,6 @@ def setup_logging(config: ConfigLoader) -> None:
 
 
 async def main():
-    load_dotenv()
-
     config = ConfigLoader()
     setup_logging(config)
 
@@ -183,6 +183,11 @@ async def main():
     webapp_task = None
 
     if config.get('webapp.enabled', True):
+        # api.py не открывает свою БД и не создаёт свой exchange-клиент —
+        # прокидываем уже готовые объекты через app.state
+        webapp_app.state.db = db
+        webapp_app.state.exchange_client = exchange
+
         port = int(os.getenv('PORT', config.get('webapp.port', 8000)))
         uvicorn_config = uvicorn.Config(
             webapp_app,
