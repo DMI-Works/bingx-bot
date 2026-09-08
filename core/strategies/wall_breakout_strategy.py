@@ -45,7 +45,6 @@ class WallBreakoutStrategy(BaseStrategy):
         'position_size': 100,
         'leverage': 20,
         'stop_loss_percent': 20.0,
-        'take_profit_levels': [],
         'cooldown_seconds': 300,
     }
 
@@ -56,9 +55,6 @@ class WallBreakoutStrategy(BaseStrategy):
         self.position_size: float = config.get('position_size', defaults['position_size'])
         self.leverage: int = config.get('leverage', defaults['leverage'])
         self.stop_loss_percent: float = config.get('stop_loss_percent', defaults['stop_loss_percent'])
-        self.take_profit_levels_config = config.get(
-            'take_profit_levels', defaults['take_profit_levels']
-        )
         self.cooldown_seconds: float = config.get('cooldown_seconds', defaults['cooldown_seconds'])
 
         # той самий кулдаун-принцип, що й у SMA-стратегії — per symbol,
@@ -78,7 +74,6 @@ class WallBreakoutStrategy(BaseStrategy):
             'position_size': app_config.get('trading.position_size.value', d['position_size']),
             'leverage': app_config.get('trading.leverage', d['leverage']),
             'stop_loss_percent': d['stop_loss_percent'],
-            'take_profit_levels': d['take_profit_levels'],
             'cooldown_seconds': d['cooldown_seconds'],
         }
 
@@ -87,9 +82,6 @@ class WallBreakoutStrategy(BaseStrategy):
         self.position_size = new_config.get('position_size', self.position_size)
         self.leverage = new_config.get('leverage', self.leverage)
         self.stop_loss_percent = new_config.get('stop_loss_percent', self.stop_loss_percent)
-        self.take_profit_levels_config = new_config.get(
-            'take_profit_levels', self.take_profit_levels_config
-        )
         self.cooldown_seconds = new_config.get('cooldown_seconds', self.cooldown_seconds)
 
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
@@ -154,16 +146,6 @@ class WallBreakoutStrategy(BaseStrategy):
             price * (1 - self.stop_loss_percent / 100) if is_long
             else price * (1 + self.stop_loss_percent / 100)
         )
-        take_profit_levels = [
-            {
-                'price': (
-                    price * (1 + lvl['percent'] / 100) if is_long
-                    else price * (1 - lvl['percent'] / 100)
-                ),
-                'close_percent': lvl['close_percent']
-            }
-            for lvl in self.take_profit_levels_config
-        ]
 
         wall_price_str = f"{wall_price:.6f}" if wall_price else "N/A"
 
@@ -174,7 +156,6 @@ class WallBreakoutStrategy(BaseStrategy):
             'quantity': self.position_size / price,
             'leverage': self.leverage,
             'stop_loss_price': stop_loss_price,
-            'take_profit_levels': take_profit_levels,
             'strategy': self.name,
             'reference_price': price,
             'reason': (

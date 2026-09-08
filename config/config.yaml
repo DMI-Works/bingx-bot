@@ -100,19 +100,6 @@ trading:
     # якщо пробою так і не відбулось
     wall_stale_seconds: 300.0
 
-  # WallBreakoutStrategy (core/strategies/wall_breakout_strategy.py) —
-  # заводські параметри, які seed_defaults() один раз кладе в БД при
-  # старті бота (далі редагуються через Telegram /settings, як і в
-  # інших стратегіях). За замовчуванням стратегія ВИМКНЕНА — enabled
-  # вмикається окремо через /settings, тут лише її risk-параметри.
-  # position_size і leverage — спільні з trading.position_size.value /
-  # trading.leverage (той самий принцип, що й у SimpleMovingAverageStrategy).
-  wall_breakout:
-    stop_loss_percent: 1.0
-    take_profit_levels:
-      - percent: 2.0
-        close_percent: 100
-    cooldown_seconds: 300
 
   # ВАЖНО: main.py читает этот блок как config.get('trading.trailing_stop'),
   # поэтому он ОБЯЗАН быть вложен под trading: (а не на верхнем уровне, как
