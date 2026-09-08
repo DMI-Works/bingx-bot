@@ -52,10 +52,10 @@ class WallBreakoutStrategy(BaseStrategy):
         super().__init__("WallBreakoutStrategy", event_bus, config)
 
         defaults = self.DEFAULT_PARAMS
-        self.position_size: float = config.get('position_size', defaults['position_size'])
-        self.leverage: int = config.get('leverage', defaults['leverage'])
-        self.stop_loss_percent: float = config.get('stop_loss_percent', defaults['stop_loss_percent'])
-        self.cooldown_seconds: float = config.get('cooldown_seconds', defaults['cooldown_seconds'])
+        self.position_size: float = defaults['position_size']
+        self.leverage: int = defaults['leverage']
+        self.stop_loss_percent: float = defaults['stop_loss_percent']
+        self.cooldown_seconds: float = defaults['cooldown_seconds']
 
         # той самий кулдаун-принцип, що й у SMA-стратегії — per symbol,
         # щоб не відкривати кілька угод підряд на серії пробоїв одного й
@@ -71,8 +71,8 @@ class WallBreakoutStrategy(BaseStrategy):
     def build_config(cls, app_config) -> dict:
         d = cls.DEFAULT_PARAMS
         return {
-            'position_size': app_config.get('trading.position_size.value', d['position_size']),
-            'leverage': app_config.get('trading.leverage', d['leverage']),
+            'position_size': d['position_size'],
+            'leverage': d['leverage'],
             'stop_loss_percent': d['stop_loss_percent'],
             'cooldown_seconds': d['cooldown_seconds'],
         }
