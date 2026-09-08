@@ -5,7 +5,8 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()  
+load_dotenv()  # ВАЖНО: до импорта webapp.backend.api — auth.py читает
+                # TELEGRAM_BOT_TOKEN из окружения на уровне модуля, при импорте
 
 import uvicorn
 
@@ -150,12 +151,8 @@ async def main():
                 token=telegram_token,
                 chat_id=telegram_chat_id,
                 event_bus=event_bus,
-                db=db,
                 settings_manager=settings_manager,
                 exchange_client=exchange,
-                symbol_selector=symbol_selector,
-                strategy_settings=strategy_settings,
-                strategy_manager=strategy_manager,
             )
             await telegram_bot.start()
             logger.info("[OK] Telegram Bot started")
