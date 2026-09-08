@@ -45,7 +45,7 @@ class WallBreakoutStrategy(BaseStrategy):
         'position_size': 100,
         'leverage': 20,
         'stop_loss_percent': 20.0,
-        'take_profit_levels': [{'percent': 30.0, 'close_percent': 100}],
+        'take_profit_levels': [],
         'cooldown_seconds': 300,
     }
 
