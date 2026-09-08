@@ -41,17 +41,25 @@ logger = logging.getLogger(__name__)
 
 @register_strategy('WallBreakoutStrategy')
 class WallBreakoutStrategy(BaseStrategy):
+    DEFAULT_PARAMS: Dict[str, object] = {
+        'position_size': 100,
+        'leverage': 20,
+        'stop_loss_percent': 20.0,
+        'take_profit_levels': [{'percent': 30.0, 'close_percent': 100}],
+        'cooldown_seconds': 300,
+    }
 
     def __init__(self, event_bus: EventBus, config: dict):
         super().__init__("WallBreakoutStrategy", event_bus, config)
 
-        self.position_size: float = config.get('position_size', 100)
-        self.leverage: int = config.get('leverage', 20)
-        self.stop_loss_percent: float = config.get('stop_loss_percent', 1.0)
+        defaults = self.DEFAULT_PARAMS
+        self.position_size: float = config.get('position_size', defaults['position_size'])
+        self.leverage: int = config.get('leverage', defaults['leverage'])
+        self.stop_loss_percent: float = config.get('stop_loss_percent', defaults['stop_loss_percent'])
         self.take_profit_levels_config = config.get(
-            'take_profit_levels', [{'percent': 30.0, 'close_percent': 100}]
+            'take_profit_levels', defaults['take_profit_levels']
         )
-        self.cooldown_seconds: float = config.get('cooldown_seconds', 300)
+        self.cooldown_seconds: float = config.get('cooldown_seconds', defaults['cooldown_seconds'])
 
         # той самий кулдаун-принцип, що й у SMA-стратегії — per symbol,
         # щоб не відкривати кілька угод підряд на серії пробоїв одного й
@@ -65,15 +73,13 @@ class WallBreakoutStrategy(BaseStrategy):
 
     @classmethod
     def build_config(cls, app_config) -> dict:
+        d = cls.DEFAULT_PARAMS
         return {
-            'position_size': app_config.get('trading.position_size.value', 100),
-            'leverage': app_config.get('trading.leverage', 20),
-            'stop_loss_percent': app_config.get('trading.wall_breakout.stop_loss_percent', 1.0),
-            'take_profit_levels': app_config.get(
-                'trading.wall_breakout.take_profit_levels',
-                [{'percent': 2.0, 'close_percent': 100}]
-            ),
-            'cooldown_seconds': app_config.get('trading.wall_breakout.cooldown_seconds', 300),
+            'position_size': app_config.get('trading.position_size.value', d['position_size']),
+            'leverage': app_config.get('trading.leverage', d['leverage']),
+            'stop_loss_percent': d['stop_loss_percent'],
+            'take_profit_levels': d['take_profit_levels'],
+            'cooldown_seconds': d['cooldown_seconds'],
         }
 
     def update_config(self, new_config: dict) -> None:

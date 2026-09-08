@@ -13,38 +13,53 @@ logger = logging.getLogger(__name__)
 
 @register_strategy('SimpleMovingAverageStrategy')
 class SimpleMovingAverageStrategy(CandleWarmupMixin, BaseStrategy):
+    DEFAULT_PARAMS: Dict[str, object] = {
+        'timeframe_seconds': 60,
+        'sma_period': 80,
+        'threshold_percent': 0.3,
+        'confirmation_candles': 2,
+        'atr_period': 14,
+        'use_atr_risk': True,
+        'atr_stop_multiplier': 1.5,
+        'atr_tp_multipliers': [2.0, 3.5],   # R-множители по уровням
+        'tp_close_percents': [50, 50],      # % закрытия на каждом уровне
+        'stop_loss_percent': 2.0,           # fallback, если use_atr_risk=False
+        'take_profit_levels': [{'percent': 3.0, 'close_percent': 100}],
+        'position_size': 100,
+        'leverage': 10,
+        'cooldown_seconds': 300,
+    }
 
     def __init__(self, event_bus: EventBus, config: dict, bingx_client=None):
         super().__init__("SimpleMovingAverageStrategy", event_bus, config)
 
+        d = self.DEFAULT_PARAMS
+
         # --- свечи ---
-        self.timeframe_seconds = config.get('timeframe_seconds', 60)
+        self.timeframe_seconds = config.get('timeframe_seconds', d['timeframe_seconds'])
 
         # --- SMA / сигнал ---
-        self.sma_period = config.get('sma_period', 80)
-        self.threshold_percent = config.get('threshold_percent', 0.3)
-        self.confirmation_candles = config.get('confirmation_candles', 2)
+        self.sma_period = config.get('sma_period', d['sma_period'])
+        self.threshold_percent = config.get('threshold_percent', d['threshold_percent'])
+        self.confirmation_candles = config.get('confirmation_candles', d['confirmation_candles'])
 
         # --- ATR ---
-        self.atr_period = config.get('atr_period', 14)
-        self.use_atr_risk = config.get('use_atr_risk', True)
-        self.atr_stop_multiplier = config.get('atr_stop_multiplier', 1.5)
-        self.atr_tp_multipliers = config.get('atr_tp_multipliers', [2.0, 3.5])  # R-множители по уровням
-        self.tp_close_percents = config.get('tp_close_percents', [50, 50])      # % закрытия на каждом уровне
+        self.atr_period = config.get('atr_period', d['atr_period'])
+        self.use_atr_risk = config.get('use_atr_risk', d['use_atr_risk'])
+        self.atr_stop_multiplier = config.get('atr_stop_multiplier', d['atr_stop_multiplier'])
+        self.atr_tp_multipliers = config.get('atr_tp_multipliers', d['atr_tp_multipliers'])
+        self.tp_close_percents = config.get('tp_close_percents', d['tp_close_percents'])
 
         # --- fallback: фиксированные проценты, если ATR выключен ---
-        self.stop_loss_percent = config.get('stop_loss_percent', 2.0)
-        self.take_profit_levels_config = config.get(
-            'take_profit_levels', [{'percent': 3.0, 'close_percent': 100}]
-        )
+        self.stop_loss_percent = config.get('stop_loss_percent', d['stop_loss_percent'])
+        self.take_profit_levels_config = config.get('take_profit_levels', d['take_profit_levels'])
 
         # --- риск / размер позиции ---
-        self.position_size = config.get('position_size', 100)
-
-        self.leverage = config.get('leverage', 10)
+        self.position_size = config.get('position_size', d['position_size'])
+        self.leverage = config.get('leverage', d['leverage'])
 
         # --- кулдаун ---
-        self.cooldown_seconds = config.get('cooldown_seconds', 300)
+        self.cooldown_seconds = config.get('cooldown_seconds', d['cooldown_seconds'])
 
         # --- состояние per symbol ---
         self.candles: Dict[str, List[Candle]] = {}
@@ -82,26 +97,11 @@ class SimpleMovingAverageStrategy(CandleWarmupMixin, BaseStrategy):
 
     @classmethod
     def build_config(cls, app_config) -> dict:
-        use_atr_risk = app_config.get('trading.stop_loss.mode', 'fixed_percent') == 'atr'
+        d = cls.DEFAULT_PARAMS
         return {
-            'timeframe_seconds': 60,
-            'sma_period': app_config.get('trading.sma_period', 80),
-            'threshold_percent': app_config.get('trading.threshold_percent', 0.3),
-            'confirmation_candles': app_config.get('trading.confirmation_candles', 2),
-            'cooldown_seconds': app_config.get('trading.cooldown_seconds', 300),
-            'position_size': app_config.get('trading.position_size.value', 100),
-            'leverage': app_config.get('trading.leverage', 10),
-
-            'use_atr_risk': use_atr_risk,
-            'atr_period': app_config.get('trading.stop_loss.atr.period', 14),
-            'atr_stop_multiplier': app_config.get('trading.stop_loss.atr.multiplier', 1.5),
-            'atr_tp_multipliers': app_config.get('trading.take_profit.atr.multipliers', [2.0, 3.5]),
-            'tp_close_percents': app_config.get('trading.take_profit.atr.close_percents', [50, 50]),
-
-            'stop_loss_percent': app_config.get('trading.stop_loss.value', 2.0),
-            'take_profit_levels': app_config.get(
-                'trading.take_profit.levels', [{'percent': 30.0, 'close_percent': 100}]
-            ),
+            **d,
+            'position_size': app_config.get('trading.position_size.value', d['position_size']),
+            'leverage': app_config.get('trading.leverage', d['leverage']),
         }
 
     # --- налаштування CandleWarmupMixin під потреби цієї стратегії ---

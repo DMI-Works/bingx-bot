@@ -26,33 +26,50 @@ class RejectionBlockStrategy(CandleWarmupMixin, BaseStrategy):
     под конкретный инструмент/таймфрейм перед реальным использованием.
     """
 
+   
+    DEFAULT_PARAMS: Dict[str, object] = {
+        'timeframe_seconds': 60,
+        'wick_to_body_ratio': 2.0,
+        'min_wick_ratio': 0.6,
+        'opposite_wick_max_ratio': 0.3,
+        'overlap_tolerance_percent': 0.05,
+        'min_body_percent': 0.0,
+        'position_size': 100,
+        'leverage': 10,
+        'stop_loss_buffer_percent': 5.0,   # ROI%, делится на leverage при расчёте цены
+        'take_profit_percent': 10.0,       # ROI%, делится на leverage при расчёте цены
+        'cooldown_seconds': 300,
+    }
+
     def __init__(self, event_bus: EventBus, config: dict, bingx_client=None):
         super().__init__("RejectionBlockStrategy", event_bus, config)
 
+        d = self.DEFAULT_PARAMS
+
         # --- свечи ---
-        self.timeframe_seconds = config.get('timeframe_seconds', 60)
+        self.timeframe_seconds = config.get('timeframe_seconds', d['timeframe_seconds'])
 
         # --- параметры паттерна ---
         # во сколько раз доминирующая тень должна быть больше тела свечи
-        self.wick_to_body_ratio = config.get('wick_to_body_ratio', 2.0)
+        self.wick_to_body_ratio = config.get('wick_to_body_ratio', d['wick_to_body_ratio'])
         # доминирующая тень должна занимать не менее этой доли от всего range свечи
-        self.min_wick_ratio = config.get('min_wick_ratio', 0.6)
+        self.min_wick_ratio = config.get('min_wick_ratio', d['min_wick_ratio'])
         # противоположная тень не должна быть больше этой доли от доминирующей тени
-        self.opposite_wick_max_ratio = config.get('opposite_wick_max_ratio', 0.3)
+        self.opposite_wick_max_ratio = config.get('opposite_wick_max_ratio', d['opposite_wick_max_ratio'])
         # допуск (в % от цены) на "перекрытие" тени текущей свечи тенью предыдущей
-        self.overlap_tolerance_percent = config.get('overlap_tolerance_percent', 0.05)
+        self.overlap_tolerance_percent = config.get('overlap_tolerance_percent', d['overlap_tolerance_percent'])
         # минимальный размер тела свечи в % от цены (фильтр от свечей-игл на пустом объёме)
-        self.min_body_percent = config.get('min_body_percent', 0.0)
+        self.min_body_percent = config.get('min_body_percent', d['min_body_percent'])
 
         # --- позиция и плечо ---
         # leverage нужен ДО расчёта риска, поэтому читаем его здесь, а не ниже
-        self.position_size = config.get('position_size', 100)
-        self.leverage = config.get('leverage', 10)
+        self.position_size = config.get('position_size', d['position_size'])
+        self.leverage = config.get('leverage', d['leverage'])
 
         # SL и TP задаются в конфиге как ROI% (как показывает биржа),
         # цена стопа/тейка вычисляется делением на плечо
-        sl_roi_percent = config.get('stop_loss_buffer_percent', 5.0)
-        tp_roi_percent = config.get('take_profit_percent', 10.0)
+        sl_roi_percent = config.get('stop_loss_buffer_percent', d['stop_loss_buffer_percent'])
+        tp_roi_percent = config.get('take_profit_percent', d['take_profit_percent'])
 
         self.stop_loss_buffer_percent = sl_roi_percent / self.leverage
         self.take_profit_percent = tp_roi_percent / self.leverage
@@ -64,7 +81,7 @@ class RejectionBlockStrategy(CandleWarmupMixin, BaseStrategy):
         )
 
         # --- кулдаун ---
-        self.cooldown_seconds = config.get('cooldown_seconds', 300)
+        self.cooldown_seconds = config.get('cooldown_seconds', d['cooldown_seconds'])
 
         # --- состояние per symbol ---
         self.candles: Dict[str, List[Candle]] = {}
@@ -106,25 +123,11 @@ class RejectionBlockStrategy(CandleWarmupMixin, BaseStrategy):
 
     @classmethod
     def build_config(cls, app_config) -> dict:
+        d = cls.DEFAULT_PARAMS
         return {
-            'timeframe_seconds': app_config.get('trading.rejection_block.timeframe_seconds', 60),
-
-            'wick_to_body_ratio': app_config.get('trading.rejection_block.wick_to_body_ratio', 2.0),
-            'min_wick_ratio': app_config.get('trading.rejection_block.min_wick_ratio', 0.6),
-            'opposite_wick_max_ratio': app_config.get('trading.rejection_block.opposite_wick_max_ratio', 0.3),
-            'overlap_tolerance_percent': app_config.get('trading.rejection_block.overlap_tolerance_percent', 0.05),
-            'min_body_percent': app_config.get('trading.rejection_block.min_body_percent', 0.0),
-
-            'stop_loss_buffer_percent': app_config.get('trading.rejection_block.stop_loss_buffer_percent', 5.0),
-            'take_profit_percent': app_config.get('trading.rejection_block.take_profit_percent', 10.0),
-
-            'cooldown_seconds': app_config.get(
-                'trading.rejection_block.cooldown_seconds',
-                app_config.get('trading.cooldown_seconds', 300)
-            ),
-
-            'position_size': app_config.get('trading.position_size.value', 100),
-            'leverage': app_config.get('trading.default_leverage', 10),
+            **d,
+            'position_size': app_config.get('trading.position_size.value', d['position_size']),
+            'leverage': app_config.get('trading.leverage', d['leverage']),
         }
 
     # --- налаштування CandleWarmupMixin ---
