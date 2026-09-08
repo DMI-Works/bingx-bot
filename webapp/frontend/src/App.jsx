@@ -3,9 +3,10 @@ import {
   AreaChart, Area, XAxis, Tooltip, ResponsiveContainer,
 } from "recharts";
 import {
-  TrendingUp, TrendingDown, ChevronRight, Bell, Shield, Sliders,
-  KeyRound, LogOut, AlertTriangle, Wallet, Activity, BarChart3,
+  TrendingUp, TrendingDown, ChevronRight, Bell, Sliders,
+  KeyRound, LogOut, BarChart3,
   User, SettingsIcon, ArrowUpRight, ArrowDownRight, Circle,
+  Power, RotateCcw,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -24,6 +25,23 @@ async function apiGet(path) {
     },
   });
   if (!res.ok) throw new Error(`API ${path} -> ${res.status}`);
+  return res.json();
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(`/api${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Telegram-Init-Data": tg?.initData || "",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch { /* noop */ }
+    throw new Error(detail || `API ${path} -> ${res.status}`);
+  }
   return res.json();
 }
 
@@ -393,32 +411,9 @@ function ProfileTab() {
 }
 
 // ---------------------------------------------------------------------------
-// Settings tab
+// Settings tab — trading kill-switch + strategy management
+// (backed by webapp/backend/api.py: GET/POST /api/settings/...)
 // ---------------------------------------------------------------------------
-
-function ToggleRow({ icon: Icon, title, sub, defaultOn = true }) {
-  const [on, setOn] = useState(defaultOn);
-  return (
-    <div className="row">
-      <div className="row-icon">
-        <Icon size={17} />
-      </div>
-      <div className="row-main">
-        <div className="row-title-line">
-          <span className="settings-title">{title}</span>
-        </div>
-        {sub && <div className="row-sub">{sub}</div>}
-      </div>
-      <button
-        className={`switch ${on ? "switch-on" : ""}`}
-        onClick={() => setOn(!on)}
-        aria-label={title}
-      >
-        <span className="switch-knob" />
-      </button>
-    </div>
-  );
-}
 
 function LinkRow({ icon: Icon, title, value }) {
   return (
@@ -435,29 +430,239 @@ function LinkRow({ icon: Icon, title, value }) {
   );
 }
 
+function ParamRow({ strategyName, param, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(param.value ?? ""));
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const openEditor = () => {
+    setDraft(String(param.value ?? ""));
+    setErr(null);
+    setEditing(true);
+  };
+
+  const commit = async () => {
+    let value = draft;
+    if (param.kind === "number") {
+      const n = Number(draft);
+      if (Number.isNaN(n)) { setErr("Введите число"); return; }
+      value = n;
+    }
+    setSaving(true);
+    setErr(null);
+    try {
+      const updated = await apiPost(`/settings/strategies/${strategyName}/params`, { key: param.key, value });
+      onSaved(updated);
+      setEditing(false);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (param.kind === "bool") {
+    return (
+      <ToggleRow
+        icon={Sliders}
+        title={param.label}
+        sub={param.description}
+        checked={!!param.value}
+        disabled={saving}
+        onToggle={async (next) => {
+          setSaving(true);
+          try {
+            const updated = await apiPost(`/settings/strategies/${strategyName}/params`, { key: param.key, value: next });
+            onSaved(updated);
+          } catch (e) {
+            setErr(e.message);
+          } finally {
+            setSaving(false);
+          }
+        }}
+      />
+    );
+  }
+
+  if (!editing) {
+    return (
+      <div className="row" onClick={openEditor} style={{ cursor: "pointer" }}>
+        <div className="row-main">
+          <span className="settings-title">{param.label}</span>
+          {param.description && <div className="row-sub">{param.description}</div>}
+        </div>
+        <span className="row-value">{String(param.value)}</span>
+        <ChevronRight size={16} className="chev" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="row">
+      <div className="row-main">
+        <span className="settings-title">{param.label}</span>
+        <div className="param-edit-line">
+          <input
+            className="param-input"
+            type={param.kind === "number" ? "number" : "text"}
+            inputMode={param.kind === "number" ? "decimal" : "text"}
+            value={draft}
+            autoFocus
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commit();
+              if (e.key === "Escape") setEditing(false);
+            }}
+          />
+          <button className="param-save-btn" onClick={commit} disabled={saving}>
+            {saving ? "…" : "OK"}
+          </button>
+        </div>
+        {err && <div className="row-sub" style={{ color: "var(--loss)" }}>{err}</div>}
+      </div>
+    </div>
+  );
+}
+
+function StrategyCard({ strategy, onUpdate }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const toggleEnabled = async (next) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      onUpdate(await apiPost(`/settings/strategies/${strategy.name}/enabled`, { enabled: next }));
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reset = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      onUpdate(await apiPost(`/settings/strategies/${strategy.name}/reset`, {}));
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="strategy-card">
+      <div className="row" onClick={() => setOpen(!open)} style={{ cursor: "pointer", borderBottom: open ? undefined : "none" }}>
+        <span className={`status-dot ${strategy.enabled ? "status-on" : "status-off"}`} />
+        <div className="row-main">
+          <div className="row-title-line">
+            <span className="settings-title">{strategy.name}</span>
+            {strategy.modified && <span className="modified-badge">изменено</span>}
+          </div>
+        </div>
+        <ChevronRight size={16} className="chev" style={{ transform: open ? "rotate(90deg)" : "none" }} />
+      </div>
+
+      {open && (
+        <div className="strategy-body">
+          {err && <div className="error-banner">{err}</div>}
+          <div className="list" style={{ marginBottom: 10 }}>
+            <ToggleRow
+              icon={Power}
+              title="Стратегия включена"
+              checked={strategy.enabled}
+              disabled={busy}
+              onToggle={toggleEnabled}
+            />
+          </div>
+          <div className="list">
+            {strategy.params.length
+              ? strategy.params.map((p) => (
+                  <ParamRow key={p.key} strategyName={strategy.name} param={p} onSaved={onUpdate} />
+                ))
+              : <EmptyRow text="Нет параметров" />}
+          </div>
+          <button className="danger-btn" onClick={reset} disabled={busy}>
+            <RotateCcw size={16} />
+            Сбросить к заводским
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsTab() {
+  const [settings, setSettings] = useState(null);
+  const [error, setError] = useState(null);
+  const [tradingBusy, setTradingBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiGet("/settings")
+      .then((data) => !cancelled && setSettings(data))
+      .catch((e) => !cancelled && setError(e.message));
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleTrading = async (next) => {
+    setTradingBusy(true);
+    setError(null);
+    try {
+      const res = await apiPost("/settings/trading", { enabled: next });
+      setSettings((prev) => (prev ? { ...prev, trading_enabled: res.trading_enabled } : prev));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setTradingBusy(false);
+    }
+  };
+
+  const updateStrategy = (updated) => {
+    setSettings((prev) => prev && {
+      ...prev,
+      strategies: prev.strategies.map((s) => (s.name === updated.name ? updated : s)),
+    });
+  };
+
   return (
     <div className="tab-pane">
+      {error && <div className="error-banner">{error}</div>}
+
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Риск-менеджмент</span>
+          <span className="section-title">Торговля</span>
         </div>
         <div className="list">
-          <LinkRow icon={Shield} title="Макс. открытых позиций" value="3" />
-          <LinkRow icon={Sliders} title="Риск на сделку" value="2%" />
-          <LinkRow icon={AlertTriangle} title="Дневной лимит убытка" value="5%" />
-          <LinkRow icon={Activity} title="Cooldown после убытка" value="30 мин" />
+          <ToggleRow
+            icon={Power}
+            title={settings?.trading_enabled ? "Торговля включена" : "Торговля выключена"}
+            sub="Глобальный выключатель: если выключено, стратегии не открывают новые позиции. Уже открытые позиции продолжают сопровождаться (SL/TP)."
+            checked={settings ? settings.trading_enabled : false}
+            disabled={!settings || tradingBusy}
+            onToggle={toggleTrading}
+          />
         </div>
       </div>
 
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Stop Loss / Take Profit</span>
+          <span className="section-title">Стратегии</span>
+          {settings && <span className="section-count">{settings.strategies.length}</span>}
         </div>
-        <div className="list">
-          <LinkRow icon={TrendingDown} title="Тип Stop Loss" value="ATR" />
-          <LinkRow icon={TrendingUp} title="Уровни Take Profit" value="2" />
-        </div>
+        {!settings && !error && (
+          <div className="hero-loading"><Spinner /></div>
+        )}
+        {settings && !settings.strategies.length && (
+          <div className="list"><EmptyRow text="Стратегии ещё не инициализированы ботом" /></div>
+        )}
+        {settings?.strategies.map((s) => (
+          <StrategyCard key={s.name} strategy={s} onUpdate={updateStrategy} />
+        ))}
       </div>
 
       <div className="section">
@@ -478,16 +683,6 @@ function SettingsTab() {
         <div className="list">
           <LinkRow icon={KeyRound} title="API-ключ BingX" value="•••• 84f2" />
         </div>
-      </div>
-
-      <div className="section">
-        <div className="section-head">
-          <span className="section-title-danger">Опасная зона</span>
-        </div>
-        <button className="danger-btn danger-btn-solid">
-          <AlertTriangle size={16} />
-          Аварийная остановка
-        </button>
       </div>
     </div>
   );
@@ -832,6 +1027,66 @@ export default function App() {
           transition: transform 0.15s ease;
         }
         .switch-on .switch-knob { transform: translateX(16px); }
+
+        /* Strategy cards (Settings tab) */
+        .strategy-card {
+          background: var(--surface);
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          overflow: hidden;
+          margin-bottom: 10px;
+        }
+        .strategy-body {
+          padding: 12px 14px 14px;
+          border-top: 1px solid var(--border);
+        }
+        .status-dot {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          flex-shrink: 0;
+          margin-left: 2px;
+        }
+        .status-on { background: var(--profit); box-shadow: 0 0 0 3px rgba(53,214,138,0.14); }
+        .status-off { background: var(--text-faint); }
+        .modified-badge {
+          font-size: 10px;
+          font-weight: 600;
+          color: var(--accent);
+          background: var(--accent-soft);
+          padding: 1px 6px;
+          border-radius: 4px;
+        }
+        .param-edit-line {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-top: 6px;
+        }
+        .param-input {
+          flex: 1;
+          min-width: 0;
+          background: var(--surface-2);
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          padding: 7px 10px;
+          font-size: 13px;
+          font-family: 'JetBrains Mono', monospace;
+          color: var(--text);
+        }
+        .param-input:focus { outline: none; border-color: var(--accent); }
+        .param-save-btn {
+          background: var(--accent);
+          border: none;
+          border-radius: 8px;
+          color: #fff;
+          font-size: 12px;
+          font-weight: 600;
+          padding: 7px 12px;
+          cursor: pointer;
+          flex-shrink: 0;
+        }
+        .param-save-btn:disabled { opacity: 0.6; cursor: default; }
 
         /* Bottom tab bar */
         .tabbar {

@@ -11,13 +11,15 @@ import json
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Header, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from .auth import validate_init_data
+from core.strategies.param_catalog import catalog_lookup, infer_param_kind
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +28,17 @@ STATIC_DIR = Path(__file__).parent / "static"
 app = FastAPI(title="Ruflo Mini App API")
 app.state.db = None
 app.state.exchange_client = None
+# Опциональны: если main.py их не проставит (webapp.enabled=False сценарий
+# сборки/тестов), эндпоинты /api/settings/* просто ответят 503, остальной
+# API (stats/positions/trades/profile) продолжит работать как раньше.
+app.state.settings_manager = None
+app.state.strategy_settings = None
+app.state.strategy_manager = None
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -235,6 +243,166 @@ async def get_profile(request: Request):
         "used_margin": float(b.get("usedMargin", 0)),
         "equity": float(b.get("equity", 0)),
     }
+
+
+# ---------------------------------------------------------------------------
+# /api/settings — глобальный тумблер торговли + список стратегий с их
+# параметрами. Тонкая HTTP-обёртка поверх уже существующей логики:
+#   - core/state/settings_manager.py       -> trading.enabled (kill-switch)
+#   - core/database/strategy_settings.py   -> StrategySettingsStore (БД)
+#   - core/strategies/strategies_setup.py  -> StrategyManager (live-инстансы)
+# Ничего не решает и не пересчитывает сама — только читает/пишет то, что уже
+# считает бэкенд бота. Мутирующие эндпоинты требуют Telegram-авторизации,
+# т.к. управляют реальной торговлей.
+# ---------------------------------------------------------------------------
+
+def _require_settings_manager(request: Request):
+    settings_manager = request.app.state.settings_manager
+    if settings_manager is None:
+        raise HTTPException(status_code=503, detail="Settings manager not ready yet")
+    return settings_manager
+
+
+def _require_strategy_settings(request: Request):
+    strategy_settings = request.app.state.strategy_settings
+    if strategy_settings is None:
+        raise HTTPException(status_code=503, detail="Strategy settings store not ready yet")
+    return strategy_settings
+
+
+def _serialize_strategy(entry: Dict[str, Any], store) -> Dict[str, Any]:
+    name = entry["strategy_name"]
+    params = []
+    for key, value in entry["params"].items():
+        label, description = catalog_lookup(key)
+        params.append({
+            "key": key,
+            "label": label,
+            "description": description,
+            "kind": infer_param_kind(value) or "text",
+            "value": value,
+        })
+    return {
+        "name": name,
+        "enabled": entry["enabled"],
+        "modified": store.is_modified(name),
+        "updated_at": entry["updated_at"],
+        "params": params,
+    }
+
+
+def _apply_params_live(request: Request, name: str, params: Dict[str, Any]) -> None:
+    """Если рядом есть live StrategyManager — применяет новые параметры к
+    работающему инстансу стратегии сразу, без рестарта бота (см.
+    StrategyManager.apply_params). Если его нет (например, локальный запуск
+    только веб-части без main.py) — изменения всё равно сохранены в БД и
+    подхватятся при следующем старте."""
+    strategy_manager = request.app.state.strategy_manager
+    if strategy_manager is not None:
+        strategy_manager.apply_params(name, params)
+
+
+@app.get("/api/settings")
+def get_settings(request: Request):  # noqa: ARG001 — добавьте Depends(require_telegram_user) для прода
+    settings_manager = _require_settings_manager(request)
+    store = _require_strategy_settings(request)
+
+    strategies = [_serialize_strategy(entry, store) for entry in store.list_strategies()]
+
+    return {
+        "trading_enabled": settings_manager.get_trading_enabled(),
+        "strategies": strategies,
+    }
+
+
+@app.post("/api/settings/trading")
+async def set_trading_enabled(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(require_telegram_user),
+):
+    settings_manager = _require_settings_manager(request)
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=422, detail="'enabled' must be a boolean")
+
+    await settings_manager.set_trading_enabled(enabled)
+    logger.info(f"Trading globally {'enabled' if enabled else 'disabled'} via mini app (user={user})")
+    return {"trading_enabled": enabled}
+
+
+@app.post("/api/settings/strategies/{name}/enabled")
+async def set_strategy_enabled(
+    name: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(require_telegram_user),
+):
+    store = _require_strategy_settings(request)
+    if store.get_params(name) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown strategy '{name}'")
+
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=422, detail="'enabled' must be a boolean")
+
+    strategy_manager = request.app.state.strategy_manager
+    if strategy_manager is not None:
+        strategy_manager.set_enabled(name, enabled)  # обновляет и БД, и live-инстанс
+    else:
+        store.set_enabled(name, enabled)
+
+    logger.info(f"Strategy '{name}' {'enabled' if enabled else 'disabled'} via mini app (user={user})")
+
+    entries = {e["strategy_name"]: e for e in store.list_strategies()}
+    return _serialize_strategy(entries[name], store)
+
+
+@app.post("/api/settings/strategies/{name}/params")
+async def update_strategy_param(
+    name: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(require_telegram_user),
+):
+    store = _require_strategy_settings(request)
+    current = store.get_params(name)
+    if current is None:
+        raise HTTPException(status_code=404, detail=f"Unknown strategy '{name}'")
+
+    key = payload.get("key")
+    if not isinstance(key, str) or key not in current:
+        raise HTTPException(status_code=422, detail=f"Unknown param key for strategy '{name}'")
+    if "value" not in payload:
+        raise HTTPException(status_code=422, detail="'value' is required")
+
+    current[key] = payload["value"]
+    store.update_params(name, current)
+    _apply_params_live(request, name, current)
+
+    logger.info(f"Strategy '{name}' param '{key}' updated via mini app (user={user})")
+
+    entries = {e["strategy_name"]: e for e in store.list_strategies()}
+    return _serialize_strategy(entries[name], store)
+
+
+@app.post("/api/settings/strategies/{name}/reset")
+async def reset_strategy_params(
+    name: str,
+    request: Request,
+    user: dict = Depends(require_telegram_user),
+):
+    store = _require_strategy_settings(request)
+    if store.get_params(name) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown strategy '{name}'")
+
+    reset_params = store.reset_to_default(name)
+    _apply_params_live(request, name, reset_params)
+
+    logger.info(f"Strategy '{name}' reset to defaults via mini app (user={user})")
+
+    entries = {e["strategy_name"]: e for e in store.list_strategies()}
+    return _serialize_strategy(entries[name], store)
 
 
 # ---------------------------------------------------------------------------

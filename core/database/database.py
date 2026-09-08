@@ -61,6 +61,18 @@ class Database:
             )
         """)
 
+        # Generic key-value settings table. Used by SettingsManager
+        # (core/state/settings_manager.py) for things like the global
+        # trading.enabled kill-switch. Separate from strategy_settings,
+        # which is per-strategy and has its own dedicated table/store.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+        """)
+
         self.conn.commit()
         logger.info("Database tables created/verified")
 
@@ -229,6 +241,17 @@ class Database:
         if not row:
             return {}
         return dict(row)
+
+    def get_setting(self, key: str) -> Optional[str]:
+        row = self.fetch_one("SELECT value FROM settings WHERE key = ?", (key,))
+        return row["value"] if row else None
+
+    def save_setting(self, key: str, value: str) -> None:
+        self.execute("""
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """, (key, value, datetime.utcnow()))
 
     def close(self) -> None:
         if self.conn:

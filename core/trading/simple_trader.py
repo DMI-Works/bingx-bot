@@ -24,11 +24,16 @@ class SimpleTrader:
         event_bus: EventBus,
         db: Database,
         risk_manager: Optional[RiskManager] = None,
+        settings_manager=None,
     ):
         self.exchange = exchange
         self.event_bus = event_bus
         self.db = db
         self.risk_manager = risk_manager
+        # Глобальний kill-switch (trading.enabled), яким тепер керує вкладка
+        # «Настройки» в мініаппі. Опціональний — якщо не передали (наприклад,
+        # у старих тестах), поведінка як і раніше: сигнали виконуються завжди.
+        self.settings_manager = settings_manager
 
         self.open_positions = {}
 
@@ -106,6 +111,17 @@ class SimpleTrader:
         action = signal.get('action')
 
         if action == 'OPEN':
+            # Глобальний kill-switch (вкладка «Настройки» в мініаппі). Гейтимо
+            # лише ВІДКРИТТЯ нових позицій — закриття/супровід вже відкритих
+            # позицій (SL/TP/trailing) від нього не залежить і продовжує
+            # працювати, навіть якщо торгівлю вимкнули.
+            if self.settings_manager is not None and not self.settings_manager.get_trading_enabled():
+                logger.info(
+                    f"Signal for {signal.get('symbol')} ({signal.get('strategy')}) ignored — "
+                    f"trading is globally disabled (mini app toggle)"
+                )
+                return
+
             await self.open_position(
                 symbol=signal['symbol'],
                 side=signal['side'],

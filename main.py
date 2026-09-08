@@ -90,6 +90,10 @@ async def main():
     settings_manager = SettingsManager(db, event_bus)
     logger.info("[OK] Settings Manager initialized")
 
+    if db.get_setting('trading.enabled') is None:
+        await settings_manager.set_trading_enabled(True)
+        logger.info("[OK] trading.enabled not set yet — seeded to True (preserves prior always-on behavior)")
+
     risk_config = config.get('trading.risk')
     risk_manager = RiskManager(db, event_bus, exchange, risk_config)
     logger.info("[OK] Risk Manager initialized")
@@ -99,6 +103,7 @@ async def main():
         event_bus=event_bus,
         db=db,
         risk_manager=risk_manager,
+        settings_manager=settings_manager,
     )
     logger.info("[OK] Simple Trader initialized")
 
@@ -184,6 +189,9 @@ async def main():
         # прокидываем уже готовые объекты через app.state
         webapp_app.state.db = db
         webapp_app.state.exchange_client = exchange
+        webapp_app.state.settings_manager = settings_manager
+        webapp_app.state.strategy_settings = strategy_settings
+        webapp_app.state.strategy_manager = strategy_manager
 
         port = int(os.getenv('PORT', config.get('webapp.port', 8000)))
         uvicorn_config = uvicorn.Config(
