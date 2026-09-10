@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..database import Database
 from ..events import EventBus, Event, EventType
@@ -20,6 +20,7 @@ class RiskManager:
         self.max_positions_per_symbol = config.get('max_positions_per_symbol', 1)
         self.max_total_risk_percent = config.get('max_total_risk_percent', 5.0)
         self.max_consecutive_losses = config.get('max_consecutive_losses', 3)
+        self.consecutive_losses_cooldown_seconds = config.get('consecutive_losses_cooldown_seconds', 1800)
         self.cooldown_after_trade_seconds = config.get('cooldown_after_trade_seconds', 60)
 
         # --- risk-based position sizing (заменяет fixed position_size из стратегии) ---
@@ -31,6 +32,12 @@ class RiskManager:
         self.risk_per_trade_percent = config.get('risk_per_trade_percent', 0.5)
 
         self.consecutive_losses = 0
+        # Момент, до якого діє пауза після серії лузів (None — паузи немає).
+        # Виставляється в position_closed(), коли consecutive_losses
+        # досягає max_consecutive_losses; знімається автоматично в
+        # can_open_position(), коли час вийшов, або вручну через
+        # reset_consecutive_losses().
+        self.losses_lockout_until: Optional[datetime] = None
         self.last_trade_time: Optional[datetime] = None
 
         # события всё ещё нужны для cooldown/consecutive_losses, но НЕ для счёта открытых позиций
@@ -169,10 +176,28 @@ class RiskManager:
             logger.warning(reason)
             return False, reason
 
-        if self.max_consecutive_losses > 0 and self.consecutive_losses >= self.max_consecutive_losses:
-            reason = f"Max consecutive losses reached: {self.consecutive_losses}/{self.max_consecutive_losses}"
-            logger.warning(reason)
-            return False, reason
+        if self.max_consecutive_losses > 0 and self.losses_lockout_until:
+            if datetime.utcnow() >= self.losses_lockout_until:
+                # Пауза вийшла — самі знімаємо лок, це і є "автоматичний скид"
+                logger.info(
+                    f"Consecutive-losses lockout expired ({self.consecutive_losses} losses) — "
+                    f"resuming trading automatically"
+                )
+                self.consecutive_losses = 0
+                self.losses_lockout_until = None
+                await self.event_bus.publish(Event(
+                    type=EventType.RISK_LIMIT_CLEARED,
+                    data={'reason': 'consecutive_losses_cooldown_expired'},
+                    source='RiskManager',
+                ))
+            else:
+                remaining = int((self.losses_lockout_until - datetime.utcnow()).total_seconds())
+                reason = (
+                    f"Max consecutive losses reached: {self.consecutive_losses}/{self.max_consecutive_losses} "
+                    f"(account-wide, not per symbol) — resumes in {remaining}s"
+                )
+                logger.warning(reason)
+                return False, reason
 
         if self.last_trade_time:
             time_since_last_trade = (datetime.utcnow() - self.last_trade_time).total_seconds()
@@ -183,7 +208,7 @@ class RiskManager:
 
         return True, None
 
-    def position_closed(self, pnl: float, symbol: Optional[str] = None) -> None:
+    async def position_closed(self, pnl: float, symbol: Optional[str] = None) -> None:
         """Считаем win/loss серию и cooldown по времени — это НЕ связано с количеством позиций,
         поэтому оставляем как событийную логику."""
         self.last_trade_time = datetime.utcnow()
@@ -191,17 +216,43 @@ class RiskManager:
         if pnl < 0:
             self.consecutive_losses += 1
             logger.info(f"Loss recorded. Consecutive losses: {self.consecutive_losses}")
+
+            if (
+                self.max_consecutive_losses > 0
+                and self.consecutive_losses >= self.max_consecutive_losses
+                and self.losses_lockout_until is None  # уже на паузі — не продовжуємо її кожним новим лузом
+            ):
+                self.losses_lockout_until = datetime.utcnow() + timedelta(
+                    seconds=self.consecutive_losses_cooldown_seconds
+                )
+                logger.warning(
+                    f"Consecutive losses limit reached ({self.consecutive_losses}/{self.max_consecutive_losses}) "
+                    f"— pausing new positions until {self.losses_lockout_until.isoformat()}"
+                )
+                await self.event_bus.publish(Event(
+                    type=EventType.RISK_LIMIT_EXCEEDED,
+                    data={
+                        'consecutive_losses': self.consecutive_losses,
+                        'max_consecutive_losses': self.max_consecutive_losses,
+                        'symbol': symbol,
+                        'cooldown_seconds': self.consecutive_losses_cooldown_seconds,
+                        'resumes_at': self.losses_lockout_until.isoformat(),
+                    },
+                    source='RiskManager',
+                ))
         else:
             self.consecutive_losses = 0
+            self.losses_lockout_until = None
             logger.info("Win recorded. Consecutive losses reset to 0")
 
     async def _on_position_closed_event(self, event: Event) -> None:
         pnl = event.data.get('realized_pnl', 0.0)
         symbol = event.data.get('symbol')
-        self.position_closed(pnl=pnl, symbol=symbol)
+        await self.position_closed(pnl=pnl, symbol=symbol)
 
     def reset_consecutive_losses(self) -> None:
         self.consecutive_losses = 0
+        self.losses_lockout_until = None
         logger.info("Consecutive losses manually reset")
 
     def update_config(self, config: dict) -> None:
@@ -209,6 +260,9 @@ class RiskManager:
         self.max_positions_per_symbol = config.get('max_positions_per_symbol', self.max_positions_per_symbol)
         self.max_total_risk_percent = config.get('max_total_risk_percent', self.max_total_risk_percent)
         self.max_consecutive_losses = config.get('max_consecutive_losses', self.max_consecutive_losses)
+        self.consecutive_losses_cooldown_seconds = config.get(
+            'consecutive_losses_cooldown_seconds', self.consecutive_losses_cooldown_seconds
+        )
         self.cooldown_after_trade_seconds = config.get('cooldown_after_trade_seconds', self.cooldown_after_trade_seconds)
         self.use_risk_based_sizing = config.get('use_risk_based_sizing', self.use_risk_based_sizing)
         self.risk_per_trade_percent = config.get('risk_per_trade_percent', self.risk_per_trade_percent)
@@ -233,6 +287,8 @@ class RiskManager:
             'open_positions_by_symbol': open_positions_by_symbol,
             'consecutive_losses': self.consecutive_losses,
             'max_consecutive_losses': self.max_consecutive_losses,
+            'losses_lockout_active': self.losses_lockout_until is not None and datetime.utcnow() < self.losses_lockout_until,
+            'losses_lockout_resumes_at': self.losses_lockout_until.isoformat() if self.losses_lockout_until else None,
             'cooldown_active': self._is_cooldown_active(),
             'last_trade_time': self.last_trade_time.isoformat() if self.last_trade_time else None
         }

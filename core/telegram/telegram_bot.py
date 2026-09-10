@@ -56,6 +56,8 @@ class TelegramBot:
         self.event_bus.subscribe(EventType.ERROR, self._on_error)
         self.event_bus.subscribe(EventType.CRITICAL_ERROR, self._on_critical_error)
         self.event_bus.subscribe(EventType.SYMBOLS_ROTATED, self._on_symbols_rotated)
+        self.event_bus.subscribe(EventType.RISK_LIMIT_EXCEEDED, self._on_risk_limit_exceeded)
+        self.event_bus.subscribe(EventType.RISK_LIMIT_CLEARED, self._on_risk_limit_cleared)
 
     async def start(self) -> None:
         self.application = Application.builder().token(self.token).build()
@@ -230,6 +232,26 @@ class TelegramBot:
 [INFO]: {event.data.get('positions_info_message')}
 """
         await self.send_message(text)
+
+    async def _on_risk_limit_exceeded(self, event: Event) -> None:
+        data = event.data
+        cooldown_min = round(data.get('cooldown_seconds', 0) / 60, 1)
+        text = f"""
+⏸ <b>Торгівлю призупинено</b>
+
+{data.get('consecutive_losses')} збиткових угод поспіль (ліміт: {data.get('max_consecutive_losses')}).
+Ліміт загальний на весь акаунт, не по конкретній монеті — останній лузовий символ: {data.get('symbol', 'N/A')}.
+
+Нові позиції не відкриваються ~{cooldown_min} хв, потім бот відновить торгівлю автоматично.
+Вже відкриті позиції продовжують супроводжуватись (SL/TP) — це паузи не стосується.
+"""
+        await self.send_message(text)
+
+    async def _on_risk_limit_cleared(self, event: Event) -> None:
+        await self.send_message(
+            "▶️ <b>Торгівля відновлена</b>\n\n"
+            "Пауза після серії збиткових угод закінчилась, лічильник скинуто — бот знову може відкривати позиції."
+        )
 
     async def _on_stop_loss_moved(self, event: Event) -> None:
         data = event.data

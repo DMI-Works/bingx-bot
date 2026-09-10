@@ -35,6 +35,10 @@ trading:
     max_positions_per_symbol: 1
     max_total_risk_percent: 5.0
     max_consecutive_losses: 3
+    # Скільки чекати після спрацювання ліміту max_consecutive_losses, перш
+    # ніж лічильник збитків скинеться сам і бот знову зможе відкривати нові
+    # позиції (раніше пауза була НАЗАВЖДИ, без цього — не міняй без потреби).
+    consecutive_losses_cooldown_seconds: 60
     cooldown_after_trade_seconds: 60
     # risk-based position sizing (см. ТЗ п.2 "risk_per_trade вместо fixed size")
     # ВЫКЛЮЧЕНО по умолчанию — включи явно (true) после того, как проверишь
