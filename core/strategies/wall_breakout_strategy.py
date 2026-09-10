@@ -44,18 +44,28 @@ class WallBreakoutStrategy(BaseStrategy):
     DEFAULT_PARAMS: Dict[str, object] = {
         'position_size': 100,
         'leverage': 20,
-        'stop_loss_percent': 1,
+        'stop_loss_percent': 20,  
         'cooldown_seconds': 300,
     }
 
     def __init__(self, event_bus: EventBus, config: dict):
         super().__init__("WallBreakoutStrategy", event_bus, config)
 
-        defaults = self.DEFAULT_PARAMS
-        self.position_size: float = defaults['position_size']
-        self.leverage: int = defaults['leverage']
-        self.stop_loss_percent: float = defaults['stop_loss_percent']
-        self.cooldown_seconds: float = defaults['cooldown_seconds']
+        d = self.DEFAULT_PARAMS
+        
+        self.position_size: float = config.get('position_size', d['position_size'])
+        self.leverage: int = config.get('leverage', d['leverage'])
+
+        sl_roi_percent = config.get('stop_loss_percent', d['stop_loss_percent'])
+        self.stop_loss_percent: float = sl_roi_percent  
+        self._stop_loss_price_percent: float = sl_roi_percent / self.leverage
+
+        self.cooldown_seconds: float = config.get('cooldown_seconds', d['cooldown_seconds'])
+
+        logger.info(
+            f"WallBreakoutStrategy risk config: leverage={self.leverage}x, "
+            f"SL={sl_roi_percent}% ROI -> {self._stop_loss_price_percent:.8f}% price"
+        )
 
         # той самий кулдаун-принцип, що й у SMA-стратегії — per symbol,
         # щоб не відкривати кілька угод підряд на серії пробоїв одного й
@@ -81,7 +91,11 @@ class WallBreakoutStrategy(BaseStrategy):
         self.config = new_config
         self.position_size = new_config.get('position_size', self.position_size)
         self.leverage = new_config.get('leverage', self.leverage)
-        self.stop_loss_percent = new_config.get('stop_loss_percent', self.stop_loss_percent)
+
+        sl_roi_percent = new_config.get('stop_loss_percent', self.stop_loss_percent)
+        self.stop_loss_percent = sl_roi_percent
+        self._stop_loss_price_percent = sl_roi_percent / self.leverage
+
         self.cooldown_seconds = new_config.get('cooldown_seconds', self.cooldown_seconds)
 
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
@@ -143,8 +157,8 @@ class WallBreakoutStrategy(BaseStrategy):
         is_long = side == 'LONG'
 
         stop_loss_price = (
-            price * (1 - self.stop_loss_percent / 100) if is_long
-            else price * (1 + self.stop_loss_percent / 100)
+            price * (1 - self._stop_loss_price_percent / 100) if is_long
+            else price * (1 + self._stop_loss_price_percent / 100)
         )
 
         wall_price_str = f"{wall_price:.6f}" if wall_price else "N/A"
