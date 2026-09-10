@@ -197,7 +197,18 @@ async def get_positions(request: Request):
         entry_price = meta.get("entry_price") or (float(live_pos["avgPrice"]) if live_pos else None)
         mark_price = float(live_pos["markPrice"]) if live_pos else None
         pnl_usd = float(live_pos["unrealizedProfit"]) if live_pos else None
-        margin = float(live_pos["isolatedMargin"]) if live_pos else meta.get("margin_usdt")
+       
+        margin = None
+        if live_pos:
+            for key in ("isolatedMargin", "initialMargin", "margin", "positionMargin"):
+                if key in live_pos and live_pos[key] not in (None, ""):
+                    try:
+                        margin = float(live_pos[key])
+                    except (TypeError, ValueError):
+                        continue
+                    break
+        if margin is None:
+            margin = meta.get("margin_usdt")
         pnl_pct = (pnl_usd / margin * 100) if (pnl_usd is not None and margin) else None
 
         result.append({
