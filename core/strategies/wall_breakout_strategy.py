@@ -45,7 +45,7 @@ class WallBreakoutStrategy(BaseStrategy):
         'position_size': 100,
         'leverage': 20,
         'stop_loss_percent': 20,  
-        'cooldown_seconds': 300,
+        'cooldown_seconds': 10,
     }
 
     def __init__(self, event_bus: EventBus, config: dict):
