@@ -65,7 +65,7 @@ class TrailingStopManager:
 
         self.max_buffer_fraction_of_level: float = cfg.get('max_buffer_fraction_of_level', 0.8)
 
-        self.move_retry_cooldown_seconds: float = cfg.get('move_retry_cooldown_seconds', 15.0)
+        self.move_retry_cooldown_seconds: float = 10.0 
 
         self._states: Dict[str, _TrailState] = {}
         self._retry_after: Dict[str, float] = {}

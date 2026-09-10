@@ -122,8 +122,6 @@ trading:
     dynamic_stop_buffer_percent: 0.5
     # буфер не может съедать больше этой доли расстояния до уровня
     max_buffer_fraction_of_level: 0.8
-    # кулдаун между повторными попытками переставить SL после неудачи
-    move_retry_cooldown_seconds: 15.0
 
 # Strategy Configuration — лише перелік, які стратегії запускати.
 # Їхні параметри — в БД.
