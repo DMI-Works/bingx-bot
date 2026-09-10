@@ -173,6 +173,23 @@
   color: var(--text-faint);
 }
 
+/* Day groups — история сделок, сгруппированная по календарным дням */
+.day-group { margin-bottom: 14px; }
+.day-group:last-child { margin-bottom: 0; }
+.day-sep {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0 2px;
+  margin-bottom: 6px;
+}
+.day-sep-label { font-size: 12px; font-weight: 600; color: var(--text-dim); }
+.day-sep-pnl {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .list {
   background: var(--surface);
   border: 1px solid var(--border);

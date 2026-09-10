@@ -4,8 +4,9 @@ import {
 } from "recharts";
 import { TrendingUp, TrendingDown } from "lucide-react";
 import { apiGet } from "../../lib/api";
-import { fmtUsd, fmtPct, fmtDate } from "../../lib/format";
+import { fmtUsd, fmtPct } from "../../lib/format";
 import { Spinner, EmptyRow, PnlTag, SideBadge } from "../common";
+import TradeHistoryList from "./TradeHistoryList";
 
 const PERIODS = ["1D", "1W", "1M", "ALL"];
 
@@ -30,11 +31,19 @@ export default function StatisticsTab() {
     apiGet("/positions")
       .then((data) => !cancelled && setPositions(data))
       .catch((e) => !cancelled && setError(e.message));
-    apiGet("/trades?limit=20")
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setTrades(null);
+    // Пилюли периода (1D/1W/1M/ALL) теперь фильтруют и историю сделок, а
+    // не только график/сводку выше.
+    apiGet(`/trades?limit=50&period=${period}`)
       .then((data) => !cancelled && setTrades(data.trades))
       .catch((e) => !cancelled && setError(e.message));
     return () => { cancelled = true; };
-  }, []);
+  }, [period]);
 
   const chartData = useMemo(
     () => (stats?.equity || []).map((p, i) => ({ i, v: p.v })),
@@ -235,36 +244,13 @@ export default function StatisticsTab() {
         </div>
       )}
 
-      {/* Trade history */}
+      {/* Trade history — сгруппирована по дням, отфильтрована тем же
+          периодом (1D/1W/1M/ALL), что и график/сводка выше */}
       <div className="section">
         <div className="section-head">
           <span className="section-title">История сделок</span>
         </div>
-        <div className="list">
-          {!trades ? (
-            <EmptyRow text="Загрузка..." />
-          ) : trades.length === 0 ? (
-            <EmptyRow text="Нет закрытых сделок" />
-          ) : (
-            trades.map((t) => (
-              <div className="row row-compact" key={t.order_id}>
-                <div className="row-main">
-                  <div className="row-title-line">
-                    <span className="symbol">{t.symbol}</span>
-                    <SideBadge side={t.side} />
-                  </div>
-                  <div className="row-sub">{fmtDate(t.closed_at)}</div>
-                </div>
-                <div className="row-end">
-                  <span className={`row-usd ${t.net_pnl >= 0 ? "text-profit" : "text-loss"}`}>
-                    {fmtUsd(t.net_pnl)}
-                  </span>
-                  {t.roe_percent != null && <PnlTag value={t.net_pnl} pct={t.roe_percent} />}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
+        <TradeHistoryList trades={trades} />
       </div>
     </div>
   );

@@ -65,6 +65,24 @@ def _parse_metadata(row) -> dict:
         return {}
 
 
+PERIOD_TO_DAYS = {"1D": 1, "1W": 7, "1M": 30, "ALL": None}
+
+
+def _period_cutoff(period: str) -> Optional[datetime]:
+    """Единая точка правды для пилюль периода (1D/1W/1M/ALL) — раньше её
+    учитывал только /api/stats, а /api/trades отдавал последние N сделок
+    вообще без учёта периода."""
+    days = PERIOD_TO_DAYS.get(period, 7)
+    return datetime.utcnow() - timedelta(days=days) if days is not None else None
+
+
+def _closed_at_dt(row) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(row["closed_at"]))
+    except (TypeError, ValueError):
+        return None
+
+
 def _closed_row_to_trade(row) -> dict:
     meta = _parse_metadata(row)
     net_pnl = row["net_pnl"] if row["net_pnl"] is not None else row["realized_pnl"]
@@ -98,16 +116,13 @@ def get_stats(request: Request, period: str = Query("1W")):  # noqa: ARG001 — 
     total_trades = summary.get("total_trades") or 0
     winning = summary.get("winning_trades") or 0
 
-    period_to_days = {"1D": 1, "1W": 7, "1M": 30, "ALL": None}
+    period_to_days = PERIOD_TO_DAYS
     days = period_to_days.get(period, 7)
 
     all_closed = db.get_all_closed_positions()  # ORDER BY closed_at DESC
     rows = list(reversed(all_closed))  # хронологически, для накопительной суммы
 
-    if days is not None:
-        cutoff = datetime.utcnow() - timedelta(days=days)
-    else:
-        cutoff = None
+    cutoff = _period_cutoff(period)
 
     equity = []
     running = 0.0
@@ -207,10 +222,24 @@ async def get_positions(request: Request):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/trades")
-def get_trades(request: Request, limit: int = 20, offset: int = 0):
+def get_trades(request: Request, limit: int = 50, offset: int = 0, period: str = Query("ALL")):
     db = _require_deps(request)
-    rows = db.get_closed_positions(limit=limit, offset=offset)
-    total = db.get_closed_positions_count()
+
+    cutoff = _period_cutoff(period)
+    if cutoff is None:
+        # ALL — прежнее поведение, простая пагинация на уровне БД.
+        rows = db.get_closed_positions(limit=limit, offset=offset)
+        total = db.get_closed_positions_count()
+    else:
+        # Пилюли периода (1D/1W/1M) раньше никак не влияли на историю
+        # сделок — только на график/сводку в /api/stats. Фильтруем здесь
+        # так же, как там: берём все закрытые позиции (уже ORDER BY
+        # closed_at DESC) и отсекаем по cutoff в Python, чтобы не трогать
+        # схему БД ради ещё одного индекса/запроса.
+        filtered = [r for r in db.get_all_closed_positions() if (_closed_at_dt(r) or datetime.min) >= cutoff]
+        total = len(filtered)
+        rows = filtered[offset:offset + limit]
+
     return {
         "trades": [_closed_row_to_trade(r) for r in rows],
         "total": total,
