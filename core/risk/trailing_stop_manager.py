@@ -351,6 +351,15 @@ class TrailingStopManager:
             logger.error(f"TrailingStop: unexpected error cancelling SL for {position_key}: {e}", exc_info=True)
             return None
 
+        position['sl_order_id'] = None
+        try:
+            self.db.update_position_metadata(order_id=position['order_id'], metadata=json.dumps(position))
+        except Exception as e:
+            logger.error(
+                f"TrailingStop: failed to persist cleared sl_order_id for {position_key} "
+                f"after cancel: {e}", exc_info=True
+            )
+
         # 2) пробуємо кандидатів по спадній — від найагресивнішого до
         # найближчого до вже застосованого рівня
         rate_limited = False
