@@ -33,6 +33,7 @@ class TelegramBot:
         event_bus: EventBus,
         settings_manager: SettingsManager,
         exchange_client=None,
+        db=None,  
     ):
         self.webapp_url = os.getenv('WEBAPP_URL', '')
         self.token = token
@@ -40,6 +41,7 @@ class TelegramBot:
         self.event_bus = event_bus
         self.settings_manager = settings_manager
         self.exchange_client = exchange_client
+        self.db = db
 
         self.application: Optional[Application] = None
         self.notifications_enabled = True
@@ -105,6 +107,7 @@ class TelegramBot:
         else:
             logger.warning("WEBAPP_URL не задано — кнопка \"Профіль\" прихована")
 
+        keyboard.append([InlineKeyboardButton("💾 Експорт бази", callback_data="export_db")])
         keyboard.append([InlineKeyboardButton("🚨 Аварійна зупинка", callback_data="emergency")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -130,6 +133,8 @@ class TelegramBot:
 
         if query.data == "emergency":
             await self._cmd_emergency(update, context)
+        elif query.data == "export_db":
+            await self._cmd_export_db(update, context)
         elif query.data == "cancel":
             await query.edit_message_text("❌ Скасовано")
         elif query.data == "emergency_stop_only":
@@ -138,6 +143,43 @@ class TelegramBot:
         elif query.data == "emergency_stop_close":
             await self.settings_manager.activate_emergency_stop(close_positions=True)
             await query.edit_message_text("🚨 Аварійна зупинка активована - Закриваємо всі позиції")
+
+    async def _cmd_export_db(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Відправляє поточний файл SQLite-бази як документ у чат — швидкий
+        ручний бекап без доступу до сервера. Було прибрано під час
+        рефакторингу панелі під мініапп, повернено за запитом."""
+        if self.db is None:
+            await self._reply(update, "❌ База даних недоступна цьому боту")
+            return
+
+        db_path = self.db.db_path
+
+        try:
+            if not os.path.exists(db_path):
+                await self._reply(update, "❌ Файл бази даних не знайдено")
+                return
+
+            file_size = os.path.getsize(db_path)
+            max_size = 50 * 1024 * 1024  # ліміт Telegram Bot API — 50 МБ
+
+            if file_size > max_size:
+                await self._reply(
+                    update,
+                    f"❌ Файл завеликий для відправки через Telegram ({file_size / 1024 / 1024:.1f} МБ, ліміт 50 МБ)"
+                )
+                return
+
+            with open(db_path, 'rb') as db_file:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=db_file,
+                    filename=os.path.basename(db_path) or 'trading_bot.db',
+                    caption=f'📦 Резервна копія бази даних ({file_size / 1024:.1f} КБ)'
+                )
+
+        except Exception as e:
+            logger.error(f"Error exporting database: {e}", exc_info=True)
+            await self._reply(update, "❌ Помилка під час експорту бази даних")
 
     # ------------------------------------------------------------------
     # Проактивні алерти — не частина панелі, працюють самі по собі
