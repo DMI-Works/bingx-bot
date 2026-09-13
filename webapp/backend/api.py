@@ -109,15 +109,8 @@ def _closed_row_to_trade(row) -> dict:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/stats")
-def get_stats(request: Request, period: str = Query("1W")):  # noqa: ARG001 — добавьте Depends(require_telegram_user) для прода
+def get_stats(request: Request, period: str = Query("1W")):  
     db = _require_deps(request)
-
-    summary = db.get_stats_summary()
-    total_trades = summary.get("total_trades") or 0
-    winning = summary.get("winning_trades") or 0
-
-    period_to_days = PERIOD_TO_DAYS
-    days = period_to_days.get(period, 7)
 
     all_closed = db.get_all_closed_positions()  # ORDER BY closed_at DESC
     rows = list(reversed(all_closed))  # хронологически, для накопительной суммы
@@ -125,9 +118,14 @@ def get_stats(request: Request, period: str = Query("1W")):  # noqa: ARG001 — 
     cutoff = _period_cutoff(period)
 
     equity = []
-    running = 0.0
+    running = 0.0  
     symbol_pnl: dict = defaultdict(float)
     strategy_counts: dict = defaultdict(lambda: [0, 0])  # name -> [win, loss]
+
+    total_trades = 0
+    winning = 0
+    total_net_pnl = 0.0
+    total_commission_usdt = 0.0
 
     for row in rows:
         net = row["net_pnl"] if row["net_pnl"] is not None else (row["realized_pnl"] or 0.0)
@@ -139,14 +137,23 @@ def get_stats(request: Request, period: str = Query("1W")):  # noqa: ARG001 — 
         except (TypeError, ValueError):
             closed_at = None
 
-        meta = _parse_metadata(row)
-        strategy_name = meta.get("strategy") or "Невідомо"
-        counts = strategy_counts[strategy_name]
-        counts[0 if net >= 0 else 1] += 1
-        symbol_pnl[row["symbol"]] += net
+        in_period = cutoff is None or (closed_at and closed_at >= cutoff)
 
-        if cutoff is None or (closed_at and closed_at >= cutoff):
+        if in_period:
             equity.append({"t": str(closed_at_raw), "v": round(running, 2)})
+
+            meta = _parse_metadata(row)
+            strategy_name = meta.get("strategy") or "Невідомо"
+            counts = strategy_counts[strategy_name]
+            counts[0 if net >= 0 else 1] += 1
+            symbol_pnl[row["symbol"]] += net
+
+            total_trades += 1
+            if net > 0:
+                winning += 1
+            total_net_pnl += net
+            commission = row["commission_usdt"] or 0.0
+            total_commission_usdt += commission
 
     win_rate = round((winning / total_trades) * 100, 1) if total_trades else 0.0
 
@@ -155,8 +162,8 @@ def get_stats(request: Request, period: str = Query("1W")):  # noqa: ARG001 — 
         "cumulative_pnl": round(running, 2),
         "win_rate": win_rate,
         "total_trades": total_trades,
-        "total_net_pnl": round(summary.get("total_net_pnl") or 0.0, 2),
-        "total_commission_usdt": round(summary.get("total_commission_usdt") or 0.0, 2),
+        "total_net_pnl": round(total_net_pnl, 2),
+        "total_commission_usdt": round(total_commission_usdt, 2),
         "symbol_pnl": [{"symbol": s, "pnl": round(v, 2)} for s, v in sorted(symbol_pnl.items(), key=lambda kv: abs(kv[1]), reverse=True)],
         "strategy_stats": [{"strategy": name, "win": w, "loss": l} for name, (w, l) in strategy_counts.items()],
     }
