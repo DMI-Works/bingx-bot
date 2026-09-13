@@ -51,8 +51,6 @@ class StrategySettingsStore:
             )
         """)
 
-        # для баз, створених до появи enabled — додаємо колонку окремо.
-        # SQLite впаде на повторному ALTER, якщо колонка вже є — це нормально.
         try:
             self.db.execute(
                 "ALTER TABLE strategy_settings ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
