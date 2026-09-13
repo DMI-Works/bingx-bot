@@ -60,6 +60,15 @@ class SettingsManager:
     async def set_trading_enabled(self, enabled: bool) -> None:
         await self.set('trading.enabled', enabled)
 
+    def get_testnet_override(self) -> Optional[bool]:
+        """None = оверрайд не встановлений, використовуємо значення з
+        config.yaml як і раніше. True/False = явний вибір користувача через
+        мініапп, має пріоритет над config.yaml до наступної зміни."""
+        return self.get('exchange.testnet_override', None)
+
+    async def set_testnet_override(self, testnet: bool) -> None:
+        await self.set('exchange.testnet_override', testnet)
+
     def get_max_open_positions(self) -> int:
         return self.get('risk.max_open_positions', 3)
 

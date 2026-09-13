@@ -79,7 +79,7 @@ def _period_cutoff(period: str) -> Optional[datetime]:
 def _closed_at_dt(row) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(str(row["closed_at"]))
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError):
         return None
 
 
@@ -134,7 +134,7 @@ def get_stats(request: Request, period: str = Query("1W")):
         closed_at_raw = row["closed_at"]
         try:
             closed_at = datetime.fromisoformat(str(closed_at_raw))
-        except (TypeError, ValueError, IndexError):
+        except (TypeError, ValueError):
             closed_at = None
 
         in_period = cutoff is None or (closed_at and closed_at >= cutoff)
@@ -363,9 +363,70 @@ def get_settings(request: Request):  # noqa: ARG001 — добавьте Depends
 
     strategies = [_serialize_strategy(entry, store) for entry in store.list_strategies()]
 
+    exchange = request.app.state.exchange_client
+    live_testnet = bool(getattr(exchange, "testnet", True)) if exchange else None
+    pending_testnet = settings_manager.get_testnet_override()
+
     return {
         "trading_enabled": settings_manager.get_trading_enabled(),
         "strategies": strategies,
+        # exchange_testnet — реальний режим ЦЬОГО процесу, що зараз працює.
+        # pending_exchange_testnet — те, що збережено в БД через мініапп, але
+        # ще не набуло чинності (застосовується лише після рестарту процесу,
+        # бо REST/WS-клієнт біржі створюється один раз при старті). Якщо
+        # вони відрізняються — фронт має показати "потрібен рестарт".
+        "exchange_testnet": live_testnet,
+        "pending_exchange_testnet": pending_testnet,
+    }
+
+
+@app.post("/api/settings/exchange-mode")
+async def set_exchange_mode(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(require_telegram_user),
+):
+    """Перемикає testnet/live. НЕ підмінює живий exchange-клієнт на льоту —
+    REST base URL і WS з'єднання того, що вже працює (відкриті позиції,
+    підписки), прив'язані до testnet на момент створення в main.py. Тому
+    тут лише зберігаємо вибір у БД (набуде чинності після рестарту процесу)
+    і жорстко перевіряємо дві речі:
+      1) явне підтвердження в payload (щоб UI не міг випадково смикнути
+         реальні кошти без окремого діалогу підтвердження);
+      2) відсутність відкритих позицій (позиції testnet і live — це різні
+         акаунти на біржі, вони НЕ переносяться між режимами; перемикання
+         з відкритими позиціями залишило б їх без нагляду бота)."""
+    db = _require_deps(request)
+    settings_manager = _require_settings_manager(request)
+
+    testnet = payload.get("testnet")
+    if not isinstance(testnet, bool):
+        raise HTTPException(status_code=422, detail="'testnet' must be a boolean")
+
+    if not payload.get("confirm"):
+        raise HTTPException(status_code=422, detail="Explicit 'confirm: true' is required to switch exchange mode")
+
+    active_positions = db.get_active_positions()
+    if active_positions:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Не можна перемкнути режим: є {len(active_positions)} відкритих позицій. "
+                f"Закрийте їх (вручну або через Аварійну зупинку), потім спробуйте знову."
+            ),
+        )
+
+    await settings_manager.set_testnet_override(testnet)
+    logger.info(f"Exchange mode override set to {'TESTNET' if testnet else 'LIVE'} via mini app (user={user})")
+
+    exchange = request.app.state.exchange_client
+    live_testnet = bool(getattr(exchange, "testnet", True)) if exchange else None
+    restart_required = live_testnet is None or live_testnet != testnet
+
+    return {
+        "pending_exchange_testnet": testnet,
+        "exchange_testnet": live_testnet,
+        "restart_required": restart_required,
     }
 
 
