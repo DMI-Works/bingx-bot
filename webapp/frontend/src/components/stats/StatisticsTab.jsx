@@ -15,7 +15,11 @@ export default function StatisticsTab() {
   const [stats, setStats] = useState(null);
   const [positions, setPositions] = useState(null);
   const [trades, setTrades] = useState(null);
+  const [tradesTotal, setTradesTotal] = useState(0);
+  const [tradesLoadingMore, setTradesLoadingMore] = useState(false);
   const [error, setError] = useState(null);
+
+  const TRADES_PAGE_SIZE = 50;
 
   useEffect(() => {
     let cancelled = false;
@@ -37,13 +41,33 @@ export default function StatisticsTab() {
   useEffect(() => {
     let cancelled = false;
     setTrades(null);
-    // Пилюли периода (1D/1W/1M/ALL) теперь фильтруют и историю сделок, а
-    // не только график/сводку выше.
-    apiGet(`/trades?limit=50&period=${period}`)
-      .then((data) => !cancelled && setTrades(data.trades))
+    setTradesTotal(0);
+   
+    apiGet(`/trades?limit=${TRADES_PAGE_SIZE}&offset=0&period=${period}`)
+      .then((data) => {
+        if (cancelled) return;
+        setTrades(data.trades);
+        setTradesTotal(data.total ?? data.trades.length);
+      })
       .catch((e) => !cancelled && setError(e.message));
     return () => { cancelled = true; };
   }, [period]);
+
+  const loadMoreTrades = () => {
+    if (tradesLoadingMore || !trades) return;
+    setTradesLoadingMore(true);
+    const nextOffset = trades.length;
+    apiGet(`/trades?limit=${TRADES_PAGE_SIZE}&offset=${nextOffset}&period=${period}`)
+      .then((data) => {
+        setTrades((prev) => [...(prev || []), ...data.trades]);
+        setTradesTotal(data.total ?? nextOffset + data.trades.length);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setTradesLoadingMore(false));
+  };
+
+  const hasMoreTrades = !!trades && trades.length < tradesTotal;
+
 
   const chartData = useMemo(
     () => (stats?.equity || []).map((p, i) => ({ i, v: p.v })),
@@ -249,8 +273,14 @@ export default function StatisticsTab() {
       <div className="section">
         <div className="section-head">
           <span className="section-title">История сделок</span>
+          {tradesTotal > 0 && <span className="section-count">{trades?.length ?? 0} / {tradesTotal}</span>}
         </div>
         <TradeHistoryList trades={trades} />
+        {hasMoreTrades && (
+          <button className="load-more-btn" onClick={loadMoreTrades} disabled={tradesLoadingMore}>
+            {tradesLoadingMore ? "Загрузка..." : "Показать ещё"}
+          </button>
+        )}
       </div>
     </div>
   );

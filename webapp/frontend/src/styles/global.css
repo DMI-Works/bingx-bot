@@ -73,6 +73,21 @@
   background: var(--surface-2);
   color: var(--text);
 }
+.load-more-btn {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  cursor: pointer;
+}
+.load-more-btn:disabled { opacity: 0.6; cursor: default; }
 .hero-figure {
   font-family: 'JetBrains Mono', monospace;
   font-size: 34px;

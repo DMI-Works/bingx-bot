@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+import threading
 from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
@@ -13,6 +14,7 @@ class Database:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()
         self._init_database()
 
     def _init_database(self) -> None:
@@ -108,20 +110,23 @@ class Database:
         self.conn.commit()
 
     def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
-        cursor = self.conn.cursor()
-        cursor.execute(query, params)
-        self.conn.commit()
-        return cursor
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(query, params)
+            self.conn.commit()
+            return cursor
 
     def fetch_one(self, query: str, params: tuple = ()) -> Optional[sqlite3.Row]:
-        cursor = self.conn.cursor()
-        cursor.execute(query, params)
-        return cursor.fetchone()
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(query, params)
+            return cursor.fetchone()
 
     def fetch_all(self, query: str, params: tuple = ()) -> List[sqlite3.Row]:
-        cursor = self.conn.cursor()
-        cursor.execute(query, params)
-        return cursor.fetchall()
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(query, params)
+            return cursor.fetchall()
 
     def insert_balance(self, asset: str, free: float, locked: float) -> None:
         self.execute("""

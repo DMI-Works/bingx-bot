@@ -79,7 +79,7 @@ def _period_cutoff(period: str) -> Optional[datetime]:
 def _closed_at_dt(row) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(str(row["closed_at"]))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, IndexError):
         return None
 
 
@@ -134,7 +134,7 @@ def get_stats(request: Request, period: str = Query("1W")):
         closed_at_raw = row["closed_at"]
         try:
             closed_at = datetime.fromisoformat(str(closed_at_raw))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, IndexError):
             closed_at = None
 
         in_period = cutoff is None or (closed_at and closed_at >= cutoff)
