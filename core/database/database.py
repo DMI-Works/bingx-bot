@@ -247,6 +247,17 @@ class Database:
             return {}
         return dict(row)
 
+    def get_last_position_time_by_symbol(self) -> dict:
+        """Для кожного символу — час останньої угоди (відкриття), OPEN або
+        CLOSED, незалежно від статусу. Використовується мініаппом, щоб
+        показати "остання торгівля" по монеті на вкладці символів."""
+        rows = self.fetch_all("""
+            SELECT symbol, MAX(created_at) as last_at
+            FROM positions
+            GROUP BY symbol
+        """)
+        return {row["symbol"]: row["last_at"] for row in rows}
+
     def get_setting(self, key: str) -> Optional[str]:
         row = self.fetch_one("SELECT value FROM settings WHERE key = ?", (key,))
         return row["value"] if row else None

@@ -131,7 +131,13 @@ async def main():
     # не чіпати символи, які зараз "живі" (давали сигнал за останню годину),
     # і, навпаки, вважати "тихі" непридбані символи кандидатами на заміну.
     signal_activity_tracker = SignalActivityTracker(event_bus)
-    symbol_selector = SymbolSelector(exchange, filters_config, signal_tracker=signal_activity_tracker, event_bus=event_bus)
+    symbol_selector = SymbolSelector(
+        exchange,
+        filters_config,
+        signal_tracker=signal_activity_tracker,
+        event_bus=event_bus,
+        settings_manager=settings_manager,
+    )
     logger.info("[OK] Symbol Selector initialized (signal-activity-aware rotation, notifies Telegram)")
 
     orderbook_config = config.get('trading.orderbook', {})
@@ -201,6 +207,8 @@ async def main():
         webapp_app.state.settings_manager = settings_manager
         webapp_app.state.strategy_settings = strategy_settings
         webapp_app.state.strategy_manager = strategy_manager
+        webapp_app.state.symbol_selector = symbol_selector
+        webapp_app.state.signal_tracker = signal_activity_tracker
 
         port = int(os.getenv('PORT', config.get('webapp.port', 8000)))
         uvicorn_config = uvicorn.Config(

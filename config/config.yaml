@@ -5,7 +5,7 @@ exchange:
   name: "bingx"
   api_key: "${BINGX_API_KEY}"
   api_secret: "${BINGX_API_SECRET}"
-  testnet: false
+  testnet: true
 
   websocket:
     enabled: true

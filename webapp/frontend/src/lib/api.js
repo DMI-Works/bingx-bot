@@ -32,3 +32,18 @@ export async function apiPost(path, body) {
   }
   return res.json();
 }
+
+export async function apiDelete(path) {
+  const res = await fetch(`/api${path}`, {
+    method: "DELETE",
+    headers: {
+      "X-Telegram-Init-Data": tg?.initData || "",
+    },
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch { /* noop */ }
+    throw new Error(detail || `API ${path} -> ${res.status}`);
+  }
+  return res.json();
+}

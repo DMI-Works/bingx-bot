@@ -35,11 +35,13 @@ app.state.exchange_client = None
 app.state.settings_manager = None
 app.state.strategy_settings = None
 app.state.strategy_manager = None
+app.state.symbol_selector = None
+app.state.signal_tracker = None
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -457,6 +459,121 @@ async def reset_strategy_params(
 
     entries = {e["strategy_name"]: e for e in store.list_strategies()}
     return _serialize_strategy(entries[name], store)
+
+
+# ---------------------------------------------------------------------------
+# /api/symbols — монеты, на которые бот сейчас подписан (WS @trade/@depth20),
+# + управление чёрным списком (хранится в БД через SettingsManager, поверх
+# blacklist_symbols из config.yaml — см. SymbolSelector.select()).
+# ---------------------------------------------------------------------------
+
+@app.get("/api/symbols")
+async def get_symbols(request: Request):
+    exchange = request.app.state.exchange_client
+    settings_manager = request.app.state.settings_manager
+    signal_tracker = request.app.state.signal_tracker
+    db = _require_deps(request)
+
+    if exchange is None:
+        raise HTTPException(status_code=503, detail="Exchange client not ready")
+
+    subscribed = sorted(getattr(exchange, "subscribed_symbols", set()) or set())
+    blacklist = set(settings_manager.get_blacklist_symbols()) if settings_manager else set()
+
+    # held (открытые позиции) — чтобы во фронте можно было объяснить, почему
+    # монета осталась в списке, даже если добавлена в ЧС (позиция всё ещё
+    # сопровождается, см. SymbolSelector._get_held_symbols)
+    held_symbols = set()
+    try:
+        live_positions = await exchange.get_positions()
+        held_symbols = {
+            p.get("symbol") for p in live_positions
+            if float(p.get("positionAmt", 0)) != 0
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch live positions for /api/symbols: {e}", exc_info=True)
+
+    last_traded_by_symbol = db.get_last_position_time_by_symbol()
+
+    # чёрный список может содержать символы, на которые бот уже не подписан
+    # (их уже отписали) — показываем их тоже, отдельным списком
+    all_symbols = sorted(set(subscribed) | blacklist)
+
+    result = []
+    for symbol in all_symbols:
+        last_signal_at = None
+        if signal_tracker is not None:
+            ts = signal_tracker.last_signal_at(symbol)
+            last_signal_at = ts.isoformat() if ts else None
+
+        result.append({
+            "symbol": symbol,
+            "subscribed": symbol in subscribed,
+            "blacklisted": symbol in blacklist,
+            "held": symbol in held_symbols,
+            "last_signal_at": last_signal_at,
+            "last_traded_at": last_traded_by_symbol.get(symbol),
+        })
+
+    return {"symbols": result}
+
+
+def _require_symbol_selector(request: Request):
+    symbol_selector = request.app.state.symbol_selector
+    if symbol_selector is None:
+        raise HTTPException(status_code=503, detail="Symbol selector not ready yet")
+    return symbol_selector
+
+
+@app.post("/api/symbols/blacklist")
+async def add_symbol_to_blacklist(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(require_telegram_user),
+):
+    settings_manager = _require_settings_manager(request)
+    symbol_selector = _require_symbol_selector(request)
+
+    symbol = payload.get("symbol")
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise HTTPException(status_code=422, detail="'symbol' is required")
+    symbol = symbol.strip().upper()
+
+    await settings_manager.add_blacklist_symbol(symbol)
+    logger.info(f"Symbol '{symbol}' added to blacklist via mini app (user={user})")
+
+    # применяем сразу — отпишет символ от WS в течение этого вызова, если
+    # он не держит открытую позицию (см. SymbolSelector._get_held_symbols)
+    try:
+        await symbol_selector.apply()
+    except Exception as e:
+        logger.error(f"Failed to re-apply symbol selection after blacklist add: {e}", exc_info=True)
+
+    return {"blacklist": settings_manager.get_blacklist_symbols()}
+
+
+@app.delete("/api/symbols/blacklist/{symbol}")
+async def remove_symbol_from_blacklist(
+    symbol: str,
+    request: Request,
+    user: dict = Depends(require_telegram_user),
+):
+    settings_manager = _require_settings_manager(request)
+    symbol_selector = _require_symbol_selector(request)
+
+    symbol = symbol.strip().upper()
+    await settings_manager.remove_blacklist_symbol(symbol)
+    logger.info(f"Symbol '{symbol}' removed from blacklist via mini app (user={user})")
+
+    # применяем сразу — символ снова становится кандидатом при следующем
+    # select() (попадёт в подписку, только если реально пройдёт фильтры
+    # объёма/спреда, а не мгновенно принудительно)
+    try:
+        await symbol_selector.apply()
+    except Exception as e:
+        logger.error(f"Failed to re-apply symbol selection after blacklist remove: {e}", exc_info=True)
+
+    return {"blacklist": settings_manager.get_blacklist_symbols()}
 
 
 # ---------------------------------------------------------------------------
