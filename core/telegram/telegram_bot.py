@@ -278,21 +278,24 @@ class TelegramBot:
     async def _on_risk_limit_exceeded(self, event: Event) -> None:
         data = event.data
         cooldown_min = round(data.get('cooldown_seconds', 0) / 60, 1)
+        symbol = data.get('symbol', 'N/A')
         text = f"""
-⏸ <b>Торгівлю призупинено</b>
+⏸ <b>Торгівлю по {symbol} призупинено</b>
 
-{data.get('consecutive_losses')} збиткових угод поспіль (ліміт: {data.get('max_consecutive_losses')}).
-Ліміт загальний на весь акаунт, не по конкретній монеті — останній лузовий символ: {data.get('symbol', 'N/A')}.
+{data.get('consecutive_losses')} збиткових угод поспіль по {symbol} (ліміт: {data.get('max_consecutive_losses')}).
+Пауза стосується лише цієї монети — по інших символах бот торгує як звичайно.
 
-Нові позиції не відкриваються ~{cooldown_min} хв, потім бот відновить торгівлю автоматично.
-Вже відкриті позиції продовжують супроводжуватись (SL/TP) — це паузи не стосується.
+Нові позиції по {symbol} не відкриваються ~{cooldown_min} хв, потім бот відновить торгівлю по ній автоматично.
+Вже відкриті позиції продовжують супроводжуватись (SL/TP) — цієї паузи не стосується.
 """
         await self.send_message(text)
 
     async def _on_risk_limit_cleared(self, event: Event) -> None:
+        symbol = event.data.get('symbol', 'N/A')
         await self.send_message(
-            "▶️ <b>Торгівля відновлена</b>\n\n"
-            "Пауза після серії збиткових угод закінчилась, лічильник скинуто — бот знову може відкривати позиції."
+            f"▶️ <b>Торгівля по {symbol} відновлена</b>\n\n"
+            f"Пауза після серії збиткових угод по {symbol} закінчилась, лічильник скинуто — "
+            f"бот знову може відкривати позиції по цій монеті."
         )
 
     async def _on_stop_loss_moved(self, event: Event) -> None:

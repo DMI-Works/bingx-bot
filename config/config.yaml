@@ -39,7 +39,7 @@ trading:
     # ніж лічильник збитків скинеться сам і бот знову зможе відкривати нові
     # позиції (раніше пауза була НАЗАВЖДИ, без цього — не міняй без потреби).
     consecutive_losses_cooldown_seconds: 60
-    cooldown_after_trade_seconds: 60
+    cooldown_after_trade_seconds: 1800
     # risk-based position sizing (см. ТЗ п.2 "risk_per_trade вместо fixed size")
     # ВЫКЛЮЧЕНО по умолчанию — включи явно (true) после того, как проверишь
     # risk_per_trade_percent на testnet: он заменит position_size стратегий
