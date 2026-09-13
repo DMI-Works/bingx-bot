@@ -73,23 +73,11 @@ async def main():
 
     api_key = os.getenv('BINGX_API_KEY')
     api_secret = os.getenv('BINGX_API_SECRET')
+    testnet = config.get('exchange.testnet', True)
 
     if not api_key or not api_secret:
         logger.error("BingX API credentials not found in environment variables")
         return
-
-    settings_manager = SettingsManager(db, event_bus)
-    logger.info("[OK] Settings Manager initialized")
-
-    # Режим testnet/live: якщо користувач колись перемкнув режим через
-    # мініапп — цей вибір (збережений у БД) має пріоритет над config.yaml.
-    # Якщо оверрайду ще не було — поведінка як і раніше, беремо з конфігу.
-    testnet_override = settings_manager.get_testnet_override()
-    testnet = testnet_override if testnet_override is not None else config.get('exchange.testnet', True)
-    if testnet_override is not None:
-        logger.info(f"[OK] Exchange mode: {'TESTNET' if testnet else 'LIVE'} (overridden via mini app)")
-    else:
-        logger.info(f"[OK] Exchange mode: {'TESTNET' if testnet else 'LIVE'} (from config.yaml)")
 
     exchange = BingXClient(
         api_key=api_key,
@@ -98,6 +86,9 @@ async def main():
         event_bus=event_bus
     )
     logger.info("[OK] Exchange client initialized")
+
+    settings_manager = SettingsManager(db, event_bus)
+    logger.info("[OK] Settings Manager initialized")
 
     # Раньше глобальный тумблер торговли (trading.enabled) нигде не
     # проверялся перед исполнением сигналов — по факту бот всегда торговал,
