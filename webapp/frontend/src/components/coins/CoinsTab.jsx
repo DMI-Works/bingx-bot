@@ -68,7 +68,9 @@ export default function CoinsTab() {
     }
   };
 
-  const subscribedCount = symbols?.filter((s) => s.subscribed).length ?? 0;
+  const subscribedCount = symbols?.filter((s) => !s.blacklisted).length ?? 0;
+  const activeSymbols = symbols?.filter((s) => !s.blacklisted) ?? [];
+  const blacklistedSymbols = symbols?.filter((s) => s.blacklisted) ?? [];
 
   return (
     <div className="tab-pane">
@@ -84,13 +86,13 @@ export default function CoinsTab() {
           <div className="hero-loading"><Spinner /></div>
         )}
 
-        {symbols && !symbols.length && (
+        {symbols && !activeSymbols.length && (
           <div className="list"><EmptyRow text="Бот пока ни на одну монету не подписан" /></div>
         )}
 
-        {symbols && symbols.length > 0 && (
+        {activeSymbols.length > 0 && (
           <div className="list">
-            {symbols.map((s) => (
+            {activeSymbols.map((s) => (
               <div className="row" key={s.symbol}>
                 <div className="row-icon">
                   <Radio size={17} />
@@ -98,9 +100,7 @@ export default function CoinsTab() {
                 <div className="row-main">
                   <div className="row-title-line">
                     <span className="symbol">{s.symbol}</span>
-                    {s.blacklisted && <span className="tag tag-danger">чёрный список</span>}
                     {s.held && <span className="tag tag-info">в позиции</span>}
-                    {!s.subscribed && !s.blacklisted && <span className="tag">не подписан</span>}
                   </div>
                   <div className="row-sub">
                     Сигнал: {s.last_signal_at ? fmtDate(s.last_signal_at) : "—"}
@@ -108,25 +108,14 @@ export default function CoinsTab() {
                     Сделка: {s.last_traded_at ? fmtDate(s.last_traded_at) : "—"}
                   </div>
                 </div>
-                {s.blacklisted ? (
-                  <button
-                    className="icon-btn"
-                    disabled={busySymbol === s.symbol}
-                    onClick={() => unblacklistSymbol(s.symbol)}
-                    title="Убрать из чёрного списка"
-                  >
-                    <RotateCcw size={15} />
-                  </button>
-                ) : (
-                  <button
-                    className="icon-btn icon-btn-danger"
-                    disabled={busySymbol === s.symbol}
-                    onClick={() => blacklistSymbol(s.symbol)}
-                    title="Добавить в чёрный список"
-                  >
-                    <Ban size={15} />
-                  </button>
-                )}
+                <button
+                  className="icon-btn icon-btn-danger"
+                  disabled={busySymbol === s.symbol}
+                  onClick={() => blacklistSymbol(s.symbol)}
+                  title="Добавить в чёрный список"
+                >
+                  <Ban size={15} />
+                </button>
               </div>
             ))}
           </div>
@@ -155,6 +144,37 @@ export default function CoinsTab() {
           Монета не будет выбираться ботом при ротации, даже если сейчас на неё не подписаны.
           Уже открытые позиции при этом продолжают сопровождаться как обычно.
         </div>
+
+        {blacklistedSymbols.length > 0 && (
+          <div className="list" style={{ marginTop: 10 }}>
+            {blacklistedSymbols.map((s) => (
+              <div className="row" key={s.symbol}>
+                <div className="row-icon">
+                  <Ban size={17} />
+                </div>
+                <div className="row-main">
+                  <div className="row-title-line">
+                    <span className="symbol">{s.symbol}</span>
+                    {s.held && <span className="tag tag-info">в позиции</span>}
+                  </div>
+                  <div className="row-sub">
+                    Сигнал: {s.last_signal_at ? fmtDate(s.last_signal_at) : "—"}
+                    {"  ·  "}
+                    Сделка: {s.last_traded_at ? fmtDate(s.last_traded_at) : "—"}
+                  </div>
+                </div>
+                <button
+                  className="icon-btn"
+                  disabled={busySymbol === s.symbol}
+                  onClick={() => unblacklistSymbol(s.symbol)}
+                  title="Убрать из чёрного списка"
+                >
+                  <RotateCcw size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
