@@ -7,6 +7,10 @@ python-telegram-bot>=21.0
 Pillow>=11.0.0
 qrcode>=8.0.0
 
+# Database (MongoDB Atlas, mongodb+srv:// requires the [srv] extra)
+pymongo[srv]>=4.9,<5
+certifi>=2024.2.2
+
 # Optional for enhanced features
 # numpy>=1.24.0  # For advanced calculations
 # pandas>=2.0.0  # For data analysis

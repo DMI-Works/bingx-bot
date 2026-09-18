@@ -64,7 +64,7 @@ async def main():
     logger.info("Starting Ruflo Trading Bot")
     logger.info("=" * 60)
 
-    db = Database(config.get('database.path'))
+    db = Database()
     logger.info("[OK] Database initialized")
 
     event_bus = EventBus()

@@ -128,11 +128,6 @@ trading:
 # strategies:
 #   enabled: ['SimpleMovingAverageStrategy', 'RejectionBlockStrategy']
 
-# Database Configuration
-database:
-  path: "data/trading_bot.db"
-  backup_interval_hours: 6
-
 # Logging Configuration
 logging:
   level: "INFO"
