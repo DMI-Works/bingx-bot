@@ -7,13 +7,29 @@ from typing import Any, Dict, List, Optional
 import certifi
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.database import Database as MongoDatabase
+from config import ConfigLoader
 
 
 logger = logging.getLogger(__name__)
 
 
+def _load_testnet_flag() -> bool:
+    try:
+        return bool(ConfigLoader().get('exchange.testnet', True))
+    except Exception as e:
+        logger.warning(
+            f"Не вдалось прочитати exchange.testnet через ConfigLoader ({e}) — "
+            f"вважаю testnet=True для вибору назви БД"
+        )
+        return True
+
+IS_TESTNET = _load_testnet_flag()
+
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME") or "trading_bot"
+
+_base_db_name = os.getenv("MONGO_DB_NAME") or "trading_bot"
+
+MONGO_DB_NAME = f"{_base_db_name}_testnet" if IS_TESTNET else _base_db_name
 
 if not MONGO_URI:
     raise RuntimeError(
@@ -36,13 +52,11 @@ class Database:
         self.client = MongoClient(self.uri, tlsCAFile=certifi.where())
         self.db = self.client[self.db_name]
         self._create_indexes()
-        logger.info(f"Database initialized: db={self.db_name}")
+        logger.info(f"Database initialized: db={self.db_name} (testnet={IS_TESTNET})")
 
     def _create_indexes(self) -> None:
         self.db.balance.create_index([("asset", ASCENDING), ("timestamp", DESCENDING)])
 
-        # order_id унікальний, але sparse — щоб не заважати документам,
-        # де його немає (на випадок ручних записів без order_id).
         self.db.positions.create_index("order_id", unique=True, sparse=True)
         self.db.positions.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
         self.db.positions.create_index([("status", ASCENDING), ("closed_at", DESCENDING)])
