@@ -15,11 +15,16 @@ class SymbolSelector:
         filters: Dict[str, Any],
         signal_tracker=None,
         event_bus: Optional[EventBus] = None,
+        settings_manager=None,
     ):
         self.exchange = exchange
         self.filters = filters
         self.signal_tracker = signal_tracker  # SignalActivityTracker | None
         self.event_bus = event_bus  # якщо задано — шле SYMBOLS_ROTATED в ТГ при кожній заміні
+        # SettingsManager | None — якщо задано, чорний список з мініаппу
+        # (зберігається в БД, керується користувачем в реальному часі)
+        # об'єднується з blacklist_symbols із config.yaml при кожному select().
+        self.settings_manager = settings_manager
         self._refresh_task: Optional[asyncio.Task] = None
         self.current_symbols: Set[str] = set()
 
@@ -41,6 +46,11 @@ class SymbolSelector:
         лише за об'ємом, без урахування активності сигналів.
         """
         blacklist = set(self.filters.get('blacklist_symbols', []))
+        if self.settings_manager is not None:
+            # чорний список з мініаппу — доповнює (не замінює) статичний
+            # з config.yaml, щоб користувач міг додавати монети "на льоту",
+            # не чіпаючи файл конфігурації
+            blacklist |= set(self.settings_manager.get_blacklist_symbols())
         whitelist = set(self.filters.get('whitelist_symbols', []))
         min_volume_24h = self.filters.get('min_volume_24h', 0)
         max_spread_percent = self.filters.get('max_spread_percent', None)

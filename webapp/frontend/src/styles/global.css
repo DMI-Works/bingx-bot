@@ -330,6 +330,36 @@
   border-color: rgba(241,73,91,0.3);
 }
 
+/* Small round icon button (row actions, e.g. blacklist/restore a coin) */
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.icon-btn:disabled { opacity: 0.5; cursor: default; }
+.icon-btn-danger { color: var(--loss); border-color: rgba(241,73,91,0.3); background: rgba(241,73,91,0.1); }
+
+/* Small inline status tag next to a symbol/title */
+.tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.tag-danger { color: var(--loss); background: rgba(241,73,91,0.12); border-color: rgba(241,73,91,0.3); }
+.tag-info { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+
 /* Toggle switch */
 .switch {
   width: 38px;

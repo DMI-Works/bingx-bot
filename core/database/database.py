@@ -1,149 +1,123 @@
-import sqlite3
 import logging
+import os
 import threading
-from pathlib import Path
-from typing import Optional, List
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import certifi
+from pymongo import ASCENDING, DESCENDING, MongoClient
+from pymongo.database import Database as MongoDatabase
+from config import ConfigLoader
 
 
 logger = logging.getLogger(__name__)
 
 
+def _load_testnet_flag() -> bool:
+    try:
+        return bool(ConfigLoader().get('exchange.testnet', True))
+    except Exception as e:
+        logger.warning(
+            f"Не вдалось прочитати exchange.testnet через ConfigLoader ({e}) — "
+            f"вважаю testnet=True для вибору назви БД"
+        )
+        return True
+
+IS_TESTNET = _load_testnet_flag()
+
+MONGO_URI = os.getenv("MONGO_URI")
+
+_base_db_name = os.getenv("MONGO_DB_NAME") or "trading_bot"
+
+MONGO_DB_NAME = f"{_base_db_name}_testnet" if IS_TESTNET else _base_db_name
+
+if not MONGO_URI:
+    raise RuntimeError(
+        "MONGO_URI не задано. Додай у .env рядок:\n"
+        "MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?appName=<app>"
+    )
+
+
 class Database:
-    def __init__(self, db_path: str = "data/trading_bot.db"):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn: Optional[sqlite3.Connection] = None
+    def __init__(self):
+        self.uri = MONGO_URI
+        self.db_name = MONGO_DB_NAME
+        self.client: Optional[MongoClient] = None
+        self.db: Optional[MongoDatabase] = None
+
         self._lock = threading.Lock()
         self._init_database()
 
     def _init_database(self) -> None:
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self._create_tables()
-        self._migrate_positions_table()
-        logger.info(f"Database initialized: {self.db_path}")
+        self.client = MongoClient(self.uri, tlsCAFile=certifi.where())
+        self.db = self.client[self.db_name]
+        self._create_indexes()
+        logger.info(f"Database initialized: db={self.db_name} (testnet={IS_TESTNET})")
 
-    def _create_tables(self) -> None:
-        cursor = self.conn.cursor()
+    def _create_indexes(self) -> None:
+        self.db.balance.create_index([("asset", ASCENDING), ("timestamp", DESCENDING)])
 
-        # Balance table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS balance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                asset TEXT NOT NULL,
-                free REAL NOT NULL,
-                locked REAL NOT NULL,
-                total REAL NOT NULL,
-                timestamp TIMESTAMP NOT NULL
-            )
-        """)
+        self.db.positions.create_index("order_id", unique=True, sparse=True)
+        self.db.positions.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
+        self.db.positions.create_index([("status", ASCENDING), ("closed_at", DESCENDING)])
+        self.db.positions.create_index([("symbol", ASCENDING), ("side", ASCENDING), ("status", ASCENDING)])
 
-        # Active positions table - мінімальні дані для tracking.
-        # close_price/realized_pnl/roe_percent/margin_usdt/commission_usdt/net_pnl —
-        # окремі колонки (не metadata JSON), щоб звіти/статистика/повідомлення
-        # могли надійно читати їх напряму, а не залежати від того, чи хтось
-        # коректно записав ці значення в JSON.
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS positions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_id TEXT UNIQUE,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TIMESTAMP NOT NULL,
-                closed_at TIMESTAMP,
-                close_price REAL,
-                realized_pnl REAL,
-                roe_percent REAL,
-                margin_usdt REAL,
-                commission_usdt REAL,
-                net_pnl REAL,
-                metadata TEXT
-            )
-        """)
+        self.db.settings.create_index("key", unique=True)
 
-        # Generic key-value settings table. Used by SettingsManager
-        # (core/state/settings_manager.py) for things like the global
-        # trading.enabled kill-switch. Separate from strategy_settings,
-        # which is per-strategy and has its own dedicated table/store.
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TIMESTAMP NOT NULL
-            )
-        """)
+        logger.info("Database indexes created/verified")
 
-        self.conn.commit()
-        logger.info("Database tables created/verified")
-
-    def _migrate_positions_table(self) -> None:
-        """
-        Для БД, створених до появи нових колонок, CREATE TABLE IF NOT EXISTS
-        новий стовпець не додасть — таблиця вже існує зі старою схемою.
-        Тому перевіряємо PRAGMA table_info і додаємо відсутні колонки
-        вручну, не чіпаючи наявні дані.
-        """
-        cursor = self.conn.cursor()
-        cursor.execute("PRAGMA table_info(positions)")
-        existing_columns = {row[1] for row in cursor.fetchall()}
-
-        migrations = {
-            'close_price': 'ALTER TABLE positions ADD COLUMN close_price REAL',
-            'realized_pnl': 'ALTER TABLE positions ADD COLUMN realized_pnl REAL',
-            'roe_percent': 'ALTER TABLE positions ADD COLUMN roe_percent REAL',
-            # маржа в USDT (скільки реально вкладено при відкритті) — потрібна
-            # для агрегованої статистики в доларах, а не тільки в % ROE
-            'margin_usdt': 'ALTER TABLE positions ADD COLUMN margin_usdt REAL',
-            # сумарна комісія за вхід + вихід (в USDT)
-            'commission_usdt': 'ALTER TABLE positions ADD COLUMN commission_usdt REAL',
-            # чистий результат: realized_pnl - commission_usdt, як показує біржа
-            'net_pnl': 'ALTER TABLE positions ADD COLUMN net_pnl REAL',
-        }
-
-        for column, ddl in migrations.items():
-            if column not in existing_columns:
-                logger.info(f"Migrating positions table: adding missing column '{column}'")
-                cursor.execute(ddl)
-
-        self.conn.commit()
-
-    def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute(query, params)
-            self.conn.commit()
-            return cursor
-
-    def fetch_one(self, query: str, params: tuple = ()) -> Optional[sqlite3.Row]:
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute(query, params)
-            return cursor.fetchone()
-
-    def fetch_all(self, query: str, params: tuple = ()) -> List[sqlite3.Row]:
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute(query, params)
-            return cursor.fetchall()
+    # ------------------------------------------------------------------
+    # balance
+    # ------------------------------------------------------------------
 
     def insert_balance(self, asset: str, free: float, locked: float) -> None:
-        self.execute("""
-            INSERT INTO balance (asset, free, locked, total, timestamp)
-            VALUES (?, ?, ?, ?, ?)
-        """, (asset, free, locked, free + locked, datetime.utcnow()))
+        with self._lock:
+            self.db.balance.insert_one({
+                "asset": asset,
+                "free": free,
+                "locked": locked,
+                "total": free + locked,
+                "timestamp": datetime.utcnow(),
+            })
 
-    def get_latest_balance(self, asset: str) -> Optional[sqlite3.Row]:
-        return self.fetch_one("SELECT * FROM balance WHERE asset = ? ORDER BY timestamp DESC LIMIT 1", (asset,))
+    def get_latest_balance(self, asset: str) -> Optional[dict]:
+        with self._lock:
+            return self.db.balance.find_one(
+                {"asset": asset},
+                sort=[("timestamp", DESCENDING)],
+            )
 
-    def insert_position(self, order_id: str, symbol: str, side: str, status: str, metadata: str = None) -> int:
-        """Зберігає мінімальні дані про відкриту позицію"""
-        cursor = self.execute("""
-            INSERT INTO positions (order_id, symbol, side, status, created_at, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (order_id, symbol, side, status, datetime.utcnow(), metadata))
-        return cursor.lastrowid
+    # ------------------------------------------------------------------
+    # positions
+    # ------------------------------------------------------------------
+
+    def insert_position(
+        self,
+        order_id: str,
+        symbol: str,
+        side: str,
+        status: str,
+        metadata: str = None
+    ) -> Any:
+        """Зберігає мінімальні дані про відкриту позицію. Повертає _id вставленого документа."""
+        doc = {
+            "order_id": order_id,
+            "symbol": symbol,
+            "side": side,
+            "status": status,
+            "created_at": datetime.utcnow(),
+            "closed_at": None,
+            "close_price": None,
+            "realized_pnl": None,
+            "roe_percent": None,
+            "margin_usdt": None,
+            "commission_usdt": None,
+            "net_pnl": None,
+            "metadata": metadata,
+        }
+        with self._lock:
+            result = self.db.positions.insert_one(doc)
+        return result.inserted_id
 
     def update_position_status(
         self,
@@ -159,106 +133,134 @@ class Database:
     ) -> None:
         """
         Оновлює статус позиції. Усі метрики — опціональні: якщо не передані,
-        відповідні колонки не чіпаються (щоб, наприклад, проміжний виклик
-        update_position_status без цих даних не затер вже записані значення
-        значенням NULL).
+        відповідні поля не чіпаються (тільки $set по переданих полях, щоб
+        проміжний виклик не затер вже записані значення None-ом).
         """
-        set_clauses = ["status = ?"]
-        params: list = [status]
+        update_fields: Dict[str, Any] = {"status": status}
 
         if closed_at is not None:
-            set_clauses.append("closed_at = ?")
-            params.append(closed_at)
+            update_fields["closed_at"] = closed_at
         if close_price is not None:
-            set_clauses.append("close_price = ?")
-            params.append(close_price)
+            update_fields["close_price"] = close_price
         if realized_pnl is not None:
-            set_clauses.append("realized_pnl = ?")
-            params.append(realized_pnl)
+            update_fields["realized_pnl"] = realized_pnl
         if roe_percent is not None:
-            set_clauses.append("roe_percent = ?")
-            params.append(roe_percent)
+            update_fields["roe_percent"] = roe_percent
         if margin_usdt is not None:
-            set_clauses.append("margin_usdt = ?")
-            params.append(margin_usdt)
+            update_fields["margin_usdt"] = margin_usdt
         if commission_usdt is not None:
-            set_clauses.append("commission_usdt = ?")
-            params.append(commission_usdt)
+            update_fields["commission_usdt"] = commission_usdt
         if net_pnl is not None:
-            set_clauses.append("net_pnl = ?")
-            params.append(net_pnl)
+            update_fields["net_pnl"] = net_pnl
 
-        params.append(order_id)
+        with self._lock:
+            self.db.positions.update_one(
+                {"order_id": order_id},
+                {"$set": update_fields},
+            )
 
-        self.execute(f"""
-            UPDATE positions
-            SET {', '.join(set_clauses)}
-            WHERE order_id = ?
-        """, tuple(params))
-
-    def get_active_positions(self) -> List[sqlite3.Row]:
+    def get_active_positions(self) -> List[dict]:
         """Повертає всі активні позиції"""
-        return self.fetch_all("SELECT * FROM positions WHERE status = 'OPEN' ORDER BY created_at DESC")
+        with self._lock:
+            return list(
+                self.db.positions.find({"status": "OPEN"}).sort("created_at", DESCENDING)
+            )
 
     def update_position_metadata(self, order_id: str, metadata: str) -> None:
-        self.execute("UPDATE positions SET metadata = ? WHERE order_id = ?", (metadata, order_id))
+        with self._lock:
+            self.db.positions.update_one(
+                {"order_id": order_id},
+                {"$set": {"metadata": metadata}},
+            )
 
-    def get_open_position_by_symbol_side(self, symbol: str, side: str) -> Optional[sqlite3.Row]:
-        return self.fetch_one(
-            "SELECT * FROM positions WHERE symbol = ? AND side = ? AND status = 'OPEN'",
-            (symbol, side)
-        )
+    def get_open_position_by_symbol_side(self, symbol: str, side: str) -> Optional[dict]:
+        with self._lock:
+            return self.db.positions.find_one({
+                "symbol": symbol,
+                "side": side,
+                "status": "OPEN",
+            })
 
-    def get_closed_positions(self, limit: int = 5, offset: int = 0):
-        return self.fetch_all("""
-            SELECT * FROM positions
-            WHERE status = 'CLOSED'
-            ORDER BY closed_at DESC
-            LIMIT ? OFFSET ?
-        """, (limit, offset))
+    def get_closed_positions(self, limit: int = 5, offset: int = 0) -> List[dict]:
+        with self._lock:
+            return list(
+                self.db.positions.find({"status": "CLOSED"})
+                .sort("closed_at", DESCENDING)
+                .skip(offset)
+                .limit(limit)
+            )
 
-    def get_all_closed_positions(self):
-        return self.fetch_all("SELECT * FROM positions WHERE status = 'CLOSED' ORDER BY closed_at DESC")
+    def get_all_closed_positions(self) -> List[dict]:
+        with self._lock:
+            return list(
+                self.db.positions.find({"status": "CLOSED"}).sort("closed_at", DESCENDING)
+            )
 
     def get_closed_positions_count(self) -> int:
-        row = self.fetch_one("SELECT COUNT(*) as cnt FROM positions WHERE status = 'CLOSED'")
-        return row['cnt'] if row else 0
+        with self._lock:
+            return self.db.positions.count_documents({"status": "CLOSED"})
 
     def get_stats_summary(self) -> dict:
         """
-        Агрегована статистика по закритих позиціях в доларах — саме те, чого
-        не вистачало при аналізі тільки по roe_percent: скільки всього
+        Агрегована статистика по закритих позиціях в доларах: скільки всього
         вкладено (маржа), скільки заробили/втратили чисто (net_pnl),
         скільки пішло на комісію.
         """
-        row = self.fetch_one("""
-            SELECT
-                COUNT(*) as total_trades,
-                SUM(margin_usdt) as total_margin_usdt,
-                SUM(realized_pnl) as total_realized_pnl,
-                SUM(commission_usdt) as total_commission_usdt,
-                SUM(net_pnl) as total_net_pnl,
-                SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
-                SUM(CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END) as losing_trades
-            FROM positions
-            WHERE status = 'CLOSED'
-        """)
-        if not row:
+        pipeline = [
+            {"$match": {"status": "CLOSED"}},
+            {"$group": {
+                "_id": None,
+                "total_trades": {"$sum": 1},
+                "total_margin_usdt": {"$sum": "$margin_usdt"},
+                "total_realized_pnl": {"$sum": "$realized_pnl"},
+                "total_commission_usdt": {"$sum": "$commission_usdt"},
+                "total_net_pnl": {"$sum": "$net_pnl"},
+                "winning_trades": {
+                    "$sum": {"$cond": [{"$gt": ["$net_pnl", 0]}, 1, 0]}
+                },
+                "losing_trades": {
+                    "$sum": {"$cond": [{"$lt": ["$net_pnl", 0]}, 1, 0]}
+                },
+            }},
+        ]
+
+        with self._lock:
+            result = list(self.db.positions.aggregate(pipeline))
+
+        if not result:
             return {}
-        return dict(row)
+
+        row = result[0]
+        row.pop("_id", None)
+        return row
+
+    def get_last_position_time_by_symbol(self) -> dict:
+        """Для кожного символу — час останньої угоди (відкриття), OPEN або CLOSED."""
+        pipeline = [
+            {"$group": {"_id": "$symbol", "last_at": {"$max": "$created_at"}}},
+        ]
+        with self._lock:
+            rows = list(self.db.positions.aggregate(pipeline))
+        return {row["_id"]: row["last_at"] for row in rows}
+
+    # ------------------------------------------------------------------
+    # settings (generic key-value)
+    # ------------------------------------------------------------------
 
     def get_setting(self, key: str) -> Optional[str]:
-        row = self.fetch_one("SELECT value FROM settings WHERE key = ?", (key,))
+        with self._lock:
+            row = self.db.settings.find_one({"key": key})
         return row["value"] if row else None
 
     def save_setting(self, key: str, value: str) -> None:
-        self.execute("""
-            INSERT INTO settings (key, value, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-        """, (key, value, datetime.utcnow()))
+        with self._lock:
+            self.db.settings.update_one(
+                {"key": key},
+                {"$set": {"value": value, "updated_at": datetime.utcnow()}},
+                upsert=True,
+            )
 
     def close(self) -> None:
-        if self.conn:
-            self.conn.close()
+        if self.client:
+            self.client.close()
             logger.info("Database connection closed")

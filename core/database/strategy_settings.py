@@ -1,7 +1,8 @@
-import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+from pymongo import ASCENDING
 
 from .database import Database
 
@@ -13,64 +14,52 @@ DEFAULT_USER_ID = "default"
 
 class StrategySettingsStore:
     """
-    Зберігання динамічних параметрів стратегій у БД.
+    Зберігання динамічних параметрів стратегій у MongoDB
+    (колекція strategy_settings).
 
-    На кожну пару (user_id, strategy_name) існує до двох рядків:
-      - is_default=1 — заводські параметри, з якими стратегія постачається
+    На кожну пару (user_id, strategy_name) існує до двох документів:
+      - is_default=True — заводські параметри, з якими стратегія постачається
         в коді. Створюються один раз через seed_defaults() при старті бота
         і надалі користувачем НЕ редагуються — це те, до чого можна
         "скинутися".
-      - is_default=0 — поточні активні параметри, які реально
+      - is_default=False — поточні активні параметри, які реально
         використовує стратегія. Саме їх редагує користувач.
 
-    Колонка enabled зберігається лише на активному рядку (is_default=0) —
+    Поле enabled зберігається лише на активному документі (is_default=False) —
     це прапорець "чи запускати цю стратегію взагалі", окремий від самих
     параметрів. Вмикається/вимикається через Telegram-меню.
 
-    user_id поки що завжди DEFAULT_USER_ID ("default") — колонка додана
-    заздалегідь, щоб у майбутньому додати per-user редагування без міграції
-    схеми.
+    params зберігається як звичайний вкладений документ (не JSON-рядок,
+    як було у SQLite-версії) — Mongo зберігає структуровані дані нативно.
+
+    user_id поки що завжди DEFAULT_USER_ID ("default") — поле додано
+    заздалегідь, щоб у майбутньому додати per-user редагування без міграції.
     """
 
     def __init__(self, db: Database):
         self.db = db
-        self._ensure_table()
+        self.collection = self.db.db.strategy_settings
+        self._ensure_indexes()
 
-    def _ensure_table(self) -> None:
-        self.db.execute("""
-            CREATE TABLE IF NOT EXISTS strategy_settings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL DEFAULT 'default',
-                strategy_name TEXT NOT NULL,
-                params TEXT NOT NULL,
-                is_default INTEGER NOT NULL DEFAULT 0,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TIMESTAMP NOT NULL,
-                updated_at TIMESTAMP NOT NULL,
-                UNIQUE(user_id, strategy_name, is_default)
-            )
-        """)
-
-        # для баз, створених до появи enabled — додаємо колонку окремо.
-        # SQLite впаде на повторному ALTER, якщо колонка вже є — це нормально.
-        try:
-            self.db.execute(
-                "ALTER TABLE strategy_settings ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
-            )
-            logger.info("strategy_settings: додано колонку enabled (міграція)")
-        except Exception:
-            pass
-
-        logger.info("strategy_settings table created/verified")
+    def _ensure_indexes(self) -> None:
+        self.collection.create_index(
+            [
+                ("user_id", ASCENDING),
+                ("strategy_name", ASCENDING),
+                ("is_default", ASCENDING),
+            ],
+            unique=True,
+        )
+        logger.info("strategy_settings indexes created/verified")
 
     # --- внутрішнє ---
 
     def _get_row(self, strategy_name: str, is_default: bool, user_id: str) -> Optional[dict]:
-        row = self.db.fetch_one(
-            "SELECT * FROM strategy_settings WHERE user_id = ? AND strategy_name = ? AND is_default = ?",
-            (user_id, strategy_name, int(is_default))
-        )
-        return dict(row) if row else None
+        return self.collection.find_one({
+            "user_id": user_id,
+            "strategy_name": strategy_name,
+            "is_default": is_default,
+        })
 
     # --- публічне API ---
 
@@ -83,36 +72,41 @@ class StrategySettingsStore:
     ) -> None:
         """
         Викликається при старті бота для кожної стратегії з її "заводськими"
-        (hardcoded в коді) параметрами. Ідемпотентна: якщо default-рядок вже
-        є в БД — НЕ перезаписує його (щоб рестарт бота не затирав історію,
-        якщо заводські параметри в коді хтось випадково змінив). Якщо
-        активного рядка ще немає — ініціалізує його копією дефолтних.
+        (hardcoded в коді) параметрами. Ідемпотентна: якщо default-документ
+        вже є в БД — НЕ перезаписує його. Якщо активного документа ще
+        немає — ініціалізує його копією дефолтних.
 
-        enabled застосовується лише при ПЕРШОМУ створенні активного рядка
-        (наприклад, зі списку trading.strategies.enabled у yaml — для
-        зворотної сумісності при міграції). Далі станом enabled керує
-        виключно set_enabled() через Telegram-меню, seed_defaults() його
-        більше не чіпає.
+        enabled застосовується лише при ПЕРШОМУ створенні активного
+        документа. Далі станом enabled керує виключно set_enabled().
         """
         now = datetime.utcnow()
-        params_json = json.dumps(default_params)
 
-        existing_default = self._get_row(strategy_name, is_default=True, user_id=user_id)
+        existing_default = self._get_row(strategy_name, True, user_id)
         if not existing_default:
-            self.db.execute("""
-                INSERT INTO strategy_settings (user_id, strategy_name, params, is_default, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, 1, 1, ?, ?)
-            """, (user_id, strategy_name, params_json, now, now))
+            self.collection.insert_one({
+                "user_id": user_id,
+                "strategy_name": strategy_name,
+                "params": default_params,
+                "is_default": True,
+                "enabled": True,
+                "created_at": now,
+                "updated_at": now,
+            })
             logger.info(f"Seeded default params for strategy '{strategy_name}' (user={user_id})")
         else:
             logger.debug(f"Default params for '{strategy_name}' already exist, skipping seed")
 
-        existing_active = self._get_row(strategy_name, is_default=False, user_id=user_id)
+        existing_active = self._get_row(strategy_name, False, user_id)
         if not existing_active:
-            self.db.execute("""
-                INSERT INTO strategy_settings (user_id, strategy_name, params, is_default, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, 0, ?, ?, ?)
-            """, (user_id, strategy_name, params_json, int(enabled), now, now))
+            self.collection.insert_one({
+                "user_id": user_id,
+                "strategy_name": strategy_name,
+                "params": default_params,
+                "is_default": False,
+                "enabled": enabled,
+                "created_at": now,
+                "updated_at": now,
+            })
             logger.info(
                 f"Initialized active params for strategy '{strategy_name}' "
                 f"(user={user_id}) from defaults, enabled={enabled}"
@@ -120,17 +114,13 @@ class StrategySettingsStore:
 
     def get_params(self, strategy_name: str, user_id: str = DEFAULT_USER_ID) -> Optional[Dict[str, Any]]:
         """Повертає поточні активні параметри стратегії. None, якщо стратегія ще не засіяна seed_defaults()."""
-        row = self._get_row(strategy_name, is_default=False, user_id=user_id)
-        if not row:
-            return None
-        return json.loads(row['params'])
+        row = self._get_row(strategy_name, False, user_id)
+        return row["params"] if row else None
 
     def get_default_params(self, strategy_name: str, user_id: str = DEFAULT_USER_ID) -> Optional[Dict[str, Any]]:
-        """Повертає заводські параметри стратегії (для показу юзеру 'ось так було спочатку')."""
-        row = self._get_row(strategy_name, is_default=True, user_id=user_id)
-        if not row:
-            return None
-        return json.loads(row['params'])
+        """Повертає заводські параметри стратегії."""
+        row = self._get_row(strategy_name, True, user_id)
+        return row["params"] if row else None
 
     def update_params(
         self,
@@ -139,11 +129,10 @@ class StrategySettingsStore:
         user_id: str = DEFAULT_USER_ID
     ) -> Dict[str, Any]:
         """
-        Оновлює активні параметри стратегії. Заводські (is_default=1)
-        параметри не чіпає — тому reset_to_default() і далі працюватиме
-        коректно. enabled теж не чіпає — це окремий прапорець.
+        Оновлює активні параметри стратегії. Заводські (is_default=True)
+        параметри не чіпає. enabled теж не чіпає — це окремий прапорець.
         """
-        existing = self._get_row(strategy_name, is_default=False, user_id=user_id)
+        existing = self._get_row(strategy_name, False, user_id)
         if not existing:
             raise ValueError(
                 f"No active settings for strategy '{strategy_name}' (user={user_id}) — "
@@ -151,41 +140,39 @@ class StrategySettingsStore:
             )
 
         now = datetime.utcnow()
-        self.db.execute("""
-            UPDATE strategy_settings
-            SET params = ?, updated_at = ?
-            WHERE user_id = ? AND strategy_name = ? AND is_default = 0
-        """, (json.dumps(params), now, user_id, strategy_name))
+        self.collection.update_one(
+            {"user_id": user_id, "strategy_name": strategy_name, "is_default": False},
+            {"$set": {"params": params, "updated_at": now}},
+        )
 
         logger.info(f"Updated params for strategy '{strategy_name}' (user={user_id})")
         return params
 
     def reset_to_default(self, strategy_name: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
         """Копіює заводські параметри поверх активних. enabled не чіпає. Повертає параметри, до яких відкотились."""
-        default_row = self._get_row(strategy_name, is_default=True, user_id=user_id)
+        default_row = self._get_row(strategy_name, True, user_id)
         if not default_row:
             raise ValueError(f"No default settings found for strategy '{strategy_name}' (user={user_id})")
 
         now = datetime.utcnow()
-        self.db.execute("""
-            UPDATE strategy_settings
-            SET params = ?, updated_at = ?
-            WHERE user_id = ? AND strategy_name = ? AND is_default = 0
-        """, (default_row['params'], now, user_id, strategy_name))
+        self.collection.update_one(
+            {"user_id": user_id, "strategy_name": strategy_name, "is_default": False},
+            {"$set": {"params": default_row["params"], "updated_at": now}},
+        )
 
         logger.info(f"Strategy '{strategy_name}' (user={user_id}) reset to default params")
-        return json.loads(default_row['params'])
+        return default_row["params"]
 
     def is_enabled(self, strategy_name: str, user_id: str = DEFAULT_USER_ID) -> bool:
         """Чи увімкнена стратегія (запускається при setup_strategies)."""
-        row = self._get_row(strategy_name, is_default=False, user_id=user_id)
+        row = self._get_row(strategy_name, False, user_id)
         if not row:
             return False
-        return bool(row['enabled'])
+        return bool(row.get("enabled", False))
 
     def set_enabled(self, strategy_name: str, enabled: bool, user_id: str = DEFAULT_USER_ID) -> None:
         """Вмикає/вимикає стратегію (тумблер у Telegram-меню)."""
-        existing = self._get_row(strategy_name, is_default=False, user_id=user_id)
+        existing = self._get_row(strategy_name, False, user_id)
         if not existing:
             raise ValueError(
                 f"No active settings for strategy '{strategy_name}' (user={user_id}) — "
@@ -193,27 +180,25 @@ class StrategySettingsStore:
             )
 
         now = datetime.utcnow()
-        self.db.execute("""
-            UPDATE strategy_settings
-            SET enabled = ?, updated_at = ?
-            WHERE user_id = ? AND strategy_name = ? AND is_default = 0
-        """, (int(enabled), now, user_id, strategy_name))
+        self.collection.update_one(
+            {"user_id": user_id, "strategy_name": strategy_name, "is_default": False},
+            {"$set": {"enabled": enabled, "updated_at": now}},
+        )
 
         logger.info(f"Strategy '{strategy_name}' (user={user_id}) enabled={enabled}")
 
     def list_strategies(self, user_id: str = DEFAULT_USER_ID) -> List[Dict[str, Any]]:
         """Повертає всі активні налаштування стратегій для юзера (для UI/Telegram-меню)."""
-        rows = self.db.fetch_all(
-            "SELECT strategy_name, params, enabled, updated_at FROM strategy_settings "
-            "WHERE user_id = ? AND is_default = 0 ORDER BY strategy_name",
-            (user_id,)
-        )
+        rows = self.collection.find(
+            {"user_id": user_id, "is_default": False}
+        ).sort("strategy_name", ASCENDING)
+
         return [
             {
-                'strategy_name': row['strategy_name'],
-                'params': json.loads(row['params']),
-                'enabled': bool(row['enabled']),
-                'updated_at': row['updated_at'],
+                "strategy_name": row["strategy_name"],
+                "params": row["params"],
+                "enabled": bool(row.get("enabled", False)),
+                "updated_at": row["updated_at"],
             }
             for row in rows
         ]

@@ -90,6 +90,18 @@ class SettingsManager:
     async def set_blacklist_symbols(self, symbols: list) -> None:
         await self.set('trading.blacklist_symbols', symbols)
 
+    async def add_blacklist_symbol(self, symbol: str) -> None:
+        symbols = self.get_blacklist_symbols()
+        if symbol not in symbols:
+            symbols.append(symbol)
+            await self.set_blacklist_symbols(symbols)
+
+    async def remove_blacklist_symbol(self, symbol: str) -> None:
+        symbols = self.get_blacklist_symbols()
+        if symbol in symbols:
+            symbols.remove(symbol)
+            await self.set_blacklist_symbols(symbols)
+
     def get_position_size_config(self) -> dict:
         return self.get('trading.position_size', {'mode': 'fixed_usd', 'value': 100})
 

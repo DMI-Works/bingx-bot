@@ -31,13 +31,9 @@ class RiskManager:
         self.use_risk_based_sizing = config.get('use_risk_based_sizing', False)
         self.risk_per_trade_percent = config.get('risk_per_trade_percent', 0.5)
 
-        self.consecutive_losses = 0
-        # Момент, до якого діє пауза після серії лузів (None — паузи немає).
-        # Виставляється в position_closed(), коли consecutive_losses
-        # досягає max_consecutive_losses; знімається автоматично в
-        # can_open_position(), коли час вийшов, або вручну через
-        # reset_consecutive_losses().
-        self.losses_lockout_until: Optional[datetime] = None
+        self.consecutive_losses: dict[str, int] = {}
+
+        self.losses_lockout_until: dict[str, datetime] = {}
         self.last_trade_time: Optional[datetime] = None
 
         # события всё ещё нужны для cooldown/consecutive_losses, но НЕ для счёта открытых позиций
@@ -176,25 +172,27 @@ class RiskManager:
             logger.warning(reason)
             return False, reason
 
-        if self.max_consecutive_losses > 0 and self.losses_lockout_until:
-            if datetime.utcnow() >= self.losses_lockout_until:
+        if self.max_consecutive_losses > 0 and symbol in self.losses_lockout_until:
+            lockout_until = self.losses_lockout_until[symbol]
+            if datetime.utcnow() >= lockout_until:
                 # Пауза вийшла — самі знімаємо лок, це і є "автоматичний скид"
                 logger.info(
-                    f"Consecutive-losses lockout expired ({self.consecutive_losses} losses) — "
-                    f"resuming trading automatically"
+                    f"Consecutive-losses lockout expired for {symbol} "
+                    f"({self.consecutive_losses.get(symbol, 0)} losses) — resuming trading on it automatically"
                 )
-                self.consecutive_losses = 0
-                self.losses_lockout_until = None
+                self.consecutive_losses[symbol] = 0
+                del self.losses_lockout_until[symbol]
                 await self.event_bus.publish(Event(
                     type=EventType.RISK_LIMIT_CLEARED,
-                    data={'reason': 'consecutive_losses_cooldown_expired'},
+                    data={'reason': 'consecutive_losses_cooldown_expired', 'symbol': symbol},
                     source='RiskManager',
                 ))
             else:
-                remaining = int((self.losses_lockout_until - datetime.utcnow()).total_seconds())
+                remaining = int((lockout_until - datetime.utcnow()).total_seconds())
                 reason = (
-                    f"Max consecutive losses reached: {self.consecutive_losses}/{self.max_consecutive_losses} "
-                    f"(account-wide, not per symbol) — resumes in {remaining}s"
+                    f"Max consecutive losses reached for {symbol}: "
+                    f"{self.consecutive_losses.get(symbol, 0)}/{self.max_consecutive_losses} "
+                    f"(only this symbol is paused, others trade normally) — resumes in {remaining}s"
                 )
                 logger.warning(reason)
                 return False, reason
@@ -209,51 +207,66 @@ class RiskManager:
         return True, None
 
     async def position_closed(self, pnl: float, symbol: Optional[str] = None) -> None:
-        """Считаем win/loss серию и cooldown по времени — это НЕ связано с количеством позиций,
-        поэтому оставляем как событийную логику."""
+        """Считаем win/loss серию — ОТДЕЛЬНО по каждому символу (см.
+        losses_lockout_until). Cooldown по времени (last_trade_time) остаётся
+        общим на весь аккаунт — это отдельный, более простой "не стреляй
+        сразу после любой сделки" таймаут, не связанный с сериями убытков."""
         self.last_trade_time = datetime.utcnow()
 
+        if symbol is None:
+            logger.warning("position_closed() called without symbol — skipping per-symbol loss tracking")
+            return
+
         if pnl < 0:
-            self.consecutive_losses += 1
-            logger.info(f"Loss recorded. Consecutive losses: {self.consecutive_losses}")
+            self.consecutive_losses[symbol] = self.consecutive_losses.get(symbol, 0) + 1
+            losses = self.consecutive_losses[symbol]
+            logger.info(f"Loss recorded for {symbol}. Consecutive losses: {losses}")
 
             if (
                 self.max_consecutive_losses > 0
-                and self.consecutive_losses >= self.max_consecutive_losses
-                and self.losses_lockout_until is None  # уже на паузі — не продовжуємо її кожним новим лузом
+                and losses >= self.max_consecutive_losses
+                and symbol not in self.losses_lockout_until  # уже на паузі — не продовжуємо її кожним новим лузом
             ):
-                self.losses_lockout_until = datetime.utcnow() + timedelta(
+                lockout_until = datetime.utcnow() + timedelta(
                     seconds=self.consecutive_losses_cooldown_seconds
                 )
+                self.losses_lockout_until[symbol] = lockout_until
                 logger.warning(
-                    f"Consecutive losses limit reached ({self.consecutive_losses}/{self.max_consecutive_losses}) "
-                    f"— pausing new positions until {self.losses_lockout_until.isoformat()}"
+                    f"Consecutive losses limit reached for {symbol} ({losses}/{self.max_consecutive_losses}) "
+                    f"— pausing new positions on {symbol} only until {lockout_until.isoformat()}"
                 )
                 await self.event_bus.publish(Event(
                     type=EventType.RISK_LIMIT_EXCEEDED,
                     data={
-                        'consecutive_losses': self.consecutive_losses,
+                        'consecutive_losses': losses,
                         'max_consecutive_losses': self.max_consecutive_losses,
                         'symbol': symbol,
                         'cooldown_seconds': self.consecutive_losses_cooldown_seconds,
-                        'resumes_at': self.losses_lockout_until.isoformat(),
+                        'resumes_at': lockout_until.isoformat(),
                     },
                     source='RiskManager',
                 ))
         else:
-            self.consecutive_losses = 0
-            self.losses_lockout_until = None
-            logger.info("Win recorded. Consecutive losses reset to 0")
+            self.consecutive_losses[symbol] = 0
+            self.losses_lockout_until.pop(symbol, None)
+            logger.info(f"Win recorded for {symbol}. Consecutive losses reset to 0")
 
     async def _on_position_closed_event(self, event: Event) -> None:
         pnl = event.data.get('realized_pnl', 0.0)
         symbol = event.data.get('symbol')
         await self.position_closed(pnl=pnl, symbol=symbol)
 
-    def reset_consecutive_losses(self) -> None:
-        self.consecutive_losses = 0
-        self.losses_lockout_until = None
-        logger.info("Consecutive losses manually reset")
+    def reset_consecutive_losses(self, symbol: Optional[str] = None) -> None:
+        """Без symbol — сброс по всем монетам (полный ручной ресет);
+        с symbol — только по конкретной."""
+        if symbol is None:
+            self.consecutive_losses.clear()
+            self.losses_lockout_until.clear()
+            logger.info("Consecutive losses manually reset for all symbols")
+        else:
+            self.consecutive_losses[symbol] = 0
+            self.losses_lockout_until.pop(symbol, None)
+            logger.info(f"Consecutive losses manually reset for {symbol}")
 
     def update_config(self, config: dict) -> None:
         self.max_open_positions = config.get('max_open_positions', self.max_open_positions)
@@ -281,14 +294,22 @@ class RiskManager:
             current_open_positions = -1  # сигнал, что не удалось получить данные с биржи
             open_positions_by_symbol = {}
 
+        now = datetime.utcnow()
+        active_lockouts = {
+            sym: until.isoformat()
+            for sym, until in self.losses_lockout_until.items()
+            if until > now
+        }
+
         return {
             'current_open_positions': current_open_positions,
             'max_open_positions': self.max_open_positions,
             'open_positions_by_symbol': open_positions_by_symbol,
-            'consecutive_losses': self.consecutive_losses,
             'max_consecutive_losses': self.max_consecutive_losses,
-            'losses_lockout_active': self.losses_lockout_until is not None and datetime.utcnow() < self.losses_lockout_until,
-            'losses_lockout_resumes_at': self.losses_lockout_until.isoformat() if self.losses_lockout_until else None,
+            # По каждому символу: сколько подряд убытков и (если есть) до
+            # какого момента он на паузе — пауза больше не account-wide.
+            'consecutive_losses_by_symbol': dict(self.consecutive_losses),
+            'losses_lockout_by_symbol': active_lockouts,
             'cooldown_active': self._is_cooldown_active(),
             'last_trade_time': self.last_trade_time.isoformat() if self.last_trade_time else None
         }
