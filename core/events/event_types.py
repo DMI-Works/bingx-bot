@@ -60,11 +60,6 @@ class EventType(Enum):
     # RECOVERY_COMPLETED = "recovery_completed"
     # RECOVERY_FAILED = "recovery_failed"
 
-    # Risk Events
-    RISK_LIMIT_EXCEEDED = "risk_limit_exceeded"
-    RISK_LIMIT_CLEARED = "risk_limit_cleared"
-    # COOLDOWN_ACTIVE = "cooldown_active"
-
     # Settings Events
     SETTINGS_CHANGED = "settings_changed"
 

@@ -20,7 +20,6 @@ trading:
     # її повертають вручну (міні-апп → Монети → чорний список). 0 = вимкнено.
     # Серія рахується окремо по кожній монеті, інші монети не зачіпаються.
     max_consecutive_losses: 3
-    cooldown_after_trade_seconds: 1800
     # risk-based position sizing (см. ТЗ п.2 "risk_per_trade вместо fixed size")
     # ВЫКЛЮЧЕНО по умолчанию — включи явно (true) после того, как проверишь
     # risk_per_trade_percent на testnet: он заменит position_size стратегий
