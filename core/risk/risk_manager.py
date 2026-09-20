@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from ..database import Database
 from ..events import EventBus, Event, EventType
@@ -10,17 +10,20 @@ logger = logging.getLogger(__name__)
 
 
 class RiskManager:
-    def __init__(self, db: Database, event_bus: EventBus, exchange, config: dict):
+    def __init__(self, db: Database, event_bus: EventBus, exchange, config: dict, settings_manager=None):
         self.db = db
         self.event_bus = event_bus
         self.exchange = exchange  # BingXClient — нужен для получения реальных позиций
+        # SettingsManager — через него монета, набравшая max_consecutive_losses
+        # убытков подряд, добавляется в чёрный список (хранится в БД, тот же
+        # список, что и в мини-аппе → вкладка «Монеты»)
+        self.settings_manager = settings_manager
         self.config = config
 
         self.max_open_positions = config.get('max_open_positions', 3)
         self.max_positions_per_symbol = config.get('max_positions_per_symbol', 1)
         self.max_total_risk_percent = config.get('max_total_risk_percent', 5.0)
         self.max_consecutive_losses = config.get('max_consecutive_losses', 3)
-        self.consecutive_losses_cooldown_seconds = config.get('consecutive_losses_cooldown_seconds', 1800)
         self.cooldown_after_trade_seconds = config.get('cooldown_after_trade_seconds', 60)
 
         # --- risk-based position sizing (заменяет fixed position_size из стратегии) ---
@@ -33,7 +36,6 @@ class RiskManager:
 
         self.consecutive_losses: dict[str, int] = {}
 
-        self.losses_lockout_until: dict[str, datetime] = {}
         self.last_trade_time: Optional[datetime] = None
 
         # события всё ещё нужны для cooldown/consecutive_losses, но НЕ для счёта открытых позиций
@@ -142,7 +144,18 @@ class RiskManager:
 
         return open_positions
 
+    def _is_blacklisted(self, symbol: str) -> bool:
+        if self.settings_manager is None:
+            return False
+        return symbol in self.settings_manager.get_blacklist_symbols()
+
     async def can_open_position(self, symbol: str, risk_amount: float = 0.0) -> tuple[bool, Optional[str]]:
+
+        if self._is_blacklisted(symbol):
+            reason = f"{symbol} is blacklisted — removed from trading"
+            logger.warning(reason)
+            return False, reason
+
         try:
             real_positions = await self._get_real_open_positions()
         except Exception as e:
@@ -172,31 +185,6 @@ class RiskManager:
             logger.warning(reason)
             return False, reason
 
-        if self.max_consecutive_losses > 0 and symbol in self.losses_lockout_until:
-            lockout_until = self.losses_lockout_until[symbol]
-            if datetime.utcnow() >= lockout_until:
-                # Пауза вийшла — самі знімаємо лок, це і є "автоматичний скид"
-                logger.info(
-                    f"Consecutive-losses lockout expired for {symbol} "
-                    f"({self.consecutive_losses.get(symbol, 0)} losses) — resuming trading on it automatically"
-                )
-                self.consecutive_losses[symbol] = 0
-                del self.losses_lockout_until[symbol]
-                await self.event_bus.publish(Event(
-                    type=EventType.RISK_LIMIT_CLEARED,
-                    data={'reason': 'consecutive_losses_cooldown_expired', 'symbol': symbol},
-                    source='RiskManager',
-                ))
-            else:
-                remaining = int((lockout_until - datetime.utcnow()).total_seconds())
-                reason = (
-                    f"Max consecutive losses reached for {symbol}: "
-                    f"{self.consecutive_losses.get(symbol, 0)}/{self.max_consecutive_losses} "
-                    f"(only this symbol is paused, others trade normally) — resumes in {remaining}s"
-                )
-                logger.warning(reason)
-                return False, reason
-
         if self.last_trade_time:
             time_since_last_trade = (datetime.utcnow() - self.last_trade_time).total_seconds()
             if time_since_last_trade < self.cooldown_after_trade_seconds:
@@ -207,10 +195,15 @@ class RiskManager:
         return True, None
 
     async def position_closed(self, pnl: float, symbol: Optional[str] = None) -> None:
-        """Считаем win/loss серию — ОТДЕЛЬНО по каждому символу (см.
-        losses_lockout_until). Cooldown по времени (last_trade_time) остаётся
-        общим на весь аккаунт — это отдельный, более простой "не стреляй
-        сразу после любой сделки" таймаут, не связанный с сериями убытков."""
+        """Считаем win/loss серию — ОТДЕЛЬНО по каждому символу. Как только по
+        монете набралось max_consecutive_losses убытков подряд — монета
+        УБИРАЕТСЯ из торговли (чёрный список + отписка от WS), а не ставится
+        на паузу по таймеру. Вернуть её можно только вручную (мини-апп →
+        Монеты → чёрный список).
+
+        Cooldown по времени (last_trade_time) остаётся общим на весь аккаунт —
+        это отдельный, более простой «не стреляй сразу после любой сделки»
+        таймаут, не связанный с сериями убытков."""
         self.last_trade_time = datetime.utcnow()
 
         if symbol is None:
@@ -218,38 +211,54 @@ class RiskManager:
             return
 
         if pnl < 0:
+            if self._is_blacklisted(symbol):
+                logger.info(f"Loss on already blacklisted {symbol} — not counting")
+                return
+
             self.consecutive_losses[symbol] = self.consecutive_losses.get(symbol, 0) + 1
             losses = self.consecutive_losses[symbol]
             logger.info(f"Loss recorded for {symbol}. Consecutive losses: {losses}")
 
-            if (
-                self.max_consecutive_losses > 0
-                and losses >= self.max_consecutive_losses
-                and symbol not in self.losses_lockout_until  # уже на паузі — не продовжуємо її кожним новим лузом
-            ):
-                lockout_until = datetime.utcnow() + timedelta(
-                    seconds=self.consecutive_losses_cooldown_seconds
-                )
-                self.losses_lockout_until[symbol] = lockout_until
-                logger.warning(
-                    f"Consecutive losses limit reached for {symbol} ({losses}/{self.max_consecutive_losses}) "
-                    f"— pausing new positions on {symbol} only until {lockout_until.isoformat()}"
-                )
-                await self.event_bus.publish(Event(
-                    type=EventType.RISK_LIMIT_EXCEEDED,
-                    data={
-                        'consecutive_losses': losses,
-                        'max_consecutive_losses': self.max_consecutive_losses,
-                        'symbol': symbol,
-                        'cooldown_seconds': self.consecutive_losses_cooldown_seconds,
-                        'resumes_at': lockout_until.isoformat(),
-                    },
-                    source='RiskManager',
-                ))
+            if self.max_consecutive_losses > 0 and losses >= self.max_consecutive_losses:
+                await self._remove_symbol_from_trading(symbol, losses)
         else:
             self.consecutive_losses[symbol] = 0
-            self.losses_lockout_until.pop(symbol, None)
             logger.info(f"Win recorded for {symbol}. Consecutive losses reset to 0")
+
+    async def _remove_symbol_from_trading(self, symbol: str, losses: int) -> None:
+        if self.settings_manager is None:
+            logger.error(
+                f"Consecutive losses limit reached for {symbol} ({losses}/{self.max_consecutive_losses}), "
+                f"but RiskManager has no settings_manager — cannot blacklist the symbol"
+            )
+            return
+
+        try:
+            await self.settings_manager.add_blacklist_symbol(symbol)
+        except Exception as e:
+            # счётчик НЕ сбрасываем — при следующем убытке попробуем снова
+            logger.error(f"Failed to blacklist {symbol} after {losses} consecutive losses: {e}", exc_info=True)
+            return
+
+        # Счётчик обнуляем: если монету потом вернут вручную, серия начнётся
+        # с нуля, а не забанит её снова после первого же убытка.
+        self.consecutive_losses[symbol] = 0
+
+        logger.warning(
+            f"Consecutive losses limit reached for {symbol} ({losses}/{self.max_consecutive_losses}) "
+            f"— {symbol} REMOVED from trading (blacklisted)"
+        )
+        # Слушают: SymbolSelector (отписаться от WS) и TelegramBot (уведомление)
+        await self.event_bus.publish(Event(
+            type=EventType.SYMBOL_BLACKLISTED,
+            data={
+                'symbol': symbol,
+                'reason': 'consecutive_losses',
+                'consecutive_losses': losses,
+                'max_consecutive_losses': self.max_consecutive_losses,
+            },
+            source='RiskManager',
+        ))
 
     async def _on_position_closed_event(self, event: Event) -> None:
         pnl = event.data.get('realized_pnl', 0.0)
@@ -257,15 +266,13 @@ class RiskManager:
         await self.position_closed(pnl=pnl, symbol=symbol)
 
     def reset_consecutive_losses(self, symbol: Optional[str] = None) -> None:
-        """Без symbol — сброс по всем монетам (полный ручной ресет);
-        с symbol — только по конкретной."""
+        """Без symbol — сброс счётчиков по всем монетам; с symbol — только по
+        конкретной. Из чёрного списка монету это НЕ убирает (см. мини-апп)."""
         if symbol is None:
             self.consecutive_losses.clear()
-            self.losses_lockout_until.clear()
             logger.info("Consecutive losses manually reset for all symbols")
         else:
             self.consecutive_losses[symbol] = 0
-            self.losses_lockout_until.pop(symbol, None)
             logger.info(f"Consecutive losses manually reset for {symbol}")
 
     def update_config(self, config: dict) -> None:
@@ -273,9 +280,6 @@ class RiskManager:
         self.max_positions_per_symbol = config.get('max_positions_per_symbol', self.max_positions_per_symbol)
         self.max_total_risk_percent = config.get('max_total_risk_percent', self.max_total_risk_percent)
         self.max_consecutive_losses = config.get('max_consecutive_losses', self.max_consecutive_losses)
-        self.consecutive_losses_cooldown_seconds = config.get(
-            'consecutive_losses_cooldown_seconds', self.consecutive_losses_cooldown_seconds
-        )
         self.cooldown_after_trade_seconds = config.get('cooldown_after_trade_seconds', self.cooldown_after_trade_seconds)
         self.use_risk_based_sizing = config.get('use_risk_based_sizing', self.use_risk_based_sizing)
         self.risk_per_trade_percent = config.get('risk_per_trade_percent', self.risk_per_trade_percent)
@@ -294,22 +298,15 @@ class RiskManager:
             current_open_positions = -1  # сигнал, что не удалось получить данные с биржи
             open_positions_by_symbol = {}
 
-        now = datetime.utcnow()
-        active_lockouts = {
-            sym: until.isoformat()
-            for sym, until in self.losses_lockout_until.items()
-            if until > now
-        }
-
         return {
             'current_open_positions': current_open_positions,
             'max_open_positions': self.max_open_positions,
             'open_positions_by_symbol': open_positions_by_symbol,
             'max_consecutive_losses': self.max_consecutive_losses,
-            # По каждому символу: сколько подряд убытков и (если есть) до
-            # какого момента он на паузе — пауза больше не account-wide.
+            # По каждому символу: сколько подряд убытков сейчас. Достигшие
+            # лимита монеты не «на паузе», а убраны в чёрный список.
             'consecutive_losses_by_symbol': dict(self.consecutive_losses),
-            'losses_lockout_by_symbol': active_lockouts,
+            'blacklisted_symbols': list(self.settings_manager.get_blacklist_symbols()) if self.settings_manager else [],
             'cooldown_active': self._is_cooldown_active(),
             'last_trade_time': self.last_trade_time.isoformat() if self.last_trade_time else None
         }

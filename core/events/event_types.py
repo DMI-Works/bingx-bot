@@ -46,6 +46,9 @@ class EventType(Enum):
 
     # Symbol Selection Events
     SYMBOLS_ROTATED = "symbols_rotated"
+    # Монету убрали из торговли (добавили в чёрный список) — сейчас это делает
+    # RiskManager после max_consecutive_losses убытков подряд по монете.
+    SYMBOL_BLACKLISTED = "symbol_blacklisted"
 
     # OrderBook Events
     ORDERBOOK_UPDATED = "orderbook_updated"
