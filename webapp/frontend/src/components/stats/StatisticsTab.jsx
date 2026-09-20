@@ -10,6 +10,25 @@ import TradeHistoryList from "./TradeHistoryList";
 
 const PERIODS = ["1D", "1W", "1M", "ALL"];
 
+function StatRow({ label, hint, children }) {
+  return (
+    <div className="stat-row">
+      <div className="stat-row-main">
+        <span className="stat-label">{label}</span>
+        {hint && <span className="stat-hint">{hint}</span>}
+      </div>
+      <div className="stat-value">{children}</div>
+    </div>
+  );
+}
+
+const plural = (n, one, few, many) => {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+};
+
 export default function StatisticsTab() {
   const [period, setPeriod] = useState("1W");
   const [stats, setStats] = useState(null);
@@ -81,6 +100,11 @@ export default function StatisticsTab() {
   const up = changeUsd >= 0;
 
   const avgTrade = stats && stats.total_trades ? stats.total_net_pnl / stats.total_trades : 0;
+
+  const pf = stats?.profit_factor;
+  const pfLabel = pf != null ? pf.toFixed(2) : stats?.gross_profit > 0 ? "∞" : "—";
+  const pfClass = pf != null ? (pf >= 1 ? "text-profit" : "text-loss") : stats?.gross_profit > 0 ? "text-profit" : "";
+  const winsHidingLoss = !!stats && pf != null && pf < 1 && stats.win_rate >= 50;
 
   return (
     <div className="tab-pane">
@@ -178,6 +202,60 @@ export default function StatisticsTab() {
         </div>
       </div>
 
+      {stats && stats.total_trades > 0 && (
+        <div className="section">
+          <div className="section-head">
+            <span className="section-title">Прибыльность</span>
+          </div>
+          <div className="list">
+            <StatRow label="Profit factor" hint="прибыль ÷ убыток, >1 — в плюсе">
+              <span className={pfClass}>{pfLabel}</span>
+            </StatRow>
+            <StatRow label="Средний профит">
+              {stats.avg_win != null ? (
+                <>
+                  <span className="text-profit">{fmtUsd(stats.avg_win)}</span>
+                  <span className="stat-value-sub">
+                    {stats.winning_trades} {plural(stats.winning_trades, "сделка", "сделки", "сделок")}
+                  </span>
+                </>
+              ) : "—"}
+            </StatRow>
+            <StatRow label="Средний убыток">
+              {stats.avg_loss != null ? (
+                <>
+                  <span className="text-loss">{fmtUsd(-stats.avg_loss)}</span>
+                  <span className="stat-value-sub">
+                    {stats.losing_trades} {plural(stats.losing_trades, "сделка", "сделки", "сделок")}
+                  </span>
+                </>
+              ) : "—"}
+            </StatRow>
+            <StatRow label="Профит / убыток" hint="средний win ÷ средний loss">
+              {stats.payoff_ratio != null ? stats.payoff_ratio.toFixed(2) : "—"}
+            </StatRow>
+            <StatRow label="Валовая прибыль">
+              <span className="text-profit">{fmtUsd(stats.gross_profit)}</span>
+            </StatRow>
+            <StatRow label="Валовый убыток">
+              <span className="text-loss">{stats.gross_loss > 0 ? fmtUsd(-stats.gross_loss) : fmtUsd(0)}</span>
+            </StatRow>
+            <StatRow label="Лучшая сделка">
+              <span className={stats.best_trade >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(stats.best_trade)}</span>
+            </StatRow>
+            <StatRow label="Худшая сделка">
+              <span className={stats.worst_trade >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(stats.worst_trade)}</span>
+            </StatRow>
+          </div>
+          {winsHidingLoss && (
+            <div className="stat-note">
+              Win rate {stats.win_rate}%, но убытки перекрывают прибыль: средний убыток
+              больше среднего профита.
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Open positions */}
       <div className="section">
         <div className="section-head">
@@ -258,10 +336,18 @@ export default function StatisticsTab() {
           <div className="list">
             {stats.strategy_stats.map((s) => (
               <div className="row row-compact" key={s.strategy}>
-                <span className="settings-title">{s.strategy}</span>
-                <span className="row-value">
-                  <span className="text-profit">{s.win}W</span> / <span className="text-loss">{s.loss}L</span>
-                </span>
+                <div className="row-main">
+                  <span className="settings-title">{s.strategy}</span>
+                  <div className="row-sub row-sub-faint">
+                    PF {s.profit_factor != null ? s.profit_factor.toFixed(2) : s.pnl > 0 ? "∞" : "—"}
+                  </div>
+                </div>
+                <div className="row-end">
+                  <span className={`row-usd ${s.pnl >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(s.pnl)}</span>
+                  <span className="row-value">
+                    <span className="text-profit">{s.win}W</span> / <span className="text-loss">{s.loss}L</span>
+                  </span>
+                </div>
               </div>
             ))}
           </div>

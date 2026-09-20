@@ -242,6 +242,29 @@
 .row-value { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text-dim); margin-right: 2px; }
 .chev { color: var(--text-faint); flex-shrink: 0; }
 
+/* Строка "подпись — значение" для блока Прибыльность */
+.stat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.stat-row:last-child { border-bottom: none; }
+.stat-row-main { display: flex; flex-direction: column; min-width: 0; }
+.stat-label { font-size: 14px; font-weight: 500; }
+.stat-hint { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+.stat-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  text-align: right;
+}
+.stat-value-sub { font-weight: 400; color: var(--text-faint); margin-left: 8px; font-size: 11px; }
+.stat-note { margin: 8px 2px 0; font-size: 12px; color: var(--loss); line-height: 1.4; }
+
 .side-badge {
   font-size: 10px;
   font-weight: 700;
