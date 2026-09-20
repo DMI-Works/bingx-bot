@@ -55,6 +55,35 @@ def _paste_logo_area(card: Image.Image, logo_path: Optional[str], box, crop_cent
     card.paste(layer, (0, 0), mask_layer)
 
 
+def _draw_direction_arrow(
+    card: Image.Image, x: float, cy: float, height: int, up: bool, color: tuple
+) -> int:
+    """Малює стрілку напрямку позиції (вгору = LONG, вниз = SHORT) з лівим
+    краєм у x і вертикальним центром cy. Малюємо у 4x і зменшуємо — так краї
+    згладжені (ImageDraw.polygon сам по собі без антиаліасингу). Без шрифтів,
+    тому не залежить від того, чи є гліфи ↑↓ у Inter. Повертає ширину стрілки."""
+    ss = 4
+    w = max(2, int(height * 0.8))
+    W, H = w * ss, height * ss
+    cx = W / 2
+    head_h = H * 0.5
+    half_shaft = W * 0.14
+
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).polygon(
+        [
+            (cx, 0), (W, head_h), (cx + half_shaft, head_h), (cx + half_shaft, H),
+            (cx - half_shaft, H), (cx - half_shaft, head_h), (0, head_h),
+        ],
+        fill=color + (255,),
+    )
+    if not up:
+        layer = layer.transpose(Image.FLIP_TOP_BOTTOM)
+    layer = layer.resize((w, height), Image.LANCZOS)
+    card.paste(layer, (int(round(x)), int(round(cy - height / 2))), layer)
+    return w
+
+
 def _price_decimals(*values: float) -> int:
     ref = 0.0
     for v in values:
@@ -100,7 +129,9 @@ def generate_pnl_card(
     else:
         accent = GREEN if (roe_percent or 0.0) >= 0 else RED
 
-    side_label = "Довга" if side.upper() == "LONG" else "Коротка"
+    is_long = side.upper() == "LONG"
+    side_label = "LONG" if is_long else "SHORT"
+    side_color = GREEN if is_long else RED
 
     card = Image.new("RGB", (CARD_W, CARD_H), (0, 0, 0))
     mask = Image.new("L", (CARD_W, CARD_H), 0)
@@ -130,8 +161,14 @@ def generate_pnl_card(
     draw.text((title_x, y + 2), sep, font=f_side, fill=TEXT_MUTED)
     title_x += draw.textlength(sep, font=f_side)
 
-    draw.text((title_x, y + 2), side_label, font=f_side, fill=accent)
+    draw.text((title_x, y + 2), side_label, font=f_side, fill=side_color)
+    side_bbox = draw.textbbox((title_x, y + 2), side_label, font=f_side)
     title_x += draw.textlength(side_label, font=f_side)
+
+    arrow_h = int((side_bbox[3] - side_bbox[1]) * 0.95)
+    arrow_cy = (side_bbox[1] + side_bbox[3]) / 2
+    title_x += 10
+    title_x += _draw_direction_arrow(card, title_x, arrow_cy, arrow_h, is_long, side_color)
 
     lev_txt = f"  {leverage}X"
     draw.text((title_x, y + 2), lev_txt, font=f_side, fill=TEXT_WHITE)
