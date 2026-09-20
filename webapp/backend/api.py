@@ -110,6 +110,15 @@ def _closed_row_to_trade(row) -> dict:
 # /api/stats — сводка + кривая кумулятивного PnL за период
 # ---------------------------------------------------------------------------
 
+def _profit_factor(gross_profit: float, gross_loss: float) -> Optional[float]:
+    """Profit factor = валовая прибыль / валовый убыток (gross_loss — модуль).
+    > 1 — стратегия в плюсе, < 1 — в минусе, вне зависимости от win rate.
+    None, если убытков не было (делить не на что) — фронт покажет «∞»/«—»."""
+    if gross_loss <= 0:
+        return None
+    return round(gross_profit / gross_loss, 2)
+
+
 @app.get("/api/stats")
 def get_stats(request: Request, period: str = Query("1W")):  
     db = _require_deps(request)
@@ -122,10 +131,19 @@ def get_stats(request: Request, period: str = Query("1W")):
     equity = []
     running = 0.0  
     symbol_pnl: dict = defaultdict(float)
-    strategy_counts: dict = defaultdict(lambda: [0, 0])  # name -> [win, loss]
+    # name -> счётчики W/L + деньги (для profit factor и PnL по стратегии)
+    strategy_stats_acc: dict = defaultdict(
+        lambda: {"win": 0, "loss": 0, "pnl": 0.0, "gross_profit": 0.0, "gross_loss": 0.0}
+    )
 
     total_trades = 0
     winning = 0
+    losing = 0
+    breakeven = 0
+    gross_profit = 0.0   # сумма всех прибыльных сделок (net)
+    gross_loss = 0.0     # сумма модулей всех убыточных сделок (net)
+    best_trade: Optional[float] = None
+    worst_trade: Optional[float] = None
     total_net_pnl = 0.0
     total_commission_usdt = 0.0
 
@@ -146,18 +164,37 @@ def get_stats(request: Request, period: str = Query("1W")):
 
             meta = _parse_metadata(row)
             strategy_name = meta.get("strategy") or "Невідомо"
-            counts = strategy_counts[strategy_name]
-            counts[0 if net >= 0 else 1] += 1
+            acc = strategy_stats_acc[strategy_name]
+            acc["win" if net >= 0 else "loss"] += 1
+            acc["pnl"] += net
+            if net > 0:
+                acc["gross_profit"] += net
+            elif net < 0:
+                acc["gross_loss"] += -net
             symbol_pnl[row["symbol"]] += net
 
             total_trades += 1
             if net > 0:
                 winning += 1
+                gross_profit += net
+            elif net < 0:
+                losing += 1
+                gross_loss += -net
+            else:
+                breakeven += 1
+            best_trade = net if best_trade is None else max(best_trade, net)
+            worst_trade = net if worst_trade is None else min(worst_trade, net)
             total_net_pnl += net
             commission = row["commission_usdt"] or 0.0
             total_commission_usdt += commission
 
     win_rate = round((winning / total_trades) * 100, 1) if total_trades else 0.0
+
+    # Прибыльность: win rate сам по себе обманчив (5 вин по $0.20 и один луз
+    # на $4 = 83% win rate, но минус), поэтому считаем ещё деньги.
+    avg_win = gross_profit / winning if winning else None
+    avg_loss = gross_loss / losing if losing else None   # модуль (положительное число)
+    payoff_ratio = round(avg_win / avg_loss, 2) if avg_win is not None and avg_loss else None
 
     return {
         "equity": equity,  # кумулятивный net PnL закрытых сделок, не полный баланс аккаунта
@@ -166,8 +203,28 @@ def get_stats(request: Request, period: str = Query("1W")):
         "total_trades": total_trades,
         "total_net_pnl": round(total_net_pnl, 2),
         "total_commission_usdt": round(total_commission_usdt, 2),
+        "winning_trades": winning,
+        "losing_trades": losing,
+        "breakeven_trades": breakeven,
+        "gross_profit": round(gross_profit, 2),
+        "gross_loss": round(gross_loss, 2),          # модуль
+        "profit_factor": _profit_factor(gross_profit, gross_loss),  # None, если нет убытков
+        "avg_win": round(avg_win, 2) if avg_win is not None else None,
+        "avg_loss": round(avg_loss, 2) if avg_loss is not None else None,  # модуль
+        "payoff_ratio": payoff_ratio,                # средний win / средний loss
+        "best_trade": round(best_trade, 2) if best_trade is not None else None,
+        "worst_trade": round(worst_trade, 2) if worst_trade is not None else None,
         "symbol_pnl": [{"symbol": s, "pnl": round(v, 2)} for s, v in sorted(symbol_pnl.items(), key=lambda kv: abs(kv[1]), reverse=True)],
-        "strategy_stats": [{"strategy": name, "win": w, "loss": l} for name, (w, l) in strategy_counts.items()],
+        "strategy_stats": [
+            {
+                "strategy": name,
+                "win": a["win"],
+                "loss": a["loss"],
+                "pnl": round(a["pnl"], 2),
+                "profit_factor": _profit_factor(a["gross_profit"], a["gross_loss"]),
+            }
+            for name, a in strategy_stats_acc.items()
+        ],
     }
 
 

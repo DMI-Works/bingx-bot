@@ -20,34 +20,26 @@ from ..exchange.bingx_client import BingXAPIError
 
 logger = logging.getLogger(__name__)
 
-# Коди помилок BingX, які означають "ордера/позиції більше не існує" —
-# ретраїти нема сенсу, просто пропускаємо тик.
 _GONE_ERROR_CODES = (100404, 100400, 109400, 109420)
 _GONE_ERROR_SUBSTRINGS = ('not exist', 'not found')
 
-
 @dataclass
 class _TrailState:
-    """Стан сходинки для однієї позиції (position_key). Живе лише в пам'яті
-    цього модуля — єдине джерело правди про сам SL-ордер (id, ціна) лишається
-    в SimpleTrader.open_positions (position['sl_order_id'] / ['stop_loss_price']),
-    цей модуль лише читає й (при переміщенні) оновлює ці поля."""
-    last_applied_level_index: int = -1     # індекс останнього застосованого порогу в trail_levels_percent; -1 = жодного ще не застосовано
-    initial_stop_price: Optional[float] = None  # найперший SL позиції; незмінний fallback
-    last_positive_stop_price: Optional[float] = None  # останній ФАКТИЧНО застосований SL вище входу
-    last_positive_roi_percent: Optional[float] = None  # ROI% цього SL для повідомлень
-    fallback_notice_key: Optional[str] = None  # не спамимо одним і тим же fallback на кожному retry
-    critical_notice_key: Optional[str] = None  # не спамимо критичною помилкою на кожному retry
+    last_applied_level_index: int = -1
+    initial_stop_price: Optional[float] = None
+    last_positive_stop_price: Optional[float] = None
+    last_positive_roi_percent: Optional[float] = None
+    fallback_notice_key: Optional[str] = None
+    critical_notice_key: Optional[str] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
 
 class TrailingStopManager:
     def __init__(
         self,
         event_bus: EventBus,
-        exchange,          # BingXClient
-        db,                 # Database
-        trader,              # SimpleTrader — читає й оновлює його open_positions напряму
+        exchange,
+        db,
+        trader,
         config: Optional[dict] = None,
     ):
         self.event_bus = event_bus
@@ -61,9 +53,13 @@ class TrailingStopManager:
         raw_levels = cfg.get('trail_levels_percent', [2.0, 4.0, 8.0, 16.0, 32.0, 64.0])
         self.trail_levels_percent: List[float] = sorted({float(x) for x in raw_levels if x > 0})
 
-        self.stop_buffer_percent: float = cfg.get('dynamic_stop_buffer_percent', 0.5)  # 0.5% ROI
+        self.stop_buffer_percent: float = cfg.get('dynamic_stop_buffer_percent', 0.5)
 
         self.max_buffer_fraction_of_level: float = cfg.get('max_buffer_fraction_of_level', 0.8)
+
+        self.market_safety_buffer_price_percent: float = cfg.get(
+            'market_safety_buffer_price_percent', 0.05
+        )
 
         self.move_retry_cooldown_seconds: float = 10.0 
 
@@ -73,16 +69,8 @@ class TrailingStopManager:
         if self.enabled:
             self.event_bus.subscribe(EventType.PRICE_UPDATED, self._on_price_update)
             self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
-        else:
-            pass
-            
-    # ---------- вхідна точка: ціна оновилась ----------
 
     async def _on_price_update(self, event: Event) -> None:
-        """
-        event.data — той самий формат, що й у BaseStrategy._on_price_update:
-        список трейдів з полями 's' (symbol) і 'p' (price) від WS.
-        """
         if not self.enabled or not self.trail_levels_percent:
             return
 
@@ -104,7 +92,6 @@ class TrailingStopManager:
         if not symbol or price <= 0:
             return
 
-        # позиція може бути LONG і/або SHORT одночасно (hedge mode) — перевіряємо обидві
         for side in ('LONG', 'SHORT'):
             position_key = f"{symbol}_{side}"
             position = self.trader.open_positions.get(position_key)
@@ -112,34 +99,64 @@ class TrailingStopManager:
                 continue
             await self._process_position(position_key, position, price)
 
+    @staticmethod
+    def _price_fraction(entry_price: float, side: str, price: float) -> float:
+        return (
+            (price - entry_price) / entry_price if side == 'LONG'
+            else (entry_price - price) / entry_price
+        )
+
+    def _roi_percent(self, entry_price: float, side: str, price: float, leverage: float) -> float:
+        return self._price_fraction(entry_price, side, price) * leverage * 100.0
+
+    @staticmethod
+    def _safe_leverage(position: dict, position_key: str = "") -> float:
+        leverage = position.get('leverage') or 1
+        try:
+            leverage = float(leverage)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"TrailingStop: {position_key} invalid leverage={leverage!r}, falling back to 1x"
+            )
+            leverage = 1.0
+        return leverage if leverage > 0 else 1.0
+
+    def _track_last_positive(
+        self, state: "_TrailState", entry_price: float, side: str,
+        stop_price: Optional[float], leverage: float,
+    ) -> None:
+        if stop_price is None or not entry_price:
+            return
+        fraction = self._price_fraction(entry_price, side, stop_price)
+        if fraction > 0:
+            state.last_positive_stop_price = stop_price
+            state.last_positive_roi_percent = fraction * leverage * 100.0
+
+    def _persist_position(self, position: dict, context: str) -> None:
+        try:
+            self.db.update_position_metadata(order_id=position['order_id'], metadata=json.dumps(position))
+        except Exception as e:
+            logger.error(
+                f"TrailingStop: failed to persist position metadata ({context}) for "
+                f"{position.get('symbol')}_{position.get('side')}: {e}", exc_info=True
+            )
+
     def _highest_reached_level_index(
         self, favorable_fraction: float, last_applied_index: int, leverage: float
     ) -> int:
-        """Повертає індекс найвищого ЩЕ НЕ застосованого порогу з
-        trail_levels_percent, якого досягла поточна сприятлива зміна ціни
-        (favorable_fraction — частка від ціни входу, тобто "price%").
-        trail_levels_percent задається в ROI%, тому перед порівнянням
-        переводимо поріг у price% діленням на leverage: поріг 2.0% ROI
-        при leverage=10 відповідає лише 0.2% руху ціни. Якщо ціна одним
-        тіком проскочила відразу кілька порогів (геп/волатильність) —
-        повертає найвищий з них, а не перший. Якщо новий поріг не
-        досягнуто — повертає last_applied_index без змін.
-        """
         target = last_applied_index
         for i, level_roi_percent in enumerate(self.trail_levels_percent):
             if i <= target:
                 continue
             level_price_percent = level_roi_percent / leverage
-            if favorable_fraction >= level_price_percent / 100.0:
-                target = i
+            if favorable_fraction < level_price_percent / 100.0:
+                break
+            target = i
         return target
 
     def _stop_price_for_level(
         self, entry_price: float, side: str, level_roi_percent: float, leverage: float
     ) -> float:
-        """Ціна стопа для конкретного ROI%-рівня з урахуванням leverage і
-        буфера (капованого max_buffer_fraction_of_level, щоб не з'їсти всю
-        відстань між близькими рівнями)."""
         level_price_percent = level_roi_percent / leverage
         buffer_price_percent = self.stop_buffer_percent / leverage
         max_buffer_price_percent = level_price_percent * self.max_buffer_fraction_of_level
@@ -150,6 +167,19 @@ class TrailingStopManager:
             entry_price * (1 + effective_percent / 100.0) if side == 'LONG'
             else entry_price * (1 - effective_percent / 100.0)
         )
+
+    def _anchor_stop_to_market(
+        self, desired_stop_price: float, current_market_price: float, side: str
+    ) -> float:
+        if not current_market_price or current_market_price <= 0:
+            return desired_stop_price
+        buffer = self.market_safety_buffer_price_percent / 100.0
+        if side == 'LONG':
+            max_valid_stop = current_market_price * (1 - buffer)
+            return min(desired_stop_price, max_valid_stop)
+        else:
+            min_valid_stop = current_market_price * (1 + buffer)
+            return max(desired_stop_price, min_valid_stop)
 
     async def _process_position(self, position_key: str, position: dict, price: float) -> None:
         retry_after = self._retry_after.get(position_key)
@@ -175,94 +205,42 @@ class TrailingStopManager:
             self._retry_after[position_key] = time.time() + self.move_retry_cooldown_seconds
             return
 
-        # trail_levels_percent задано в ROI% (аналогічно SL/TP стратегій),
-        # тому для порівняння з favorable_fraction (price%) переводимо
-        # через leverage конкретної позиції
-        leverage = position.get('leverage') or 1
-        try:
-            leverage = float(leverage)
-        except (TypeError, ValueError):
-            logger.warning(
-                f"TrailingStop: {position_key} invalid leverage={leverage!r}, falling back to 1x"
-            )
-            leverage = 1.0
-        if leverage <= 0:
-            leverage = 1.0
+        leverage = self._safe_leverage(position, position_key)
 
-        favorable_fraction = (
-            (price - entry_price) / entry_price if side == 'LONG'
-            else (entry_price - price) / entry_price
-        )
+        favorable_fraction = self._price_fraction(entry_price, side, price)
         favorable_roi_percent = favorable_fraction * leverage * 100.0
 
         state = self._states.setdefault(position_key, _TrailState())
 
-        # Якщо менеджер піднявся вже після відкриття позиції, відновлюємо
-        # останній позитивний SL з поточного стану позиції. Після цього всі
-        # успішні trailing-перестановки оновлюють це поле явно.
-        current_known_stop = position.get('stop_loss_price')
-        try:
-            current_known_stop = float(current_known_stop) if current_known_stop is not None else None
-        except (TypeError, ValueError):
-            current_known_stop = None
-        if state.last_positive_stop_price is None and current_known_stop is not None:
-            is_positive = (
-                current_known_stop > float(entry_price) if side == 'LONG'
-                else current_known_stop < float(entry_price)
-            )
-            if is_positive:
-                state.last_positive_stop_price = current_known_stop
-                state.last_positive_roi_percent = (
-                    ((current_known_stop - float(entry_price)) / float(entry_price) if side == 'LONG'
-                     else (float(entry_price) - current_known_stop) / float(entry_price))
-                    * leverage * 100.0
-                )
+        if state.last_positive_stop_price is None:
+            self._track_last_positive(state, entry_price, side, position.get('stop_loss_price'), leverage)
 
-        # --- єдиний лог "серцебиття" позиції: показує, куди рухається
-        # ціна відносно входу та наступного порогу сходинки (в ROI%, щоб
-        # легко звіряти з тим, що видно на біржі), щоб було видно, ЧОМУ
-        # стоп не рухається (у мінусі / ще не дійшло до порогу / порогів
-        # вже нема) без спаму по всіх символах підряд — рядок друкується
-        # лише для позицій, що реально відкриті.
-        applied_level = (
-            self.trail_levels_percent[state.last_applied_level_index]
-            if state.last_applied_level_index >= 0 else None
+        current_sl_price = position.get('stop_loss_price')
+        sl_roi_str = (
+            f"{self._roi_percent(entry_price, side, current_sl_price, leverage):+.2f}%ROI"
+            if current_sl_price is not None else "None"
         )
         next_level = (
             self.trail_levels_percent[state.last_applied_level_index + 1]
             if state.last_applied_level_index + 1 < len(self.trail_levels_percent) else None
         )
-        current_sl_price = position.get('stop_loss_price')
-        if current_sl_price is not None:
-            current_sl_fraction = (
-                (current_sl_price - entry_price) / entry_price if side == 'LONG'
-                else (entry_price - current_sl_price) / entry_price
-            )
-            current_sl_roi_percent = current_sl_fraction * leverage * 100.0
-            current_sl_str = f"{current_sl_fraction:+.3%}price/{current_sl_roi_percent:+.2f}%ROI ({current_sl_price:.6f})"
-        else:
-            current_sl_str = "None"
+        next_level_str = f"{next_level:g}%ROI" if next_level is not None else "none left"
+        logger.debug(
+            f"TrailingStop: {position_key} price={favorable_roi_percent:+.2f}%ROI, "
+            f"sl={sl_roi_str}, next_level={next_level_str}"
+        )
 
         if favorable_fraction <= 0:
-            # позиція в мінусі або рівно на вході — НІКОЛИ не рухаємо SL у
-            # цей бік, лише вперед, у прибуток
             return
 
         target_index = self._highest_reached_level_index(
             favorable_fraction, state.last_applied_level_index, leverage
         )
         if target_index <= state.last_applied_level_index:
-            return  # жодного нового порогу не досягнуто
+            return
 
         level_roi_percent = self.trail_levels_percent[target_index]
 
-        # Драбинка кандидатів ВІД НАЙВИЩОГО досягнутого рівня ДО найближчого
-        # ще не застосованого (за спаданням). Якщо ціна одним тіком
-        # проскочила відразу кілька порогів і найвищий провалюється на
-        # біржі (типово — "stale price", ціна вже пройшла ціль), пробуємо
-        # ближчі рівні замість того, щоб одразу здаватись на
-        # last_positive/initial fallback — саме це закриває дірку, коли
-        # trailing "губить" половину прибутку через один невдалий виклик API.
         candidates = []
         for idx in range(target_index, state.last_applied_level_index, -1):
             lvl = self.trail_levels_percent[idx]
@@ -270,8 +248,6 @@ class TrailingStopManager:
             candidates.append((idx, lvl, stop_price))
 
         async with state.lock:
-            # перечитуємо: поки чекали на лок, інший тик міг уже застосувати
-            # цей самий або вищий рівень, або позиція могла закритись
             if target_index <= state.last_applied_level_index:
                 return
             position = self.trader.open_positions.get(position_key)
@@ -280,15 +256,12 @@ class TrailingStopManager:
 
             current_stop = position.get('stop_loss_price')
             if current_stop is not None:
-                # SL рухається ЛИШЕ вперед: прибираємо кандидатів, чия ціна
-                # не краща за вже виставлений SL (наприклад, буфер з'їв усю
-                # відстань між близькими рівнями)
                 candidates = [
                     c for c in candidates
                     if (c[2] > current_stop if side == 'LONG' else c[2] < current_stop)
                 ]
                 if not candidates:
-                    state.last_applied_level_index = target_index  # рівень технічно "пройдено", просто нема чого рухати
+                    state.last_applied_level_index = target_index
                     return
 
             new_index = await self._move_stop_loss(position_key, position, state, candidates)
@@ -296,46 +269,22 @@ class TrailingStopManager:
                 advanced = new_index > state.last_applied_level_index
                 state.last_applied_level_index = new_index
                 if advanced:
-                    # Новий успішний trailing-рівень = новий цикл повідомлень.
                     state.fallback_notice_key = None
                     state.critical_notice_key = None
             else:
-                # НЕ позначаємо рівень застосованим — спробуємо ще раз
-                # пізніше (після короткого кулдауну, щоб не спамити біржу)
                 self._retry_after[position_key] = time.time() + self.move_retry_cooldown_seconds
-
-    # ---------- реальне переміщення SL на біржі ----------
 
     async def _move_stop_loss(
         self, position_key: str, position: dict, state: "_TrailState", candidates: List[tuple]
     ) -> Optional[int]:
-        """Переставляє єдиний SL позиції: cancel старого ОДИН раз, потім
-        пробує candidates (список (level_index, level_roi_percent,
-        stop_price) за СПАДНОЮ агресивністю — від найвищого досягнутого
-        рівня до найближчого ще не застосованого) один за одним, зупиняється
-        на першому, що вдалось розмістити на біржі.
-
-        Якщо провалились геть усі рівні — останній рубіж: fallback-ланцюжок
-        last_positive_stop_price -> initial_stop_loss_price
-        (_place_fallback_to_last_stop). Це НЕ просуває trailing-рівень.
-
-        Повертає:
-        - index рівня, що реально застосувався (може бути НИЖЧИМ за
-          початково бажаний target_index, якщо верхні кандидати провалились);
-        - незмінний state.last_applied_level_index, якщо спрацював лише
-          fallback (last_positive/initial);
-        - None, якщо провалилось геть усе."""
         symbol = position['symbol']
         side = position['side']
         quantity = position.get('remaining_quantity') or position.get('quantity')
         close_side = 'SELL' if side == 'LONG' else 'BUY'
-        position_side = side
 
         old_sl_order_id = position.get('sl_order_id')
         old_stop_price = position.get('stop_loss_price')
 
-        # 1) відміняємо поточний SL ОДИН раз для всієї спроби (не для
-        # кожного кандидата окремо — на позиції завжди лише один SL-ордер)
         try:
             await self.exchange.cancel_order(symbol, old_sl_order_id)
         except BingXAPIError as e:
@@ -352,18 +301,35 @@ class TrailingStopManager:
             return None
 
         position['sl_order_id'] = None
+        self._persist_position(position, context="cleared sl_order_id after cancel")
+
+        current_market_price: Optional[float] = None
         try:
-            self.db.update_position_metadata(order_id=position['order_id'], metadata=json.dumps(position))
+            current_market_price = await self.exchange.get_mark_price(symbol)
         except Exception as e:
-            logger.error(
-                f"TrailingStop: failed to persist cleared sl_order_id for {position_key} "
-                f"after cancel: {e}", exc_info=True
+            logger.warning(
+                f"TrailingStop: {position_key} failed to fetch fresh mark price before "
+                f"placing SL, falling back to tick-derived candidate prices: {e}"
             )
 
-        # 2) пробуємо кандидатів по спадній — від найагресивнішого до
-        # найближчого до вже застосованого рівня
         rate_limited = False
         for level_index, level_roi_percent, desired_stop_price in candidates:
+            if current_market_price:
+                anchored_price = self._anchor_stop_to_market(
+                    desired_stop_price, current_market_price, side
+                )
+                if old_stop_price is not None:
+                    anchored_price = (
+                        max(anchored_price, old_stop_price) if side == 'LONG'
+                        else min(anchored_price, old_stop_price)
+                    )
+                if anchored_price != desired_stop_price:
+                    logger.info(
+                        f"TrailingStop: {position_key} level {level_roi_percent:g}%ROI "
+                        f"price anchored to live market {current_market_price:.6f}: "
+                        f"{desired_stop_price:.6f} -> {anchored_price:.6f}"
+                    )
+                desired_stop_price = anchored_price
             client_order_id = f"sl-{int(time.time() * 1000)}"
             try:
                 response = await self.exchange.create_order(
@@ -372,7 +338,7 @@ class TrailingStopManager:
                     order_type='STOP_MARKET',
                     quantity=quantity,
                     stop_price=desired_stop_price,
-                    position_side=position_side,
+                    position_side=side,
                     close_position=True,
                     client_order_id=client_order_id,
                 )
@@ -405,7 +371,6 @@ class TrailingStopManager:
                 )
                 continue
 
-            # --- успіх ---
             new_order_id = None
             if response and 'data' in response and 'order' in response['data']:
                 new_order_id = response['data']['order'].get('orderId')
@@ -418,37 +383,17 @@ class TrailingStopManager:
             position['stop_loss_price'] = desired_stop_price
             position['sl_order_id'] = str(new_order_id) if new_order_id else None
             position['sl_client_order_id'] = client_order_id
-
-            try:
-                self.db.update_position_metadata(order_id=position['order_id'], metadata=json.dumps(position))
-            except Exception as e:
-                logger.error(f"TrailingStop: failed to persist moved SL to DB for {position_key}: {e}", exc_info=True)
+            self._persist_position(position, context="moved SL")
 
             entry_price = position.get('entry_price')
-            leverage = position.get('leverage') or 1
-            try:
-                leverage = float(leverage)
-            except (TypeError, ValueError):
-                leverage = 1.0
-            if leverage <= 0:
-                leverage = 1.0
+            leverage = self._safe_leverage(position, position_key)
+            self._track_last_positive(state, entry_price, side, desired_stop_price, leverage)
 
-            if entry_price:
-                stop_fraction = (
-                    (desired_stop_price - entry_price) / entry_price if side == 'LONG'
-                    else (entry_price - desired_stop_price) / entry_price
-                )
-                if stop_fraction > 0:
-                    state.last_positive_stop_price = desired_stop_price
-                    state.last_positive_roi_percent = stop_fraction * leverage * 100.0
-
-            skipped_note = ""
             if level_index != candidates[0][0]:
-                skipped_note = (
-                    f" (ЦІЛЬОВИЙ рівень {candidates[0][1]:g}%ROI провалився — "
-                    f"застосовано найближчий доступний {level_roi_percent:g}%ROI)"
+                logger.warning(
+                    f"TrailingStop: {position_key} ЦІЛЬОВИЙ рівень {candidates[0][1]:g}%ROI "
+                    f"провалився — застосовано найближчий доступний {level_roi_percent:g}%ROI"
                 )
-
 
             try:
                 await self.event_bus.publish(Event(
@@ -470,10 +415,6 @@ class TrailingStopManager:
 
             return level_index
 
-        # 3) провалились ГЕТЬ УСІ рівні-кандидати (старий SL вже відмінено) —
-        # останній рубіж: last_positive_stop_price -> initial_stop_loss_price.
-        # При rate limit НЕ пробуємо fallback — той самий виклик create_order
-        # майже напевно теж впаде в 109429, лише витратимо ліміт запитів.
         if rate_limited:
             return None
 
@@ -487,21 +428,12 @@ class TrailingStopManager:
     # ---------- автоматичний fallback: last positive -> initial ----------
 
     async def _place_fallback_to_last_stop(self, position_key: str, position: dict) -> bool:
-        """Автоматичний fallback без ручного втручання.
-
-        Порядок завжди жорсткий:
-        1. останній ФАКТИЧНО застосований позитивний SL;
-        2. якщо його не вдалося створити — найперший SL позиції.
-
-        Важливо: успішний fallback НЕ позначає trailing-рівень виконаним.
-        Тому після відновлення, наприклад, +2.50% ROI бот продовжить
-        автоматично намагатися виставити наступний рівень +16% ROI.
-        """
         symbol = position['symbol']
         side = position['side']
         quantity = position.get('remaining_quantity') or position.get('quantity')
         close_side = 'SELL' if side == 'LONG' else 'BUY'
         entry_price = position.get('entry_price')
+        leverage = self._safe_leverage(position, position_key)
 
         state = self._states.setdefault(position_key, _TrailState())
 
@@ -517,35 +449,20 @@ class TrailingStopManager:
         if last_positive is not None and entry:
             try:
                 last_positive = float(last_positive)
-                is_positive = (
-                    last_positive > entry if side == 'LONG'
-                    else last_positive < entry
-                )
-                if is_positive:
-                    candidates.append(('last_positive', last_positive))
             except (TypeError, ValueError):
-                pass
+                last_positive = None
+            if last_positive is not None and self._price_fraction(entry, side, last_positive) > 0:
+                candidates.append(('last_positive', last_positive))
 
-        # Сумісність/відновлення для старого стану: якщо окреме поле ще не
-        # заповнене, беремо поточний SL, але тільки якщо він реально в плюсі.
         if not candidates:
             current_stop = position.get('stop_loss_price')
             try:
                 current_stop = float(current_stop) if current_stop is not None else None
             except (TypeError, ValueError):
                 current_stop = None
-            if current_stop is not None and entry:
-                is_positive = (
-                    current_stop > entry if side == 'LONG'
-                    else current_stop < entry
-                )
-                if is_positive:
-                    state.last_positive_stop_price = current_stop
-                    state.last_positive_roi_percent = (
-                        ((current_stop - entry) / entry if side == 'LONG'
-                         else (entry - current_stop) / entry) * float(position.get('leverage') or 1) * 100.0
-                    )
-                    candidates.append(('last_positive', current_stop))
+            if current_stop is not None and entry and self._price_fraction(entry, side, current_stop) > 0:
+                self._track_last_positive(state, entry, side, current_stop, leverage)
+                candidates.append(('last_positive', current_stop))
 
         # 2) Найперший SL — тільки якщо останній позитивний не вдалося створити.
         initial_stop_price = state.initial_stop_price
@@ -609,40 +526,11 @@ class TrailingStopManager:
             position['stop_loss_price'] = stop_price
             position['sl_order_id'] = str(new_order_id) if new_order_id else None
             position['sl_client_order_id'] = client_order_id
+            self._persist_position(position, context="fallback SL")
 
-            try:
-                self.db.update_position_metadata(
-                    order_id=position['order_id'],
-                    metadata=json.dumps(position),
-                )
-            except Exception as e:
-                logger.error(
-                    f"TrailingStop: failed to persist fallback SL for {position_key}: {e}",
-                    exc_info=True,
-                )
+            stop_roi = self._roi_percent(entry, side, stop_price, leverage) if entry else 0.0
 
-            # ROI стопа, а не його абсолютна біржова ціна.
-            leverage = position.get('leverage') or 1
-            try:
-                leverage = float(leverage)
-            except (TypeError, ValueError):
-                leverage = 1.0
-            if leverage <= 0:
-                leverage = 1.0
-
-            if entry:
-                stop_fraction = (
-                    (stop_price - entry) / entry if side == 'LONG'
-                    else (entry - stop_price) / entry
-                )
-                stop_roi = stop_fraction * leverage * 100.0
-            else:
-                stop_roi = 0.0
-
-            # Якщо fallback був позитивним — він залишається нашим last_positive.
-            if stop_roi > 0:
-                state.last_positive_stop_price = stop_price
-                state.last_positive_roi_percent = stop_roi
+            self._track_last_positive(state, entry, side, stop_price, leverage)
 
             notice_key = f"fallback:{position_key}:{candidate_name}:{stop_price:.12g}"
             if state.fallback_notice_key != notice_key:
@@ -659,8 +547,6 @@ class TrailingStopManager:
             )
             return True
 
-        # Навіть коли fallback повністю провалився, не спамимо однаковою
-        # критичною помилкою на кожному наступному retry.
         logger.error(f"TrailingStop: ALL automatic fallbacks failed for {position_key}")
         notice_key = f"all_fallbacks_failed:{position_key}"
         if state.critical_notice_key != notice_key:

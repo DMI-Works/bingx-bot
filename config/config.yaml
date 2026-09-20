@@ -1,45 +1,25 @@
 # Trading Bot Configuration
 
 # Exchange Configuration
+
 exchange:
-  name: "bingx"
-  api_key: "${BINGX_API_KEY}"
-  api_secret: "${BINGX_API_SECRET}"
-  testnet: true
+  testnet: false
 
   websocket:
     enabled: true
-    reconnect_interval: 5
-    ping_interval: 20
-    max_reconnect_attempts: 10
 
-  rest:
-    timeout: 30
-    max_retries: 3
-    retry_delay: 1
-
-# Trading Configuration — тільки базові / глобальні налаштування.
-# Параметри конкретних стратегій (sma_period, stop_loss, take_profit,
-# rejection_block, position_size, leverage і т.д.) тепер зберігаються
-# в БД (таблиця strategy_settings) — див. core/strategies/defaults.py
-# для заводських значень і core/database/strategy_settings.py для API
-# читання/редагування/скидання.
 trading:
-  enabled: true
-  direction: "both"  # long, short, both
-
   # Risk Management — акаунт-рівневий, застосовується до всіх стратегій
   # одразу (не per-strategy), тому лишається тут
   risk:
     max_open_positions: 3
     max_positions_per_symbol: 1
     max_total_risk_percent: 5.0
+    # Скільки збиткових угод ПОСПІЛЬ по одній монеті — і ця монета ПРИБИРАЄТЬСЯ
+    # з торгівлі (чорний список + відписка від WS). Не пауза по таймеру: назад
+    # її повертають вручну (міні-апп → Монети → чорний список). 0 = вимкнено.
+    # Серія рахується окремо по кожній монеті, інші монети не зачіпаються.
     max_consecutive_losses: 3
-    # Скільки чекати після спрацювання ліміту max_consecutive_losses, перш
-    # ніж лічильник збитків скинеться сам і бот знову зможе відкривати нові
-    # позиції (раніше пауза була НАЗАВЖДИ, без цього — не міняй без потреби).
-    consecutive_losses_cooldown_seconds: 60
-    cooldown_after_trade_seconds: 1800
     # risk-based position sizing (см. ТЗ п.2 "risk_per_trade вместо fixed size")
     # ВЫКЛЮЧЕНО по умолчанию — включи явно (true) после того, как проверишь
     # risk_per_trade_percent на testnet: он заменит position_size стратегий
@@ -52,7 +32,7 @@ trading:
   # (свідоме архітектурне рішення з ТЗ на OrderBook-модуль — один список
   # символів замість двох незалежних пулів з різними лімітами).
   filters:
-    whitelist_symbols: ["BSB-USDT", "CLO-USDT", "VINE-USDT", "DEXE-USDT", "BEAT-USDT", "XPIN-USDT"]
+    whitelist_symbols: []
     blacklist_symbols: []
     # ліміт з ТЗ на OrderBook-модуль (не більше 20 активних підписок).
     # На одному WS-з'єднанні це max_symbols трейд-підписок + max_symbols
@@ -63,7 +43,6 @@ trading:
     max_price: {}
     min_volume_24h: 1000000
     max_spread_percent: 0.5
-    min_atr: 0
     refresh_interval_seconds: 3600
     # ротація монет (SymbolSelector.select) кожні refresh_interval_seconds:
     # - held (відкриті позиції) і whitelist_symbols — НІКОЛИ не чіпаються
@@ -74,11 +53,6 @@ trading:
     # 1800с (30хв) — точне значення з ТЗ на OrderBook/SubscriptionManager
     # (раніше було 3600с, змінено при об'єднанні пулів)
     no_signal_replace_after_seconds: 1800
-
-  time_filters:
-    enabled: false
-    allowed_hours: []
-    timezone: "UTC"
 
   # OrderBookAnalyzer (core/orderbook_analyzer.py) — детект "стін" і їх
   # пробою по partial book depth (@depth20). Сам по собі лише детектить +
@@ -104,7 +78,6 @@ trading:
     # якщо пробою так і не відбулось
     wall_stale_seconds: 300.0
 
-
   # ВАЖНО: main.py читает этот блок как config.get('trading.trailing_stop'),
   # поэтому он ОБЯЗАН быть вложен под trading: (а не на верхнем уровне, как
   # было раньше — из-за этого TrailingStopManager получал config={} и всегда
@@ -123,11 +96,6 @@ trading:
     # буфер не может съедать больше этой доли расстояния до уровня
     max_buffer_fraction_of_level: 0.8
 
-# Strategy Configuration — лише перелік, які стратегії запускати.
-# Їхні параметри — в БД.
-# strategies:
-#   enabled: ['SimpleMovingAverageStrategy', 'RejectionBlockStrategy']
-
 # Logging Configuration
 logging:
   level: "INFO"
@@ -136,15 +104,14 @@ logging:
   backup_count: 5
 
 # Telegram Configuration
+# bot_token / chat_id сюда НЕ выносятся — main.py читает их напрямую из
+# TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID в .env (как и с ключами BingX),
+# дублирующие поля в YAML реально не читались.
 telegram:
   enabled: true
-  bot_token: "${TELEGRAM_BOT_TOKEN}"
-  chat_id: "${TELEGRAM_CHAT_ID}"
-
-  notifications:
-    position_opened: true
-    position_closed: true
-    take_profit_hit: true
+  # notifications.* тут раніше був, але TelegramBot ніколи його не читав
+  # (notifications_enabled захардкожений як True) — прибрано, щоб не
+  # вводити в оману.
 
 webapp:
   enabled: true

@@ -58,8 +58,7 @@ class TelegramBot:
         self.event_bus.subscribe(EventType.ERROR, self._on_error)
         self.event_bus.subscribe(EventType.CRITICAL_ERROR, self._on_critical_error)
         self.event_bus.subscribe(EventType.SYMBOLS_ROTATED, self._on_symbols_rotated)
-        self.event_bus.subscribe(EventType.RISK_LIMIT_EXCEEDED, self._on_risk_limit_exceeded)
-        self.event_bus.subscribe(EventType.RISK_LIMIT_CLEARED, self._on_risk_limit_cleared)
+        self.event_bus.subscribe(EventType.SYMBOL_BLACKLISTED, self._on_symbol_blacklisted)
 
     async def start(self) -> None:
         self.application = Application.builder().token(self.token).build()
@@ -275,28 +274,17 @@ class TelegramBot:
 """
         await self.send_message(text)
 
-    async def _on_risk_limit_exceeded(self, event: Event) -> None:
+    async def _on_symbol_blacklisted(self, event: Event) -> None:
         data = event.data
-        cooldown_min = round(data.get('cooldown_seconds', 0) / 60, 1)
         symbol = data.get('symbol', 'N/A')
         text = f"""
-⏸ <b>Торгівлю по {symbol} призупинено</b>
+🚫 <b>{symbol} прибрано з торгівлі</b>
 
 {data.get('consecutive_losses')} збиткових угод поспіль по {symbol} (ліміт: {data.get('max_consecutive_losses')}).
-Пауза стосується лише цієї монети — по інших символах бот торгує як звичайно.
-
-Нові позиції по {symbol} не відкриваються ~{cooldown_min} хв, потім бот відновить торгівлю по ній автоматично.
-Вже відкриті позиції продовжують супроводжуватись (SL/TP) — цієї паузи не стосується.
+Монету додано до чорного списку й відписано від потоку даних — нові позиції по ній не відкриваються, доки ти не повернеш її вручну (міні-апп → Монети → чорний список).
+По інших символах бот торгує як звичайно.
 """
         await self.send_message(text)
-
-    async def _on_risk_limit_cleared(self, event: Event) -> None:
-        symbol = event.data.get('symbol', 'N/A')
-        await self.send_message(
-            f"▶️ <b>Торгівля по {symbol} відновлена</b>\n\n"
-            f"Пауза після серії збиткових угод по {symbol} закінчилась, лічильник скинуто — "
-            f"бот знову може відкривати позиції по цій монеті."
-        )
 
     async def _on_stop_loss_moved(self, event: Event) -> None:
         data = event.data

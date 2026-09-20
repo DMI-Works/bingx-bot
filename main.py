@@ -103,7 +103,7 @@ async def main():
         logger.info("[OK] trading.enabled not set yet — seeded to True (preserves prior always-on behavior)")
 
     risk_config = config.get('trading.risk')
-    risk_manager = RiskManager(db, event_bus, exchange, risk_config)
+    risk_manager = RiskManager(db, event_bus, exchange, risk_config, settings_manager=settings_manager)
     logger.info("[OK] Risk Manager initialized")
 
     trader = SimpleTrader(

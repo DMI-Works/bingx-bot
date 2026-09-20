@@ -27,6 +27,13 @@ class SymbolSelector:
         self.settings_manager = settings_manager
         self._refresh_task: Optional[asyncio.Task] = None
         self.current_symbols: Set[str] = set()
+       
+        self._apply_lock = asyncio.Lock()
+
+        if self.event_bus is not None:
+            # Монету убрал RiskManager (серия убытков) — сразу отписываемся,
+            # не дожидаясь следующей ротации по таймеру.
+            self.event_bus.subscribe(EventType.SYMBOL_BLACKLISTED, self._on_symbol_blacklisted)
 
     async def select(self) -> List[str]:
         """
@@ -51,7 +58,10 @@ class SymbolSelector:
             # з config.yaml, щоб користувач міг додавати монети "на льоту",
             # не чіпаючи файл конфігурації
             blacklist |= set(self.settings_manager.get_blacklist_symbols())
-        whitelist = set(self.filters.get('whitelist_symbols', []))
+        # blacklist ВСЕГДА приоритетнее whitelist: монета, убранная из торговли
+        # (вручную или автоматически после серии убытков), не должна
+        # оставаться в подписке только потому, что она есть в whitelist.
+        whitelist = set(self.filters.get('whitelist_symbols', [])) - blacklist
         min_volume_24h = self.filters.get('min_volume_24h', 0)
         max_spread_percent = self.filters.get('max_spread_percent', None)
         min_price = self.filters.get('min_price', {}) or {}
@@ -99,7 +109,8 @@ class SymbolSelector:
 
         # --- захист від ротації ---
         # п.1: whitelist + held (відкриті позиції) — завжди захищені, незалежно
-        # від об'єму/сигналів. Це вже було раніше і працює коректно.
+        # від об'єму/сигналів. Виняток — blacklist (див. вище): він вже вирахуваний
+        # з whitelist, а held лишається, поки позиція відкрита (SL/TP/trailing).
         protected = set(whitelist) | set(held_symbols)
 
         currently_subscribed = set(getattr(self.exchange, 'subscribed_symbols', set()) or set())
@@ -110,13 +121,14 @@ class SymbolSelector:
             active_unheld = {
                 s for s in currently_subscribed
                 if s not in protected
+                and s not in blacklist
                 and self.signal_tracker.had_signal_within(s, no_signal_replace_after_seconds)
             }
             protected |= active_unheld
 
             # "тихі" — підписані, не held, не давали сигналу — свідомо НЕ
             # додаються в protected, щоб їх могли витіснити свіжі кандидати
-            quiet_unheld = currently_subscribed - protected
+            quiet_unheld = currently_subscribed - protected - blacklist
             if quiet_unheld:
                 logger.info(
                     f"[SYMBOLS] Quiet symbols eligible for replacement "
@@ -140,6 +152,18 @@ class SymbolSelector:
         return sorted(selected)
 
     async def apply(self) -> Set[str]:
+        async with self._apply_lock:
+            return await self._apply_unlocked()
+
+    async def _on_symbol_blacklisted(self, event: Event) -> None:
+        symbol = event.data.get('symbol')
+        logger.info(f"[SYMBOLS] {symbol} blacklisted ({event.data.get('reason')}) — re-applying symbol selection")
+        try:
+            await self.apply()
+        except Exception as e:
+            logger.error(f"[SYMBOLS] Failed to re-apply selection after blacklisting {symbol}: {e}", exc_info=True)
+
+    async def _apply_unlocked(self) -> Set[str]:
         """Обчислює актуальний список символів, підписує нові, відписує зайві.
 
         Спільний пул: кожен символ у `selected` отримує ОБИДВІ підписки —

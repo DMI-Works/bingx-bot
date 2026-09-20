@@ -46,6 +46,9 @@ class EventType(Enum):
 
     # Symbol Selection Events
     SYMBOLS_ROTATED = "symbols_rotated"
+    # Монету убрали из торговли (добавили в чёрный список) — сейчас это делает
+    # RiskManager после max_consecutive_losses убытков подряд по монете.
+    SYMBOL_BLACKLISTED = "symbol_blacklisted"
 
     # OrderBook Events
     ORDERBOOK_UPDATED = "orderbook_updated"
@@ -56,11 +59,6 @@ class EventType(Enum):
     # RECOVERY_STARTED = "recovery_started"
     # RECOVERY_COMPLETED = "recovery_completed"
     # RECOVERY_FAILED = "recovery_failed"
-
-    # Risk Events
-    RISK_LIMIT_EXCEEDED = "risk_limit_exceeded"
-    RISK_LIMIT_CLEARED = "risk_limit_cleared"
-    # COOLDOWN_ACTIVE = "cooldown_active"
 
     # Settings Events
     SETTINGS_CHANGED = "settings_changed"
