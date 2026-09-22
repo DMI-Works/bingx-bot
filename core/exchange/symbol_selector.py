@@ -67,12 +67,23 @@ class SymbolSelector:
         min_price = self.filters.get('min_price', {}) or {}
         max_price = self.filters.get('max_price', {}) or {}
         max_symbols = self.filters.get('max_symbols', None)
+
+        # --- відбір "швидких" монет ---
+        # ranking='volatility': сортуємо за добовим діапазоном (high-low)/low,
+        # зваженим на ліквідність — швидкі, але не тонкі монети. Будь-яке
+        # інше значення (за замовч. 'volume') — стара поведінка, лише за об'ємом.
+        ranking = str(self.filters.get('ranking', 'volume')).lower()
+        min_range_pct = float(self.filters.get('min_range_pct', 0) or 0)
+        max_range_pct = self.filters.get('max_range_pct', None)
+        max_range_pct = float(max_range_pct) if max_range_pct else None
+        liquidity_ref_volume = float(self.filters.get('liquidity_ref_volume', 30_000_000) or 30_000_000)
         no_signal_replace_after_seconds = self.filters.get('no_signal_replace_after_seconds', 3600)
 
         held_symbols = await self._get_held_symbols()
         tickers = await self._get_tickers()
 
         candidates = []
+        candidate_meta: Dict[str, tuple] = {}  # symbol -> (range_pct, quote_volume) для логу
 
         for ticker in tickers:
             symbol = ticker.get('symbol')
@@ -103,9 +114,35 @@ class SymbolSelector:
                 if spread_percent > max_spread_percent:
                     continue
 
-            candidates.append((symbol, quote_volume))
+            range_pct = self._daily_range_pct(ticker)
+
+            if ranking == 'volatility':
+                # невідома волатильність = не можемо підтвердити, що монета "швидка"
+                if range_pct is None:
+                    continue
+                if range_pct < min_range_pct:
+                    continue
+                if max_range_pct is not None and range_pct > max_range_pct:
+                    continue
+                score = range_pct * min(1.0, quote_volume / liquidity_ref_volume)
+            else:
+                score = quote_volume
+
+            candidates.append((symbol, score))
+            candidate_meta[symbol] = (range_pct, quote_volume)
 
         candidates.sort(key=lambda c: c[1], reverse=True)
+
+        if candidates:
+            top = ', '.join(
+                f"{sym}(score={score:.2f}, range="
+                f"{(candidate_meta[sym][0] if candidate_meta[sym][0] is not None else float('nan')):.1f}%, "
+                f"vol={candidate_meta[sym][1] / 1e6:.0f}M)"
+                for sym, score in candidates[:10]
+            )
+            logger.info(f"[SYMBOLS] Ranking={ranking}, {len(candidates)} passed filters. Top-10: {top}")
+        else:
+            logger.warning(f"[SYMBOLS] Ranking={ranking}: no symbols passed filters — check filter thresholds")
 
         # --- захист від ротації ---
         # п.1: whitelist + held (відкриті позиції) — завжди захищені, незалежно
@@ -150,6 +187,18 @@ class SymbolSelector:
         selected = protected | filtered_symbols
 
         return sorted(selected)
+
+    @staticmethod
+    def _daily_range_pct(ticker: Dict[str, Any]) -> Optional[float]:
+        """Добовий діапазон (high-low)/low у %. None, якщо тікер не містить коректних high/low."""
+        try:
+            high_price = float(ticker.get('highPrice', 0) or 0)
+            low_price = float(ticker.get('lowPrice', 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if low_price <= 0 or high_price < low_price:
+            return None
+        return (high_price - low_price) / low_price * 100.0
 
     async def apply(self) -> Set[str]:
         async with self._apply_lock:

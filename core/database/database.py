@@ -129,12 +129,17 @@ class Database:
         roe_percent: Optional[float] = None,
         margin_usdt: Optional[float] = None,
         commission_usdt: Optional[float] = None,
-        net_pnl: Optional[float] = None
+        net_pnl: Optional[float] = None,
+        extra_fields: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Оновлює статус позиції. Усі метрики — опціональні: якщо не передані,
         відповідні поля не чіпаються (тільки $set по переданих полях, щоб
         проміжний виклик не затер вже записані значення None-ом).
+
+        extra_fields — довільні додаткові поля для $set (діагностика виходу:
+        проскальзування стопа, MFE/MAE, латентність постановки SL і т.д.).
+        None-значення пропускаються.
         """
         update_fields: Dict[str, Any] = {"status": status}
 
@@ -152,6 +157,10 @@ class Database:
             update_fields["commission_usdt"] = commission_usdt
         if net_pnl is not None:
             update_fields["net_pnl"] = net_pnl
+        if extra_fields:
+            for key, value in extra_fields.items():
+                if value is not None:
+                    update_fields[key] = value
 
         with self._lock:
             self.db.positions.update_one(

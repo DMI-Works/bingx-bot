@@ -83,6 +83,10 @@ class SimpleTrader:
                     'remaining_quantity': metadata.get('remaining_quantity') or metadata.get('quantity', 0),
                     'closing_trade_ids': metadata.get('closing_trade_ids', []),
                     'closing_orders': metadata.get('closing_orders', []),
+                    'max_favorable_roi': metadata.get('max_favorable_roi', 0.0),
+                    'max_adverse_roi': metadata.get('max_adverse_roi', 0.0),
+                    'sl_latency_ms': metadata.get('sl_latency_ms'),
+                    'emergency_client_order_id': metadata.get('emergency_client_order_id'),
                 }
 
             if rows:
@@ -157,8 +161,8 @@ class SimpleTrader:
         self,
         symbol: str,
         order_id: str,
-        max_attempts: int = 6,
-        delay_seconds: float = 0.3
+        max_attempts: int = 10,
+        delay_seconds: float = 0.1
     ) -> Optional[Dict[str, Any]]:
         """
         Для MARKET-ордера синхронна відповідь create_order часто повертає
@@ -298,6 +302,8 @@ class SimpleTrader:
 
             order_side = 'BUY' if side == 'LONG' else 'SELL'
 
+            t_entry_sent = time.monotonic()
+
             try:
                 exchange_order = await self.exchange.create_order(
                     symbol=symbol,
@@ -429,6 +435,14 @@ class SimpleTrader:
                 'realized_pnl_accum': 0.0,
                 'commission_accum': 0.0,
                 'remaining_quantity': executed_qty,
+                # MFE/MAE у %ROI — оновлює TrailingStopManager на кожному тіку
+                'max_favorable_roi': 0.0,
+                'max_adverse_roi': 0.0,
+                # поки True — TrailingStopManager не втручається (інакше гонка
+                # за створення SL: два SL / зайвий emergency-close)
+                'sl_pending': bool(stop_loss_price),
+                'sl_latency_ms': None,
+                'emergency_client_order_id': None,
             }
             self.open_positions[position_key] = position_data
 
@@ -448,22 +462,40 @@ class SimpleTrader:
 
             # Створюємо стоп/тейк ордери — використовуємо реально виконаний обсяг
             # (executed_qty), а не запитаний quantity, щоб уникнути розсинхрону
-            # з реальним залишком позиції на біржі
+            # з реальним залишком позиції на біржі.
+            # Працюємо з position_data напряму (той самий dict, що лежить в
+            # self.open_positions): якщо позицію вже закрито аварійно і
+            # обробник ORDER_TRADE_UPDATE встиг її видалити, індексація
+            # self.open_positions[position_key] дала б KeyError.
+            emergency_closed = False
             if stop_loss_price:
-                sl_order_id, sl_client_order_id = await self._create_stop_loss(
+                sl_order_id, sl_client_order_id, emergency_closed = await self._create_stop_loss(
                     symbol, side, executed_qty, stop_loss_price, entry_price
                 )
+                position_data['sl_pending'] = False
+                position_data['sl_latency_ms'] = round((time.monotonic() - t_entry_sent) * 1000)
+                logger.info(
+                    f"SL latency {symbol} {side}: {position_data['sl_latency_ms']} ms "
+                    f"від відправки ринкового входу до завершення постановки SL"
+                )
                 if sl_order_id:
-                    self.open_positions[position_key]['sl_order_id'] = str(sl_order_id)
+                    position_data['sl_order_id'] = str(sl_order_id)
                 if sl_client_order_id:
-                    self.open_positions[position_key]['sl_client_order_id'] = sl_client_order_id
+                    position_data['sl_client_order_id'] = sl_client_order_id
 
-            if take_profit_levels:
+            if emergency_closed:
+                # позиція вже закривається по ринку — тейки ставити нема сенсу
+                position_data['emergency_closed'] = True
+                positions_info_message = (
+                    f"{positions_info_message} | ⚠️ SL вже був пробитий до постановки — "
+                    f"закриваю по ринку"
+                )
+            elif take_profit_levels:
                 tp_results = await self._create_take_profit_orders(symbol, side, executed_qty, take_profit_levels)
-                self.open_positions[position_key]['tp_order_ids'] = [
+                position_data['tp_order_ids'] = [
                     str(r['order_id']) for r in tp_results if r.get('order_id')
                 ]
-                self.open_positions[position_key]['tp_client_order_ids'] = [
+                position_data['tp_client_order_ids'] = [
                     r['client_order_id'] for r in tp_results if r.get('client_order_id')
                 ]
 
@@ -471,12 +503,12 @@ class SimpleTrader:
             try:
                 self.db.update_position_metadata(
                     order_id=str(order_id),
-                    metadata=json.dumps(self.open_positions[position_key])
+                    metadata=json.dumps(position_data)
                 )
             except Exception as e:
                 logger.error(f"Failed to update position metadata in DB: {e}", exc_info=True)
 
-            margin_usdt = self._calc_margin_usdt(self.open_positions[position_key])
+            margin_usdt = self._calc_margin_usdt(position_data)
 
             # Публікуємо подію POSITION_OPENED
             await self.event_bus.publish(Event(
@@ -504,6 +536,65 @@ class SimpleTrader:
             )
             return False
 
+    @staticmethod
+    def _is_stale_stop_error(e: BingXAPIError) -> bool:
+        """
+        BingX відхиляє STOP_MARKET, якщо stopPrice вже "позаду" поточної ціни
+        (110412: "Stop Loss price should be greater/less than the current price").
+        Для позиції це означає: ціна ВЖЕ пройшла рівень стопа.
+        """
+        return e.code == 110412 or 'current price' in (e.msg or '').lower()
+
+    async def emergency_close_position(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        reason: str,
+    ) -> bool:
+        """
+        Аварійне закриття позиції ринковим ордером. Викликається, коли захисний
+        SL неможливо (або вже пізно) виставити на біржі: ціна пройшла рівень,
+        API тимчасово недоступний тощо.
+
+        Принцип: збиток = реальний гепи до моменту закриття, і НІ КОПІЙКИ
+        зверху. Раніше в такій ситуації SL "переприв'язувався" до поточної ціни
+        (mark * (1 -/+ відстань_стопа)), тобто позиція отримувала ще один повний
+        стоп ПОНАД уже накопичений збиток — звідси 2x–5x від запланованого SL.
+        """
+        close_side = 'SELL' if side == 'LONG' else 'BUY'
+        client_order_id = f"emg-{int(time.time() * 1000)}"
+
+        position = self.open_positions.get(f"{symbol}_{side}")
+        if position is not None:
+            # щоб _handle_order_update визнав це закриття "своїм" (closed_by=bot)
+            position['emergency_client_order_id'] = client_order_id
+
+        try:
+            await self.exchange.create_order(
+                symbol=symbol,
+                side=close_side,
+                order_type='MARKET',
+                quantity=quantity,
+                position_side=side,
+                client_order_id=client_order_id,
+            )
+        except Exception as e:
+            logger.error(f"EMERGENCY close FAILED for {symbol} {side}: {e} (reason: {reason})")
+            await self._notify_error(
+                error=str(e),
+                context=f"🚨 Не вдалося аварійно закрити {symbol} {side} ({reason}) — позиція може бути без захисту!",
+                critical=True,
+            )
+            return False
+
+        logger.warning(f"EMERGENCY close sent for {symbol} {side} qty={quantity}: {reason}")
+        await self._notify_error(
+            error=reason,
+            context=f"⚠️ {symbol} {side}: аварійне закриття по ринку",
+        )
+        return True
+
     async def _create_stop_loss(
         self,
         symbol: str,
@@ -517,15 +608,15 @@ class SimpleTrader:
         вместо quantity — биржа сама заквадратит позицию по факту срабатывания,
         без хвостов и без ошибок округления (110424). quantity здесь больше не нужен
         и не используется в запросе.
+
+        Повертає (order_id, client_order_id, emergency_closed).
+
+        ВАЖЛИВО: рівень стопа НІКОЛИ не зсувається від початкового. Якщо біржа
+        каже, що ціна вже пройшла стоп — позицію закриваємо по ринку
+        (emergency_closed=True), а не ставимо новий стоп від поточної ціни.
         """
         close_side = 'SELL' if side == 'LONG' else 'BUY'
         position_side = 'LONG' if side == 'LONG' else 'SHORT'
-
-        current_stop_price = stop_loss_price
-
-        buffer_percent = None
-        if entry_price and entry_price > 0 and stop_loss_price:
-            buffer_percent = abs(entry_price - stop_loss_price) / entry_price
 
         client_order_id = f"sl-{int(time.time() * 1000)}"
         max_attempts = 3
@@ -538,9 +629,9 @@ class SimpleTrader:
                     quantity=quantity,
                     side=close_side,
                     order_type='STOP_MARKET',
-                    stop_price=current_stop_price,
+                    stop_price=stop_loss_price,
                     position_side=position_side,
-                    close_position=True,  
+                    close_position=True,
                     client_order_id=client_order_id,
                 )
 
@@ -549,51 +640,49 @@ class SimpleTrader:
                     order_id = response['data']['order'].get('orderId')
 
                 logger.info(
-                    f"Stop loss created: {symbol} @ {current_stop_price}, "
+                    f"Stop loss created: {symbol} @ {stop_loss_price}, "
                     f"orderId={order_id}, clientOrderId={client_order_id}, closePosition=true"
                 )
-                return order_id, client_order_id
+                return order_id, client_order_id, False
 
             except BingXAPIError as e:
                 last_error = e
 
-                if 'current price' in (e.msg or '').lower() and buffer_percent is not None and attempt < max_attempts:
-                    try:
-                        mark_price = await self.exchange.get_mark_price(symbol)
-                        # +0.05% запасу понад buffer_percent — навіть mark
-                        # price, отримана через REST, встигає трохи
-                        # "постаріти" за час round-trip до біржі на
-                        # волатильних алтах
-                        safety_percent = buffer_percent + 0.0005
-                        new_stop_price = (
-                            mark_price * (1 - safety_percent) if side == 'LONG'
-                            else mark_price * (1 + safety_percent)
-                        )
-                        logger.warning(
-                            f"SL for {symbol} rejected as stale (price already passed target "
-                            f"{current_stop_price}). Re-anchoring to mark price {mark_price} -> "
-                            f"new stop={new_stop_price}, retrying (attempt {attempt+1})"
-                        )
-                        current_stop_price = new_stop_price
-                        continue
-                    except Exception as fetch_err:
-                        logger.error(f"Failed to fetch mark price to re-anchor SL for {symbol}: {fetch_err}")
-                        break
+                if self._is_stale_stop_error(e):
+                    logger.error(
+                        f"SL for {symbol} {side} rejected as stale ({e.code} {e.msg}): price already "
+                        f"passed {stop_loss_price}. NOT re-anchoring — closing at market."
+                    )
+                    closed = await self.emergency_close_position(
+                        symbol, side, quantity,
+                        reason=f"SL {stop_loss_price} вже пробитий на момент постановки",
+                    )
+                    # якщо аварійне закриття не вдалось — це вже CRITICAL всередині
+                    # emergency_close_position; TrailingStopManager (hard-stop
+                    # watchdog) продовжить спроби закрити позицію
+                    return None, None, closed
 
+                # тимчасові збої (rate limit, мережа) — короткий повтор того ж рівня
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.2 * attempt)
+                    continue
                 break
 
             except Exception as e:
                 logger.error(f"Failed to create stop loss: {e}")
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.2 * attempt)
+                    continue
                 await self._notify_error(
                     error=str(e),
                     context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
                     critical=True
                 )
-                return None, None
+                return None, None, False
 
         logger.error(
             f"Failed to create stop loss for {symbol} after {max_attempts} attempts "
-            f"(last tried stopPrice={current_stop_price}): "
+            f"(stopPrice={stop_loss_price}): "
             f"{last_error.code if last_error else '?'} {last_error.msg if last_error else ''}"
         )
         await self._notify_error(
@@ -601,7 +690,7 @@ class SimpleTrader:
             context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
             critical=True
         )
-        return None, None
+        return None, None, False
 
 
     async def _create_take_profit_orders(self, symbol: str, side: str, quantity: float, tp_levels: list) -> list:
@@ -725,6 +814,46 @@ class SimpleTrader:
 
         return (entry_price * quantity) / leverage
 
+    @staticmethod
+    def _calc_exit_diagnostics(position: dict, close_price: float, exit_order_type: str) -> Dict[str, Any]:
+        """
+        Діагностика виходу: наскільки фактична ціна закриття гірша за рівень
+        стопа (проскальзывание) + MFE/MAE + скільки позиція жила без SL при
+        відкритті. Без цих полів неможливо відрізнити "стоп спрацював як
+        задумано" від "стоп пропустили / переставили далі".
+
+        sl_slippage_pct > 0 — виконано ГІРШЕ за стоп (у % ціни),
+        sl_slippage_roi — те саме в %ROI (з урахуванням плеча).
+        """
+        side = position.get('side')
+        stop = position.get('stop_loss_price')
+        try:
+            leverage = float(position.get('leverage') or 1)
+        except (TypeError, ValueError):
+            leverage = 1.0
+
+        diag: Dict[str, Any] = {
+            'exit_type': exit_order_type,
+            'stop_price_at_close': stop,
+            'initial_stop_loss_price': position.get('initial_stop_loss_price'),
+            'max_favorable_roi': position.get('max_favorable_roi'),
+            'max_adverse_roi': position.get('max_adverse_roi'),
+            'sl_latency_ms': position.get('sl_latency_ms'),
+        }
+
+        if (
+            exit_order_type == 'STOP_MARKET'
+            and stop and stop > 0
+            and close_price and close_price > 0
+            and side in ('LONG', 'SHORT')
+        ):
+            adverse = (stop - close_price) if side == 'LONG' else (close_price - stop)
+            slippage_pct = adverse / stop * 100.0
+            diag['sl_slippage_pct'] = slippage_pct
+            diag['sl_slippage_roi'] = slippage_pct * leverage
+
+        return diag
+
     async def _handle_order_update(self, event: Event) -> None:
 
         logger.info(f"[DEBUG] Close ORDER_TRADE_UPDATE event: {event.data}")
@@ -755,6 +884,8 @@ class SimpleTrader:
         known_bot_client_order_ids = set(position.get('tp_client_order_ids', []) or [])
         if position.get('sl_client_order_id'):
             known_bot_client_order_ids.add(position['sl_client_order_id'])
+        if position.get('emergency_client_order_id'):
+            known_bot_client_order_ids.add(position['emergency_client_order_id'])
 
         known_bot_order_ids = set(position.get('tp_order_ids', []) or [])
         if position.get('sl_order_id'):
@@ -833,6 +964,16 @@ class SimpleTrader:
             logger.error(f"Failed to calc ROE% for {symbol} {position_side}: {e}", exc_info=True)
             roe_percent = None
 
+        exit_diag = self._calc_exit_diagnostics(position, close_price, order_type)
+        slip_roi = exit_diag.get('sl_slippage_roi')
+        if slip_roi is not None and slip_roi > 5.0:
+            logger.warning(
+                f"[SLIPPAGE] {symbol} {position_side}: стоп {exit_diag.get('stop_price_at_close')} "
+                f"виконано по {close_price} — гірше на {exit_diag.get('sl_slippage_pct'):.3f}% ціни "
+                f"({slip_roi:.1f}% ROI). SL встановлено за {exit_diag.get('sl_latency_ms')} ms після входу, "
+                f"MFE={exit_diag.get('max_favorable_roi')}%ROI, MAE={exit_diag.get('max_adverse_roi')}%ROI"
+            )
+
         try:
             self.db.update_position_status(
                 order_id=position['order_id'],
@@ -844,6 +985,7 @@ class SimpleTrader:
                 commission_usdt=commission_total,
                 net_pnl=net_pnl,
                 margin_usdt=margin_usdt,
+                extra_fields=exit_diag,
             )
         except Exception as e:
             logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
@@ -868,7 +1010,10 @@ class SimpleTrader:
                 'quantity': position.get('quantity'),
                 'leverage': position.get('leverage'),
                 'strategy': strategy,
-                'positions_info_message': close_info_message
+                'positions_info_message': close_info_message,
+                'exit_type': exit_diag.get('exit_type'),
+                'sl_slippage_roi': exit_diag.get('sl_slippage_roi'),
+                'max_favorable_roi': exit_diag.get('max_favorable_roi'),
             }
         ))
 
