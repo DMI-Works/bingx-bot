@@ -1,8 +1,20 @@
 import { useEffect, useState } from "react";
-import { Ban, RotateCcw, Plus, Radio } from "lucide-react";
+import { Ban, RotateCcw, Plus, Radio, TrendingUp, Check } from "lucide-react";
 import { apiGet, apiPost, apiDelete } from "../../lib/api";
 import { Spinner, EmptyRow } from "../common";
 import { fmtDate } from "../../lib/format";
+
+function fmtVolume(v) {
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(0) + "K";
+  return String(v);
+}
+
+function fmtPrice(p) {
+  if (p == null) return "—";
+  return p >= 1 ? p.toLocaleString("ru-RU", { maximumFractionDigits: 2 }) : p.toPrecision(3);
+}
 
 export default function CoinsTab() {
   const [symbols, setSymbols] = useState(null);
@@ -11,19 +23,66 @@ export default function CoinsTab() {
   const [newSymbol, setNewSymbol] = useState("");
   const [addBusy, setAddBusy] = useState(false);
 
+  // «Топ монет» — полный ранжированный список кандидатов, как их видит
+  // SymbolSelector при отборе (core/exchange/symbol_selector.py), а не
+  // только уже подписанные. Именно отсюда можно принудительно добавить
+  // монету в торговлю (whitelist), даже если бот её сам ещё не выбрал.
+  const [candidates, setCandidates] = useState(null);
+  const [candidatesError, setCandidatesError] = useState(null);
+  const [busyCandidate, setBusyCandidate] = useState(null);
+  const [showAllCandidates, setShowAllCandidates] = useState(false);
+
   const load = () => {
     apiGet("/symbols")
       .then((data) => setSymbols(data.symbols))
       .catch((e) => setError(e.message));
   };
 
+  const loadCandidates = () => {
+    apiGet("/symbols/candidates?limit=50")
+      .then((data) => setCandidates(data.candidates))
+      .catch((e) => setCandidatesError(e.message));
+  };
+
   useEffect(() => {
     load();
+    loadCandidates();
     // Список подписок и время последнего сигнала меняются в фоне (ротация
     // раз в час, сигналы — чаще) — обновляем не только по действию юзера.
-    const interval = setInterval(load, 30_000);
+    const interval = setInterval(() => {
+      load();
+      loadCandidates();
+    }, 30_000);
     return () => clearInterval(interval);
   }, []);
+
+  const addToTrading = async (symbol) => {
+    setBusyCandidate(symbol);
+    setCandidatesError(null);
+    try {
+      await apiPost("/symbols/whitelist", { symbol });
+      loadCandidates();
+      load();
+    } catch (e) {
+      setCandidatesError(e.message);
+    } finally {
+      setBusyCandidate(null);
+    }
+  };
+
+  const removeFromWhitelist = async (symbol) => {
+    setBusyCandidate(symbol);
+    setCandidatesError(null);
+    try {
+      await apiDelete(`/symbols/whitelist/${encodeURIComponent(symbol)}`);
+      loadCandidates();
+      load();
+    } catch (e) {
+      setCandidatesError(e.message);
+    } finally {
+      setBusyCandidate(null);
+    }
+  };
 
   const blacklistSymbol = async (symbol) => {
     setBusySymbol(symbol);
@@ -72,9 +131,98 @@ export default function CoinsTab() {
   const activeSymbols = symbols?.filter((s) => !s.blacklisted) ?? [];
   const blacklistedSymbols = symbols?.filter((s) => s.blacklisted) ?? [];
 
+  const visibleCandidates = showAllCandidates ? candidates : candidates?.slice(0, 10);
+
   return (
     <div className="tab-pane">
       {error && <div className="error-banner">{error}</div>}
+
+      <div className="section">
+        <div className="section-head">
+          <span className="section-title">Топ монет</span>
+          {candidates && <span className="section-count">{candidates.length}</span>}
+        </div>
+        <div className="row-sub row-sub-faint" style={{ padding: "0 14px 8px" }}>
+          Так бот ранжирует монеты по объёму торгов при отборе (см. SymbolSelector).
+          «В торговле» — уже подписан или принудительно добавлен отсюда.
+        </div>
+
+        {candidatesError && <div className="error-banner">{candidatesError}</div>}
+
+        {!candidates && !candidatesError && (
+          <div className="hero-loading"><Spinner /></div>
+        )}
+
+        {candidates && candidates.length === 0 && (
+          <div className="list"><EmptyRow text="Нет монет, проходящих текущие фильтры" /></div>
+        )}
+
+        {visibleCandidates && visibleCandidates.length > 0 && (
+          <div className="list">
+            {visibleCandidates.map((c, i) => {
+              const inTrading = c.subscribed || c.whitelisted;
+              const changeClass = c.change_pct >= 0 ? "text-profit" : "text-loss";
+              const changeSign = c.change_pct >= 0 ? "+" : "";
+              return (
+                <div className="row" key={c.symbol}>
+                  <div className="row-icon">
+                    <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{i + 1}</span>
+                  </div>
+                  <div className="row-main">
+                    <div className="row-title-line">
+                      <span className="symbol">{c.symbol}</span>
+                      {c.held && <span className="tag tag-info">в позиции</span>}
+                      {c.whitelisted && <span className="tag tag-success">добавлена вручную</span>}
+                    </div>
+                    <div className="row-sub">
+                      {fmtPrice(c.price)}
+                      {"  ·  "}
+                      <span className={changeClass}>{changeSign}{c.change_pct.toFixed(1)}%</span>
+                      {"  ·  "}
+                      об. 24ч {fmtVolume(c.volume_24h)}
+                    </div>
+                  </div>
+                  {inTrading ? (
+                    c.whitelisted ? (
+                      <button
+                        className="icon-btn"
+                        disabled={busyCandidate === c.symbol}
+                        onClick={() => removeFromWhitelist(c.symbol)}
+                        title="Убрать из принудительного списка"
+                      >
+                        <RotateCcw size={15} />
+                      </button>
+                    ) : (
+                      <div className="icon-btn icon-btn-success" title="Уже в торговле (отобран автоматически)">
+                        <Check size={15} />
+                      </div>
+                    )
+                  ) : (
+                    <button
+                      className="icon-btn icon-btn-success"
+                      disabled={busyCandidate === c.symbol}
+                      onClick={() => addToTrading(c.symbol)}
+                      title="Добавить в торговлю"
+                    >
+                      <TrendingUp size={15} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {candidates && candidates.length > 10 && (
+          <button
+            className="param-save-btn"
+            style={{ margin: "10px 14px 0" }}
+            onClick={() => setShowAllCandidates((v) => !v)}
+          >
+            {showAllCandidates ? "Свернуть" : `Показать ещё ${candidates.length - 10}`}
+          </button>
+        )}
+      </div>
 
       <div className="section">
         <div className="section-head">

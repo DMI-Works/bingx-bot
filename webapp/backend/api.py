@@ -582,6 +582,151 @@ def _require_symbol_selector(request: Request):
     return symbol_selector
 
 
+# ---------------------------------------------------------------------------
+# /api/symbols/candidates — «топ монет» так, как их видит SymbolSelector при
+# отборе: все тикеры биржи, прошедшие те же фильтры (объём/спред/цена), что
+# и в SymbolSelector.select(), отсортированные по объёму. В отличие от
+# /api/symbols (который показывает только уже подписанные/ЧС), здесь —
+# полный ранжированный список кандидатов, из которого можно принудительно
+# добавить монету в торговлю (whitelist), даже если её сейчас нет в подписке.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/symbols/candidates")
+async def get_symbol_candidates(request: Request, limit: int = Query(50, ge=1, le=200)):
+    exchange = request.app.state.exchange_client
+    settings_manager = request.app.state.settings_manager
+    symbol_selector = _require_symbol_selector(request)
+
+    if exchange is None:
+        raise HTTPException(status_code=503, detail="Exchange client not ready")
+
+    filters = symbol_selector.filters
+    min_volume_24h = filters.get('min_volume_24h', 0)
+    max_spread_percent = filters.get('max_spread_percent', None)
+    min_price = filters.get('min_price', {}) or {}
+    max_price = filters.get('max_price', {}) or {}
+
+    try:
+        tickers = await exchange.get_all_tickers()
+    except Exception as e:
+        logger.error(f"Failed to fetch tickers for /api/symbols/candidates: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="Exchange request failed")
+
+    blacklist = set(settings_manager.get_blacklist_symbols()) if settings_manager else set()
+    whitelist = set(settings_manager.get_whitelist_symbols()) if settings_manager else set()
+    subscribed = set(getattr(exchange, "subscribed_symbols", set()) or set())
+
+    held_symbols = set()
+    try:
+        live_positions = await exchange.get_positions()
+        held_symbols = {
+            p.get("symbol") for p in live_positions
+            if float(p.get("positionAmt", 0)) != 0
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch live positions for /api/symbols/candidates: {e}", exc_info=True)
+
+    candidates = []
+    for ticker in tickers:
+        symbol = ticker.get('symbol')
+        if not symbol:
+            continue
+
+        try:
+            quote_volume = float(ticker.get('quoteVolume', 0))
+            last_price = float(ticker.get('lastPrice', 0))
+            bid_price = float(ticker.get('bidPrice', 0))
+            ask_price = float(ticker.get('askPrice', 0))
+            change_pct = float(ticker.get('priceChangePercent', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+
+        # та же логика фильтрации, что и в SymbolSelector.select(), — здесь
+        # только для отображения "прошёл бы фильтр или нет", реального
+        # отбора эта ручка не делает (это по-прежнему задача SymbolSelector)
+        passes_volume = quote_volume >= min_volume_24h
+        symbol_min_price = min_price.get(symbol) if isinstance(min_price, dict) else None
+        symbol_max_price = max_price.get(symbol) if isinstance(max_price, dict) else None
+        passes_price = True
+        if symbol_min_price is not None and last_price < symbol_min_price:
+            passes_price = False
+        if symbol_max_price is not None and last_price > symbol_max_price:
+            passes_price = False
+        passes_spread = True
+        if max_spread_percent is not None and bid_price > 0 and ask_price > 0:
+            spread_percent = (ask_price - bid_price) / bid_price * 100
+            passes_spread = spread_percent <= max_spread_percent
+
+        if symbol in blacklist:
+            continue
+        # если монета уже в подписке/whitelist — показываем всегда, даже
+        # если по текущим цифрам она бы не прошла фильтр (чтобы не пропадала
+        # из списка внезапно на глазах у пользователя)
+        if not (passes_volume and passes_price and passes_spread) and symbol not in (subscribed | whitelist):
+            continue
+
+        candidates.append({
+            "symbol": symbol,
+            "price": last_price,
+            "volume_24h": quote_volume,
+            "change_pct": change_pct,
+            "subscribed": symbol in subscribed,
+            "whitelisted": symbol in whitelist,
+            "held": symbol in held_symbols,
+        })
+
+    candidates.sort(key=lambda c: c["volume_24h"], reverse=True)
+    return {"candidates": candidates[:limit]}
+
+
+@app.post("/api/symbols/whitelist")
+async def add_symbol_to_whitelist(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(require_telegram_user),
+):
+    """Принудительно добавляет монету в торговлю — она попадёт в подписку
+    при ближайшем apply(), даже если по объёму не входит в топ."""
+    settings_manager = _require_settings_manager(request)
+    symbol_selector = _require_symbol_selector(request)
+
+    symbol = payload.get("symbol")
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise HTTPException(status_code=422, detail="'symbol' is required")
+    symbol = symbol.strip().upper()
+
+    await settings_manager.add_whitelist_symbol(symbol)
+    logger.info(f"Symbol '{symbol}' added to whitelist via mini app (user={user})")
+
+    try:
+        await symbol_selector.apply()
+    except Exception as e:
+        logger.error(f"Failed to re-apply symbol selection after whitelist add: {e}", exc_info=True)
+
+    return {"whitelist": settings_manager.get_whitelist_symbols()}
+
+
+@app.delete("/api/symbols/whitelist/{symbol}")
+async def remove_symbol_from_whitelist(
+    symbol: str,
+    request: Request,
+    user: dict = Depends(require_telegram_user),
+):
+    settings_manager = _require_settings_manager(request)
+    symbol_selector = _require_symbol_selector(request)
+
+    symbol = symbol.strip().upper()
+    await settings_manager.remove_whitelist_symbol(symbol)
+    logger.info(f"Symbol '{symbol}' removed from whitelist via mini app (user={user})")
+
+    try:
+        await symbol_selector.apply()
+    except Exception as e:
+        logger.error(f"Failed to re-apply symbol selection after whitelist remove: {e}", exc_info=True)
+
+    return {"whitelist": settings_manager.get_whitelist_symbols()}
+
+
 @app.post("/api/symbols/blacklist")
 async def add_symbol_to_blacklist(
     request: Request,

@@ -369,6 +369,7 @@
 }
 .icon-btn:disabled { opacity: 0.5; cursor: default; }
 .icon-btn-danger { color: var(--loss); border-color: rgba(241,73,91,0.3); background: rgba(241,73,91,0.1); }
+.icon-btn-success { color: var(--profit); border-color: rgba(53,214,138,0.3); background: rgba(53,214,138,0.1); }
 
 /* Small inline status tag next to a symbol/title */
 .tag {
@@ -382,6 +383,7 @@
 }
 .tag-danger { color: var(--loss); background: rgba(241,73,91,0.12); border-color: rgba(241,73,91,0.3); }
 .tag-info { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.tag-success { color: var(--profit); background: rgba(53,214,138,0.12); border-color: transparent; }
 
 /* Toggle switch */
 .switch {

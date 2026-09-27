@@ -65,10 +65,15 @@ class SymbolSelector:
             # з config.yaml, щоб користувач міг додавати монети "на льоту",
             # не чіпаючи файл конфігурації
             blacklist |= set(self.settings_manager.get_blacklist_symbols())
+        whitelist = set(self.filters.get('whitelist_symbols', []))
+        if self.settings_manager is not None:
+            # динамический whitelist з мініаппу ("Добавить в торговлю") —
+            # доповнює статичний з config.yaml так само, як і blacklist вище
+            whitelist |= set(self.settings_manager.get_whitelist_symbols())
         # blacklist ВСЕГДА приоритетнее whitelist: монета, убранная из торговли
         # (вручную или автоматически после серии убытков), не должна
         # оставаться в подписке только потому, что она есть в whitelist.
-        whitelist = set(self.filters.get('whitelist_symbols', [])) - blacklist
+        whitelist -= blacklist
         min_volume_24h = self.filters.get('min_volume_24h', 0)
         max_spread_percent = self.filters.get('max_spread_percent', None)
         min_price = self.filters.get('min_price', {}) or {}
