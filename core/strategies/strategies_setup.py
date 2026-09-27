@@ -55,11 +55,10 @@ class StrategyManager:
 
     def _build_extra_kwargs(self, name: str, strategy_cls) -> dict:
         """
-        Не всі стратегії приймають bingx_client (наприклад, ті, що не
-        успадковують CandleWarmupMixin) — передаємо його лише класам, чий
-        __init__ явно очікує цей параметр. Це той самий принцип DI, що й
-        для exchange у SimpleTrader/SymbolSelector, просто автоматизований
-        для довільної кількості стратегій.
+        Не всі стратегії приймають bingx_client — передаємо його лише класам,
+        чий __init__ явно очікує цей параметр (generic DI через inspect,
+        той самий принцип, що й для exchange у SimpleTrader/SymbolSelector,
+        просто автоматизований для довільної кількості стратегій).
         """
         kwargs = {}
         params = inspect.signature(strategy_cls.__init__).parameters

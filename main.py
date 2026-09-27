@@ -126,10 +126,11 @@ async def main():
     logger.info("[OK] Trailing Stop Manager initialized")
 
     filters_config = config.get('trading.filters', {})
-    refresh_interval = config.get('trading.filters.refresh_interval_seconds', 3600)
+    refresh_interval = config.get('trading.filters.rotation_interval_seconds', 1800)
     # Слухає SIGNAL_GENERATED і дозволяє SymbolSelector'у при ротації монет
-    # не чіпати символи, які зараз "живі" (давали сигнал за останню годину),
-    # і, навпаки, вважати "тихі" непридбані символи кандидатами на заміну.
+    # не чіпати символи, які зараз "живі" (давали сигнал за останні
+    # rotation_interval_seconds), і, навпаки, вважати "тихі" непридбані
+    # символи кандидатами на заміну.
     signal_activity_tracker = SignalActivityTracker(event_bus)
     symbol_selector = SymbolSelector(
         exchange,

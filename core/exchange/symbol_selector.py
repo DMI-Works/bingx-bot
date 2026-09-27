@@ -42,12 +42,19 @@ class SymbolSelector:
         - завжди включає символи відкритих позицій (щоб бот не втратив керування
           ними — не можна рвати сокет-підписку, поки живий trailing stop) (п.1)
         - захищає від заміни підписані зараз символи, які НЕ в позиції, але
-          давали сигнал за останні `no_signal_replace_after_seconds` (дефолт
-          3600с) — вони вважаються "активними" (п.2, дзеркально)
+          давали сигнал за останні `rotation_interval_seconds` — вони
+          вважаються "активними" (п.2, дзеркально)
         - "тихі" (без жодного сигналу за цей час) НЕ утримувані символи —
           явні кандидати на заміну свіжими за об'ємом (п.2)
         - додає символи, що проходять фільтри 24h об'єму/спреду/ціни
         - обмежує загальну кількість символів (max_symbols), пріоритет — за об'ємом
+
+        rotation_interval_seconds одночасно і період фонового рефрешу
+        (SymbolSelector.start_refresh_loop), і поріг "тиші" тут — раніше це
+        були два окремих значення (за замовчуванням 3600с і 1800с), які між
+        собою не узгоджувались: рефреш раз на годину, а поріг тиші — 30 хв,
+        тобто тиха монета фактично чекала заміни ДО 90 хвилин замість
+        заявлених 30. Одне значення на обидві ролі прибирає цей розрив.
 
         Без signal_tracker (None) поведінка деградує до старої: ротація йде
         лише за об'ємом, без урахування активності сигналів.
@@ -67,7 +74,7 @@ class SymbolSelector:
         min_price = self.filters.get('min_price', {}) or {}
         max_price = self.filters.get('max_price', {}) or {}
         max_symbols = self.filters.get('max_symbols', None)
-        no_signal_replace_after_seconds = self.filters.get('no_signal_replace_after_seconds', 3600)
+        rotation_interval_seconds = self.filters.get('rotation_interval_seconds', 1800)
 
         held_symbols = await self._get_held_symbols()
         tickers = await self._get_tickers()
@@ -122,7 +129,7 @@ class SymbolSelector:
                 s for s in currently_subscribed
                 if s not in protected
                 and s not in blacklist
-                and self.signal_tracker.had_signal_within(s, no_signal_replace_after_seconds)
+                and self.signal_tracker.had_signal_within(s, rotation_interval_seconds)
             }
             protected |= active_unheld
 
@@ -132,7 +139,7 @@ class SymbolSelector:
             if quiet_unheld:
                 logger.info(
                     f"[SYMBOLS] Quiet symbols eligible for replacement "
-                    f"(no signal in {no_signal_replace_after_seconds}s): {sorted(quiet_unheld)}"
+                    f"(no signal in {rotation_interval_seconds}s): {sorted(quiet_unheld)}"
                 )
         else:
             logger.debug("[SYMBOLS] No signal_tracker attached — rotation is volume-only")

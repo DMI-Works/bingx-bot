@@ -43,16 +43,13 @@ trading:
     max_price: {}
     min_volume_24h: 1000000
     max_spread_percent: 0.5
-    refresh_interval_seconds: 3600
-    # ротація монет (SymbolSelector.select) кожні refresh_interval_seconds:
-    # - held (відкриті позиції) і whitelist_symbols — НІКОЛИ не чіпаються
-    # - підписаний зараз символ БЕЗ позиції захищений від заміни, якщо
-    #   давав сигнал за останні no_signal_replace_after_seconds
-    # - "тихий" (без сигналу за цей час) непридбаний символ — замінюється
-    #   свіжим кандидатом за 24h об'ємом
-    # 1800с (30хв) — точне значення з ТЗ на OrderBook/SubscriptionManager
-    # (раніше було 3600с, змінено при об'єднанні пулів)
-    no_signal_replace_after_seconds: 1800
+    # ОДНЕ значення на дві ролі одразу (раніше було 2 окремих: refresh_interval_seconds
+    # і no_signal_replace_after_seconds — не збігалися між собою: рефреш раз на
+    # годину, а поріг "тиші" — 30 хв, тобто тиха монета фактично чекала заміни
+    # до 90 хв замість заявлених 30). Тепер один інтервал:
+    # - раз на стільки секунд SymbolSelector перераховує список символів
+    # - і він же — поріг "без сигналу X секунд" для визначення "тихої" монети
+    rotation_interval_seconds: 1800
 
   # OrderBookAnalyzer (core/orderbook_analyzer.py) — детект "стін" і їх
   # пробою по partial book depth (@depth20). Сам по собі лише детектить +
