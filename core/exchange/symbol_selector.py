@@ -121,6 +121,7 @@ class SymbolSelector:
         protected = set(whitelist) | set(held_symbols)
 
         currently_subscribed = set(getattr(self.exchange, 'subscribed_symbols', set()) or set())
+        quiet_unheld: Set[str] = set()
 
         if self.signal_tracker is not None:
             # п.2: підписані зараз символи БЕЗ позиції, які давали сигнал за
@@ -133,12 +134,17 @@ class SymbolSelector:
             }
             protected |= active_unheld
 
-            # "тихі" — підписані, не held, не давали сигналу — свідомо НЕ
-            # додаються в protected, щоб їх могли витіснити свіжі кандидати
+            # "тихі" — підписані, не held, не давали сигналу. Раніше вони
+            # просто переставали бути protected і на цьому все: якщо тиха
+            # монета все ще мала високий об'єм, вона знову проходила
+            # volume-фільтр і потрапляла в fresh_candidates, тобто
+            # переобиралась сама на себе в тій же ротації — "заміна" була
+            # лише в лозі, а не по факту. Тепер вона явно виключається з
+            # пулу кандидатів ЦІЄЇ ротації, звільняючи слот для іншої монети.
             quiet_unheld = currently_subscribed - protected - blacklist
             if quiet_unheld:
                 logger.info(
-                    f"[SYMBOLS] Quiet symbols eligible for replacement "
+                    f"[SYMBOLS] Replacing quiet symbols "
                     f"(no signal in {rotation_interval_seconds}s): {sorted(quiet_unheld)}"
                 )
         else:
@@ -148,7 +154,10 @@ class SymbolSelector:
         if max_symbols is not None:
             remaining_slots = max(0, max_symbols - len(protected))
 
-        fresh_candidates = [c[0] for c in candidates if c[0] not in protected]
+        fresh_candidates = [
+            c[0] for c in candidates
+            if c[0] not in protected and c[0] not in quiet_unheld
+        ]
         if remaining_slots is not None:
             filtered_symbols = set(fresh_candidates[:remaining_slots])
         else:
