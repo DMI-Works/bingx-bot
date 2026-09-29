@@ -17,13 +17,15 @@ class WebSocketClient:
         on_message: Callable,
         ping_interval: int = 20,
         reconnect_interval: int = 5,
-        max_reconnect_attempts: int = 10
+        max_reconnect_attempts: int = 10,
+        on_reconnect: Optional[Callable] = None,
     ):
         self.url = url
         self.on_message = on_message
         self.ping_interval = ping_interval
         self.reconnect_interval = reconnect_interval
         self.max_reconnect_attempts = max_reconnect_attempts
+        self.on_reconnect = on_reconnect
 
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.is_connected = False
@@ -224,6 +226,12 @@ class WebSocketClient:
                     asyncio.create_task(self._receive_loop()),
                     asyncio.create_task(self._ping_loop())
                 ]
+
+                if self.on_reconnect is not None:
+                    try:
+                        await self.on_reconnect()
+                    except Exception as e:
+                        logger.error(f"on_reconnect callback failed: {e}", exc_info=True)
 
             finally:
                 self._reconnecting = False

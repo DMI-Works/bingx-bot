@@ -151,7 +151,8 @@ class BingXClient:
             on_message=self._handle_ws_message,
             ping_interval=20,
             reconnect_interval=5,
-            max_reconnect_attempts=10
+            max_reconnect_attempts=10,
+            on_reconnect=self._resubscribe_all,
         )
 
         await self.ws_client.start()
@@ -164,6 +165,48 @@ class BingXClient:
             ))
 
         logger.info("WebSocket started")
+
+    async def _resubscribe_all(self) -> None:
+        """Викликається WebSocketClient ПІСЛЯ кожного reconnect (новий сокет,
+        exchange не пам'ятає жодних попередніх підписок). self.subscribed_symbols
+        і self.depth_subscribed_symbols — це те, що бот ВВАЖАЄ підписаним;
+        відправляємо sub напряму через ws_client, НЕ через
+        subscribe_trades/subscribe_depth, бо ті мутують ці самі set'и (а
+        символи в них вже є — це не нова підписка, а відновлення старої)."""
+        if not self.ws_client:
+            return
+
+        symbols_trade = sorted(self.subscribed_symbols)
+        symbols_depth = sorted(self.depth_subscribed_symbols)
+
+        if not symbols_trade and not symbols_depth:
+            return
+
+        logger.warning(
+            f"[WS] Reconnected — resubscribing {len(symbols_trade)} @trade "
+            f"and {len(symbols_depth)} @depth channels (exchange forgot them "
+            f"on the new connection)"
+        )
+
+        failed = []
+        for symbol in symbols_trade:
+            try:
+                await self.ws_client.subscribe(f"{symbol}@trade", symbol)
+            except Exception as e:
+                failed.append(symbol)
+                logger.error(f"[WS] Failed to resubscribe @trade for {symbol}: {e}")
+
+        for symbol in symbols_depth:
+            try:
+                await self.ws_client.subscribe(f"{symbol}@depth20", symbol)
+            except Exception as e:
+                failed.append(symbol)
+                logger.error(f"[WS] Failed to resubscribe @depth20 for {symbol}: {e}")
+
+        if failed:
+            logger.error(f"[WS] Resubscribe finished with failures for: {sorted(set(failed))}")
+        else:
+            logger.info("[WS] Resubscribe after reconnect completed successfully")
 
     async def stop_websocket(self) -> None:
         if self.ws_client:
