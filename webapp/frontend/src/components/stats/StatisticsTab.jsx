@@ -287,13 +287,14 @@ export default function StatisticsTab() {
                       вход {p.entry_price?.toLocaleString() ?? "—"}
                       {p.mark_price != null && <> · маркировка {p.mark_price.toLocaleString()}</>}
                     </div>
-                    {(p.stop_loss_price || tpLabel) && (
-                      <div className="row-sub row-sub-faint">
-                        {p.stop_loss_price && <>SL {p.stop_loss_price.toLocaleString()}</>}
-                        {p.stop_loss_price && tpLabel && " · "}
-                        {tpLabel && <>TP {tpLabel}</>}
-                      </div>
-                    )}
+                    {(p.stop_loss_price || tpLabel) && ( 
+                        <div className="row-sub row-sub-faint">
+                          {p.stop_loss_price && ( <> SL{" "} {
+                            p.entry_price 
+                            ? `${( ((p.stop_loss_price - p.entry_price) / p.entry_price) * (p.side === "LONG" ? -100 : 100) ).toFixed(2)}%` 
+                            : p.stop_loss_price.toLocaleString()} </> )} {p.stop_loss_price && tpLabel && " · "} {tpLabel && <>TP {tpLabel}</>} 
+                        </div> 
+                    )}  
                   </div>
                   <div className="row-end">
                     {p.pnl_usd != null && (
