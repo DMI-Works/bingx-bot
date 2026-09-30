@@ -6,6 +6,20 @@ export const fmtUsdPlain = (n) =>
 
 export const fmtPct = (n) => `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(2)}%`;
 
+// SL в % ROI (как на бирже и как считает TrailingStopManager):
+// сдвиг цены относительно входа × плечо, со знаком «в сторону позиции».
+//   < 0 — стоп ещё в зоне убытка (начальный SL, напр. −20%)
+//   > 0 — стоп уже переставлен в прибыль трейлингом
+// Возвращает null, если данных не хватает.
+export const slRoiPercent = ({ entry_price, stop_loss_price, side, leverage }) => {
+  const entry = Number(entry_price);
+  const sl = Number(stop_loss_price);
+  const lev = Number(leverage);
+  if (!entry || !sl || !lev) return null;
+  const priceMove = (sl - entry) / entry;
+  return priceMove * (side === "LONG" ? 1 : -1) * lev * 100;
+};
+
 function toLocalDate(iso) {
   return new Date(iso.includes("Z") || iso.includes("+") ? iso : `${iso}Z`);
 }

@@ -4,7 +4,7 @@ import {
 } from "recharts";
 import { TrendingUp, TrendingDown } from "lucide-react";
 import { apiGet } from "../../lib/api";
-import { fmtUsd, fmtPct } from "../../lib/format";
+import { fmtUsd, fmtPct, slRoiPercent } from "../../lib/format";
 import { Spinner, EmptyRow, PnlTag, SideBadge } from "../common";
 import TradeHistoryList from "./TradeHistoryList";
 
@@ -275,6 +275,9 @@ export default function StatisticsTab() {
                 : p.take_profit_levels.length > 1
                 ? `${p.take_profit_levels.length} уровня`
                 : tp?.price?.toLocaleString();
+              // SL в % ROI (с учётом плеча). Если плеча/входа нет — показываем цену.
+              const slRoi = slRoiPercent(p);
+              const slLabel = slRoi != null ? fmtPct(slRoi) : p.stop_loss_price?.toLocaleString();
               return (
                 <div className="row" key={p.order_id}>
                   <div className="row-main">
@@ -287,14 +290,13 @@ export default function StatisticsTab() {
                       вход {p.entry_price?.toLocaleString() ?? "—"}
                       {p.mark_price != null && <> · маркировка {p.mark_price.toLocaleString()}</>}
                     </div>
-                    {(p.stop_loss_price || tpLabel) && ( 
-                        <div className="row-sub row-sub-faint">
-                          {p.stop_loss_price && ( <> SL{" "} {
-                            p.entry_price 
-                            ? `${( ((p.stop_loss_price - p.entry_price) / p.entry_price) * (p.side === "LONG" ? -100 : 100) ).toFixed(2)}%` 
-                            : p.stop_loss_price.toLocaleString()} </> )} {p.stop_loss_price && tpLabel && " · "} {tpLabel && <>TP {tpLabel}</>} 
-                        </div> 
-                    )}  
+                    {(p.stop_loss_price || tpLabel) && (
+                      <div className="row-sub row-sub-faint">
+                        {p.stop_loss_price && <>SL {slLabel}</>}
+                        {p.stop_loss_price && tpLabel && " · "}
+                        {tpLabel && <>TP {tpLabel}</>}
+                      </div>
+                    )}
                   </div>
                   <div className="row-end">
                     {p.pnl_usd != null && (
