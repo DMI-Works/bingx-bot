@@ -3,7 +3,7 @@
 # Exchange Configuration
 
 exchange:
-  testnet: true
+  testnet: false
 
   websocket:
     enabled: true
