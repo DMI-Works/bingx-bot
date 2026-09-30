@@ -50,8 +50,12 @@ class TrailingStopManager:
         cfg = config or {}
         self.enabled: bool = cfg.get('enabled', True)
 
-        raw_levels = cfg.get('trail_levels_percent', [2.0, 4.0, 8.0, 16.0, 32.0, 64.0])
-        self.trail_levels_percent: List[float] = sorted({float(x) for x in raw_levels if x > 0})
+        # Пороги НЕ читаются из config.yaml и не имеют здесь хардкод-дефолта:
+        # единственный источник — параметр trail_levels_percent стратегии
+        # (DEFAULT_PARAMS -> БД -> мини-апп). Значение приходит через
+        # set_levels() сразу после старта StrategyManager и при каждом
+        # изменении из мини-аппа. Пока уровней нет — трейлинг ничего не делает.
+        self.trail_levels_percent: List[float] = []
 
         self.stop_buffer_percent: float = cfg.get('dynamic_stop_buffer_percent', 0.5)
 
@@ -69,6 +73,26 @@ class TrailingStopManager:
         if self.enabled:
             self.event_bus.subscribe(EventType.PRICE_UPDATED, self._on_price_update)
             self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
+
+    def set_levels(self, raw_levels) -> None:
+        """Применяет новые пороги (% ROI) на лету. Дубликаты и значения ≤ 0
+        отбрасываются, список сортируется по возрастанию. Уже достигнутые
+        позициями уровни (last_applied_level_index) индексируются по
+        отсортированному списку, поэтому после смены списка они
+        пересчитываются от новых порогов — SL назад всё равно не двигается."""
+        try:
+            levels = sorted({float(x) for x in (raw_levels or []) if float(x) > 0})
+        except (TypeError, ValueError):
+            logger.error(f"TrailingStop: invalid trail_levels_percent {raw_levels!r} — ignored")
+            return
+
+        if levels == self.trail_levels_percent:
+            return
+        self.trail_levels_percent = levels
+        if levels:
+            logger.info(f"TrailingStop: levels updated (%ROI): {levels}")
+        else:
+            logger.warning("TrailingStop: levels list is empty — trailing is effectively OFF")
 
     async def _on_price_update(self, event: Event) -> None:
         if not self.enabled or not self.trail_levels_percent:

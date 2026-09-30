@@ -1,3 +1,4 @@
+import copy
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -95,6 +96,7 @@ class StrategySettingsStore:
             logger.info(f"Seeded default params for strategy '{strategy_name}' (user={user_id})")
         else:
             logger.debug(f"Default params for '{strategy_name}' already exist, skipping seed")
+            self._add_missing_keys(existing_default, default_params, now)
 
         existing_active = self._get_row(strategy_name, False, user_id)
         if not existing_active:
@@ -111,6 +113,30 @@ class StrategySettingsStore:
                 f"Initialized active params for strategy '{strategy_name}' "
                 f"(user={user_id}) from defaults, enabled={enabled}"
             )
+        else:
+            self._add_missing_keys(existing_active, default_params, now)
+
+    def _add_missing_keys(self, row: dict, default_params: Dict[str, Any], now: datetime) -> None:
+        """
+        Досеивает в уже существующий документ ТОЛЬКО те ключи params, которых в нём
+        ещё нет (новое поле появилось в DEFAULT_PARAMS стратегии после первого
+        запуска). Существующие значения — включая изменённые пользователем —
+        не трогаются. Без этого новый параметр не появился бы ни в БД, ни в
+        мини-аппе у уже развёрнутого бота: seed_defaults() раньше ничего не
+        дописывал в существующие документы.
+        """
+        existing_params = row.get("params") or {}
+        missing = {k: copy.deepcopy(v) for k, v in default_params.items() if k not in existing_params}
+        if not missing:
+            return
+
+        set_fields = {f"params.{k}": v for k, v in missing.items()}
+        set_fields["updated_at"] = now
+        self.collection.update_one({"_id": row["_id"]}, {"$set": set_fields})
+        logger.info(
+            f"Added new param keys {sorted(missing)} to "
+            f"{'default' if row.get('is_default') else 'active'} settings of '{row['strategy_name']}'"
+        )
 
     def get_params(self, strategy_name: str, user_id: str = DEFAULT_USER_ID) -> Optional[Dict[str, Any]]:
         """Повертає поточні активні параметри стратегії. None, якщо стратегія ще не засіяна seed_defaults()."""

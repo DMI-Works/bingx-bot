@@ -159,6 +159,11 @@ async def main():
     strategies = strategy_manager.setup()
     logger.info(f"[OK] Strategy Manager initialized ({len(strategies)} strategies)")
 
+    strategy_manager.subscribe_params(
+        'WallBreakoutStrategy',
+        lambda params: trailing_stop_manager.set_levels(params.get('trail_levels_percent')),
+    )
+
     telegram_enabled = config.get('telegram.enabled', False)
     telegram_bot = None
 

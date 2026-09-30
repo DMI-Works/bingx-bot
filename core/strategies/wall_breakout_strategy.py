@@ -28,6 +28,7 @@ WALL_DETECTED/WALL_BREAKOUT сповіщення, перш ніж довірят
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from typing import Dict, Optional
@@ -46,6 +47,10 @@ class WallBreakoutStrategy(BaseStrategy):
         'leverage': 20,
         'stop_loss_percent': 20,  
         'cooldown_seconds': 10,
+        # Пороги трейлинг-стопа в % ROI. Сами стратегией не используются —
+        # их читает TrailingStopManager (см. StrategyManager.subscribe_params
+        # и main.py). Единственный источник значения: здесь + БД/мини-апп.
+        'trail_levels_percent': [10, 16, 32, 64, 120, 200, 250, 300, 350, 400],
     }
 
     def __init__(self, event_bus: EventBus, config: dict):
@@ -79,13 +84,9 @@ class WallBreakoutStrategy(BaseStrategy):
 
     @classmethod
     def build_config(cls, app_config) -> dict:
-        d = cls.DEFAULT_PARAMS
-        return {
-            'position_size': d['position_size'],
-            'leverage': d['leverage'],
-            'stop_loss_percent': d['stop_loss_percent'],
-            'cooldown_seconds': d['cooldown_seconds'],
-        }
+        # Копия ВСЕГО DEFAULT_PARAMS: новое поле достаточно добавить в словарь
+        # выше — оно само попадёт в БД (seed_defaults) и в мини-апп.
+        return copy.deepcopy(cls.DEFAULT_PARAMS)
 
     def update_config(self, new_config: dict) -> None:
         self.config = new_config

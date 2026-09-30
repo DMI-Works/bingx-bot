@@ -85,9 +85,9 @@ trading:
   # min_move_percent, min_seconds_between_moves) в коде НЕ используются нигде.
   trailing_stop:
     enabled: true
-    # пороги перестановки SL, заданы в %ROI (как показывает биржа) —
-    # переводятся в %price делением на leverage конкретной позиции
-    trail_levels_percent: [ 10, 16.0, 32.0, 64.0, 120, 200.0, 250.0, 300.0, 350.0, 400.0]
+    # Пороги перестановки SL (trail_levels_percent) тут больше НЕ задаются:
+    # они — параметр стратегии (DEFAULT_PARAMS в wall_breakout_strategy.py),
+    # меняются из мини-аппа (Настройки -> стратегия).
     # буфер (в %ROI) — насколько SL отстаёт от достигнутого уровня
     dynamic_stop_buffer_percent: 0.5
     # буфер не может съедать больше этой доли расстояния до уровня

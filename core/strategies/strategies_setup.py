@@ -1,6 +1,6 @@
 import inspect
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .registry import STRATEGY_REGISTRY
 from .base_strategy import BaseStrategy
@@ -26,6 +26,7 @@ class StrategyManager:
         self.store = strategy_settings
         self.bingx_client = bingx_client
         self.instances: Dict[str, BaseStrategy] = {}
+        self._param_listeners: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
 
     def setup(self) -> List[BaseStrategy]:
         initially_enabled = set(self.config.get('strategies.enabled', []))
@@ -86,13 +87,29 @@ class StrategyManager:
             return
         strategy.enable() if enabled else strategy.disable()
 
+    def subscribe_params(self, name: str, callback: Callable[[Dict[str, Any]], None]) -> None:
+        """Регистрирует callback(params), который вызывается:
+          - СРАЗУ, с текущими параметрами из БД (начальная синхронизация);
+          - при каждом apply_params() (изменение/reset из мініаппу)."""
+        self._param_listeners.setdefault(name, []).append(callback)
+        current = self.store.get_params(name)
+        if current is not None:
+            self._notify_listener(name, callback, current)
+
+    def _notify_listener(self, name: str, callback, params: Dict[str, Any]) -> None:
+        try:
+            callback(params)
+        except Exception:
+            self.logger.error(f"Param listener for '{name}' failed", exc_info=True)
+
     def apply_params(self, name: str, params: dict) -> None:
-    
         strategy = self.instances.get(name)
         if strategy is None:
             self.logger.warning(f"StrategyManager.apply_params: немає live-інстансу для '{name}'")
             return
         strategy.update_config(params)
+        for callback in self._param_listeners.get(name, []):
+            self._notify_listener(name, callback, params)
 
     def get(self, name: str) -> Optional[BaseStrategy]:
         return self.instances.get(name)

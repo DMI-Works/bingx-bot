@@ -20,7 +20,12 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from .auth import validate_init_data
-from core.strategies.param_catalog import catalog_lookup, infer_param_kind
+from core.strategies.param_catalog import (
+    catalog_lookup,
+    coerce_param_value,
+    infer_item_kind,
+    infer_param_kind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -388,13 +393,17 @@ def _serialize_strategy(entry: Dict[str, Any], store) -> Dict[str, Any]:
     params = []
     for key, value in entry["params"].items():
         label, description = catalog_lookup(key)
-        params.append({
+        kind = infer_param_kind(value) or "text"
+        item = {
             "key": key,
             "label": label,
             "description": description,
-            "kind": infer_param_kind(value) or "text",
+            "kind": kind,
             "value": value,
-        })
+        }
+        if kind == "list":
+            item["item_kind"] = infer_item_kind(value)
+        params.append(item)
     return {
         "name": name,
         "enabled": entry["enabled"],
@@ -489,7 +498,10 @@ async def update_strategy_param(
     if "value" not in payload:
         raise HTTPException(status_code=422, detail="'value' is required")
 
-    current[key] = payload["value"]
+    try:
+        current[key] = coerce_param_value(current[key], payload["value"])
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     store.update_params(name, current)
     _apply_params_live(request, name, current)
 
