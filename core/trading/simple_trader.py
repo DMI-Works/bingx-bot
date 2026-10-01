@@ -79,7 +79,19 @@ class SimpleTrader:
                     'tp_client_order_ids': metadata.get('tp_client_order_ids', []),
                     'strategy': metadata.get('strategy'),
                     'realized_pnl_accum': metadata.get('realized_pnl_accum', 0.0),
-                    'commission_accum': metadata.get('commission_accum', 0.0),
+                    # fallback на старе поле commission_accum — для позицій,
+                    # відкритих ДО розділення на open/close (ТЗ, задача 2):
+                    # старе значення — це накопичена комісія ЗАКРИТТЯ (єдине,
+                    # що рахувалось раніше), тому мапиться саме в close, а не
+                    # в open (open для таких позицій чесно лишається 0.0 —
+                    # ця конкретна комісія вже втрачена назавжди, без
+                    # ретроактивного пошуку через get_income_history її не
+                    # відновити, див. задачу 3/4 ТЗ).
+                    'commission_open_accum': metadata.get('commission_open_accum', 0.0),
+                    'commission_close_accum': metadata.get(
+                        'commission_close_accum', metadata.get('commission_accum', 0.0)
+                    ),
+                    'funding_fee_accum': metadata.get('funding_fee_accum', 0.0),
                     'remaining_quantity': metadata.get('remaining_quantity') or metadata.get('quantity', 0),
                     'closing_trade_ids': metadata.get('closing_trade_ids', []),
                     'closing_orders': metadata.get('closing_orders', []),
@@ -427,7 +439,21 @@ class SimpleTrader:
                 # ім'я стратегії, яка згенерувала сигнал на відкриття
                 'strategy': strategy,
                 'realized_pnl_accum': 0.0,
-                'commission_accum': 0.0,
+                # Розділено на open/close (ТЗ, задача 2): раніше було єдине
+                # commission_accum, яке рахувалось ЛИШЕ в _handle_order_update
+                # на закриваючих ордерах — комісія за ВІДКРИТТЯ позиції (REST
+                # create_order/get_order її не повертає, вона приходить лише
+                # через WS ORDER_TRADE_UPDATE) ніколи не накопичувалась і
+                # взагалі губилась. Заповнюється нижче, одразу як прийде
+                # ORDER_TRADE_UPDATE по цьому order_id (див. _handle_order_update).
+                'commission_open_accum': 0.0,
+                'commission_close_accum': 0.0,
+                # Funding (нарахування/списання за утримання позиції, раз на
+                # ~8г) рушій поки НЕ відстежує по кожній позиції окремо — поле
+                # лишається 0.0 і бере участь у net_pnl формулі (_calc_net_pnl)
+                # для сумісності наперед, щоб не міняти формулу знову, коли
+                # funding з'явиться (задача 4 ТЗ, звірка через get_income_history).
+                'funding_fee_accum': 0.0,
                 'remaining_quantity': executed_qty,
             }
             self.open_positions[position_key] = position_data
@@ -676,6 +702,43 @@ class SimpleTrader:
         return results
 
     @staticmethod
+    def _calc_net_pnl(
+        realized_pnl: float,
+        commission_open: float = 0.0,
+        commission_close: float = 0.0,
+        funding_fee: float = 0.0,
+    ) -> float:
+        """
+        ЄДИНА точка правди для net_pnl у всьому боті (ТЗ TZ_fix_pnl_accounting.md,
+        задача 1). Угода про знак: усі комісії та funding зберігаються ТАКИМИ Ж,
+        якими їх віддає біржа — тобто ВІД'ЄМНИМИ, коли це списання (а не
+        нарахування). Тому формула — СУМА, а не різниця:
+
+            net_pnl = realized_pnl + commission_open + commission_close + funding_fee
+
+        Раніше було `realized_pnl - commission_total`, де commission_total уже
+        був від'ємним (мінус на мінус = плюс) — через це комісія ПРИБАВЛЯЛАСЬ
+        до прибутку замість віднімання. Приклад з реальних даних (звірка з
+        біржею, розбіжність ~15.6$ на 103 угодах): realized_pnl=0.384118,
+        commission_open=-0.0498, commission_close=-0.0498, funding=0.0 ->
+        старий код: 0.384118 - (-0.0996) = 0.4837 (завищено)
+        новий код:  0.384118 + (-0.0498) + (-0.0498) + 0.0 = 0.2845 (вірно)
+
+        funding_fee за замовчуванням 0.0 — рушій (SimpleTrader) наразі НЕ
+        відстежує funding у реальному часі на рівні окремої позиції (це
+        робиться пізніше, через звірку з /openApi/swap/v2/user/income, див.
+        TrailingStopManager/webapp get_income_history і задачу 4 ТЗ) — тут
+        просто залишено місце в формулі, щоб net_pnl не треба було рахувати
+        по-іншому, коли funding_fee нарешті з'явиться по кожній позиції.
+        """
+        return (
+            (realized_pnl or 0.0)
+            + (commission_open or 0.0)
+            + (commission_close or 0.0)
+            + (funding_fee or 0.0)
+        )
+
+    @staticmethod
     def _calc_roe_percent(position: dict, realized_pnl: float) -> Optional[float]:
         """
         ROE% = PnL відносно маржі, використаної на відкриття (entry_price * quantity / leverage) —
@@ -748,6 +811,32 @@ class SimpleTrader:
             logger.debug(f"No open position tracked for {symbol} {position_side}, skipping")
             return
 
+        # Комісія ВІДКРИТТЯ позиції (ТЗ, задача 2). exchange_order_id тут
+        # дорівнює вхідному MARKET-ордеру, яким ми ж самі відкривали позицію
+        # (position['order_id']) — на відміну від закриваючих SL/TP/ручних
+        # ордерів, у яких свій окремий order_id. Перевірка по order_id (а не
+        # по стороні ордера) і зберігає точність, і коректно обробляє обидва
+        # напрямки (LONG вхід BUY, SHORT вхід SELL). Це ЄДИНЕ місце, де бот
+        # взагалі бачить комісію відкриття — REST create_order/get_order її
+        # не повертає, лише цей WS ORDER_TRADE_UPDATE.
+        if exchange_order_id == position.get('order_id'):
+            commission_open = float(order_data.get('n', 0) or 0)
+            position['commission_open_accum'] = position.get('commission_open_accum', 0.0) + commission_open
+            if order_data.get('N'):
+                position['commission_asset'] = order_data.get('N')
+            try:
+                self.db.update_position_metadata(
+                    order_id=position['order_id'],
+                    metadata=json.dumps(position)
+                )
+            except Exception as e:
+                logger.error(f"Failed to persist opening commission to DB: {e}", exc_info=True)
+            logger.info(
+                f"Captured opening commission for {symbol} {position_side}: "
+                f"{commission_open} (order={exchange_order_id})"
+            )
+            return
+
         expected_close_side = 'SELL' if position_side == 'LONG' else 'BUY'
         if order_side != expected_close_side:
             return
@@ -787,7 +876,7 @@ class SimpleTrader:
         })
 
         position['realized_pnl_accum'] = position.get('realized_pnl_accum', 0.0) + trade_realized_pnl
-        position['commission_accum'] = position.get('commission_accum', 0.0) + commission
+        position['commission_close_accum'] = position.get('commission_close_accum', 0.0) + commission
         if commission_asset:
             position['commission_asset'] = commission_asset
 
@@ -824,8 +913,11 @@ class SimpleTrader:
 
         close_price = float(order_data.get('ap', 0) or 0)
         realized_pnl = position.get('realized_pnl_accum', 0.0)
-        commission_total = position.get('commission_accum', 0.0)
-        net_pnl = realized_pnl - commission_total
+        commission_open = position.get('commission_open_accum', 0.0)
+        commission_close = position.get('commission_close_accum', 0.0)
+        funding_fee = position.get('funding_fee_accum', 0.0)
+        commission_total = commission_open + commission_close
+        net_pnl = self._calc_net_pnl(realized_pnl, commission_open, commission_close, funding_fee)
         margin_usdt = self._calc_margin_usdt(position)
         try:
             roe_percent = self._calc_roe_percent(position, realized_pnl)
@@ -842,6 +934,9 @@ class SimpleTrader:
                 realized_pnl=realized_pnl,
                 roe_percent=roe_percent,
                 commission_usdt=commission_total,
+                commission_open=commission_open,
+                commission_close=commission_close,
+                funding_fee=funding_fee,
                 net_pnl=net_pnl,
                 margin_usdt=margin_usdt,
             )
@@ -859,6 +954,9 @@ class SimpleTrader:
                 'close_price': close_price,
                 'realized_pnl': realized_pnl,
                 'commission_usdt': commission_total,
+                'commission_open': commission_open,
+                'commission_close': commission_close,
+                'funding_fee': funding_fee,
                 'net_pnl': net_pnl,
                 'margin_usdt': margin_usdt,
                 'roe_percent': roe_percent,
@@ -905,7 +1003,13 @@ class SimpleTrader:
                     'tp_client_order_ids': [],
                     'strategy': None,
                     'realized_pnl_accum': 0.0,
-                    'commission_accum': 0.0,
+                    # Позиція відкрита вручну на біржі — бот не бачив entry-ордер
+                    # і ніколи не побачить його комісію (немає order_id, яким
+                    # можна зіставити ORDER_TRADE_UPDATE), тому commission_open
+                    # тут чесно лишається 0.0 назавжди, це не баг.
+                    'commission_open_accum': 0.0,
+                    'commission_close_accum': 0.0,
+                    'funding_fee_accum': 0.0,
                 }
                 self.open_positions[position_key] = position_data
                 logger.info(f"Manual position detected and tracked: {symbol} {position_side}")
@@ -965,7 +1069,9 @@ class SimpleTrader:
                 # закриттів. Тепер просто додаємо PnL останнього закриття
                 # до вже накопиченого.
                 already_accumulated_pnl = existing.get('realized_pnl_accum', 0.0)
-                already_accumulated_commission = existing.get('commission_accum', 0.0)
+                commission_open = existing.get('commission_open_accum', 0.0)
+                commission_close = existing.get('commission_close_accum', existing.get('commission_accum', 0.0))
+                funding_fee = existing.get('funding_fee_accum', 0.0)
 
                 # 'cr' в ACCOUNT_UPDATE — це PnL САМЕ цього (останнього) закриття,
                 # яке не пройшло через ORDER_TRADE_UPDATE (напр. ручне закриття
@@ -973,8 +1079,8 @@ class SimpleTrader:
                 last_fill_pnl = float(pos.get('cr', 0) or 0)
                 realized_pnl = already_accumulated_pnl + last_fill_pnl
 
-                commission_total = already_accumulated_commission
-                net_pnl = realized_pnl - commission_total
+                commission_total = commission_open + commission_close
+                net_pnl = self._calc_net_pnl(realized_pnl, commission_open, commission_close, funding_fee)
                 margin_usdt = self._calc_margin_usdt(existing)
                 try:
                     roe_percent = self._calc_roe_percent(existing, realized_pnl)
@@ -1007,6 +1113,9 @@ class SimpleTrader:
                         realized_pnl=realized_pnl,
                         roe_percent=roe_percent,
                         commission_usdt=commission_total,
+                        commission_open=commission_open,
+                        commission_close=commission_close,
+                        funding_fee=funding_fee,
                         net_pnl=net_pnl,
                         margin_usdt=margin_usdt,
                     )
@@ -1024,6 +1133,9 @@ class SimpleTrader:
                         'close_price': close_price,
                         'realized_pnl': realized_pnl,
                         'commission_usdt': commission_total,
+                        'commission_open': commission_open,
+                        'commission_close': commission_close,
+                        'funding_fee': funding_fee,
                         'net_pnl': net_pnl,
                         'margin_usdt': margin_usdt,
                         'roe_percent': roe_percent,

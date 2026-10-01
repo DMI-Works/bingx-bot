@@ -112,7 +112,20 @@ class Database:
             "roe_percent": None,
             "margin_usdt": None,
             "commission_usdt": None,
+            # Розбивка commission_usdt на складові (ТЗ TZ_fix_pnl_accounting.md,
+            # задача 2) — commission_usdt лишається сумою цих двох (+funding
+            # окремо не входить у нього, funding не комісія біржі) заради
+            # зворотної сумісності з усім, що вже читає саме commission_usdt
+            # (webapp /api/stats, generate_pnl_card, risk_manager).
+            "commission_open": None,
+            "commission_close": None,
+            "funding_fee": None,
             "net_pnl": None,
+            # Значення net_pnl ДО фіксу формули знаку (задача 1 ТЗ) — пишеться
+            # окремо скриптом міграції історичних даних (задача 3), а НЕ тут;
+            # поле заведено заздалегідь, щоб міграція не потребувала зміни
+            # схеми. Для нових позицій (після фіксу) лишається None.
+            "net_pnl_legacy": None,
             "metadata": metadata,
         }
         with self._lock:
@@ -129,12 +142,20 @@ class Database:
         roe_percent: Optional[float] = None,
         margin_usdt: Optional[float] = None,
         commission_usdt: Optional[float] = None,
+        commission_open: Optional[float] = None,
+        commission_close: Optional[float] = None,
+        funding_fee: Optional[float] = None,
         net_pnl: Optional[float] = None
     ) -> None:
         """
         Оновлює статус позиції. Усі метрики — опціональні: якщо не передані,
         відповідні поля не чіпаються (тільки $set по переданих полях, щоб
         проміжний виклик не затер вже записані значення None-ом).
+
+        commission_open/commission_close/funding_fee — розбивка (ТЗ, задача 2),
+        додана поряд з уже існуючим сумарним commission_usdt, а не замість
+        нього: весь код, що вже читає commission_usdt (webapp /api/stats,
+        generate_pnl_card, risk_manager), продовжує працювати без змін.
         """
         update_fields: Dict[str, Any] = {"status": status}
 
@@ -150,6 +171,12 @@ class Database:
             update_fields["margin_usdt"] = margin_usdt
         if commission_usdt is not None:
             update_fields["commission_usdt"] = commission_usdt
+        if commission_open is not None:
+            update_fields["commission_open"] = commission_open
+        if commission_close is not None:
+            update_fields["commission_close"] = commission_close
+        if funding_fee is not None:
+            update_fields["funding_fee"] = funding_fee
         if net_pnl is not None:
             update_fields["net_pnl"] = net_pnl
 
