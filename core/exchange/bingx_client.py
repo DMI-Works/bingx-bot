@@ -283,6 +283,44 @@ class BingXClient:
             logger.error(f"Failed to get positions: {e}")
             raise
 
+    async def get_income_history(
+        self,
+        symbol: Optional[str] = None,
+        income_type: Optional[str] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Історія нарахувань/списань по рахунку: GET /openApi/swap/v2/user/income.
+        income_type: 'REALIZED_PNL' | 'FUNDING_FEE' | 'COMMISSION' | ...
+
+        На відміну від ORDER_TRADE_UPDATE (WS), сюди потрапляє і FUNDING_FEE —
+        періодичне (3 рази на добу) списання/нарахування за УТРИМАННЯ позиції,
+        що не прив'язане до жодного ордера. SimpleTrader._handle_order_update
+        рахує net_pnl лише з полів fill-подій ('rp'/'n') — funding fee туди
+        ніяк не потрапляє, тому сума net_pnl закритих угод систематично
+        розходиться з реальним балансом на біржі, і розходження росте з часом
+        утримання позицій. Див. webapp/backend/api.py -> /api/stats.
+        """
+        try:
+            params: Dict[str, Any] = {'limit': limit}
+            if symbol:
+                params['symbol'] = symbol
+            if income_type:
+                params['incomeType'] = income_type
+            if start_time is not None:
+                params['startTime'] = start_time
+            if end_time is not None:
+                params['endTime'] = end_time
+
+            response = await self.rest_client.get('/openApi/swap/v2/user/income', params, signed=True)
+            self._raise_if_error(response, '/openApi/swap/v2/user/income')
+            return response.get('data', [])
+        except Exception as e:
+            logger.error(f"Failed to get income history: {e}")
+            raise
+
     async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         try:
             params = {}

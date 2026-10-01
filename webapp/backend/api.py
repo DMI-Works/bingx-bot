@@ -223,17 +223,41 @@ async def get_stats(request: Request, period: str = Query("1W")):
         except Exception as e:
             logger.warning(f"/api/stats: failed to fetch account equity: {e}")
 
-    total_pnl = round(running + open_unrealized_pnl, 2)
+    funding_fees_period = 0.0
+    funding_fees_total = 0.0
+    if exchange is not None:
+        try:
+            income_records = await exchange.get_income_history(income_type='FUNDING_FEE', limit=1000)
+            cutoff_ts_ms = (
+                cutoff.replace(tzinfo=timezone.utc).timestamp() * 1000 if cutoff is not None else None
+            )
+            for rec in income_records:
+                try:
+                    amount = float(rec.get('income', 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                funding_fees_total += amount
+                rec_time_ms = rec.get('time')
+                if cutoff_ts_ms is None or (rec_time_ms is not None and rec_time_ms >= cutoff_ts_ms):
+                    funding_fees_period += amount
+        except Exception as e:
+            logger.warning(f"/api/stats: failed to fetch funding fee history: {e}")
+
+    total_pnl = round(running + open_unrealized_pnl + funding_fees_total, 2)
     total_pnl_pct = round(total_pnl / account_equity * 100, 2) if account_equity else None
-    
-    period_change_usd = round((equity[-1]["v"] - equity[0]["v"]) if len(equity) >= 2 else 0.0, 2)
+
+    period_change_usd = round(
+        ((equity[-1]["v"] - equity[0]["v"]) if len(equity) >= 2 else 0.0) + funding_fees_period, 2
+    )
     period_change_pct = round(period_change_usd / account_equity * 100, 2) if account_equity else None
 
     return {
         "equity": equity,  # кумулятивный net PnL закрытых сделок, не полный баланс аккаунта
         "cumulative_pnl": round(running, 2),  # all-time реализованный PnL закрытых сделок (не завязан на period)
         "open_unrealized_pnl": round(open_unrealized_pnl, 2),  # снимок "сейчас", period на него не влияет
-        "total_pnl": total_pnl,  # cumulative_pnl + open_unrealized_pnl — полная картина "как я сейчас"
+        "funding_fees_total": round(funding_fees_total, 2),  # all-time, отрицательное = уплачено бирже
+        "funding_fees_period": round(funding_fees_period, 2),
+        "total_pnl": total_pnl,  # cumulative_pnl + open_unrealized_pnl + funding_fees_total — полная картина "как я сейчас"
         "account_equity": account_equity,  # текущий equity с биржи, None если биржа недоступна
         "total_pnl_pct": total_pnl_pct,
         "period_change_usd": period_change_usd,

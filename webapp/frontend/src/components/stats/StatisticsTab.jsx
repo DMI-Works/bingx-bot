@@ -98,6 +98,7 @@ export default function StatisticsTab() {
   const up = changeUsd >= 0;
 
   const openPnl = stats?.open_unrealized_pnl ?? 0;
+  const fundingTotal = stats?.funding_fees_total ?? 0;
   const totalPnl = stats?.total_pnl ?? stats?.cumulative_pnl ?? 0;
   const totalUp = totalPnl >= 0;
 
@@ -199,6 +200,9 @@ export default function StatisticsTab() {
             </StatRow>
             <StatRow label="Открытые позиции" hint="нереализованный PnL сейчас">
               <span className={openPnl >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(openPnl)}</span>
+            </StatRow>
+            <StatRow label="Фандинг" hint="комиссия за удержание позиций, всё время">
+              <span className={fundingTotal >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(fundingTotal)}</span>
             </StatRow>
             <StatRow label="Итого">
               <span className={totalUp ? "text-profit" : "text-loss"}>
