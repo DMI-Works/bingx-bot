@@ -93,11 +93,13 @@ export default function StatisticsTab() {
     [stats]
   );
 
-  const first = chartData[0]?.v ?? 0;
-  const last = chartData[chartData.length - 1]?.v ?? stats?.cumulative_pnl ?? 0;
-  const changeUsd = chartData.length ? last - first : (stats?.cumulative_pnl || 0);
-  const changePct = first !== 0 ? (changeUsd / Math.abs(first)) * 100 : (changeUsd !== 0 ? 100 : 0);
+  const changeUsd = stats?.period_change_usd ?? 0;
+  const changePct = stats?.period_change_pct;
   const up = changeUsd >= 0;
+
+  const openPnl = stats?.open_unrealized_pnl ?? 0;
+  const totalPnl = stats?.total_pnl ?? stats?.cumulative_pnl ?? 0;
+  const totalUp = totalPnl >= 0;
 
   const avgTrade = stats && stats.total_trades ? stats.total_net_pnl / stats.total_trades : 0;
 
@@ -110,10 +112,10 @@ export default function StatisticsTab() {
     <div className="tab-pane">
       {error && <div className="error-banner">Не удалось загрузить данные: {error}</div>}
 
-      {/* Hero — кумулятивный net PnL закрытых сделок за период, не полный баланс биржи */}
+      {/* Hero — реализованный PnL закрытых сделок (всё время), не баланс биржи */}
       <div className="hero">
         <div className="hero-top">
-          <span className="hero-label">Накопленный PnL</span>
+          <span className="hero-label">PnL закрытых сделок</span>
           <div className="period-pills">
             {PERIODS.map((p) => (
               <button
@@ -135,7 +137,7 @@ export default function StatisticsTab() {
             <div className={`hero-change ${up ? "text-profit" : "text-loss"}`}>
               {up ? <TrendingUp size={15} /> : <TrendingDown size={15} />}
               <span>{fmtUsd(changeUsd)}</span>
-              <span className="hero-change-pct">({fmtPct(changePct)})</span>
+              {changePct != null && <span className="hero-change-pct">({fmtPct(changePct)})</span>}
               <span className="hero-change-period">за период</span>
             </div>
           </>
@@ -183,6 +185,32 @@ export default function StatisticsTab() {
           ) : null}
         </div>
       </div>
+
+      {stats && (
+        <div className="section">
+          <div className="section-head">
+            <span className="section-title">Итого сейчас</span>
+          </div>
+          <div className="list">
+            <StatRow label="Закрытые сделки" hint="всё время">
+              <span className={stats.cumulative_pnl >= 0 ? "text-profit" : "text-loss"}>
+                {fmtUsd(stats.cumulative_pnl)}
+              </span>
+            </StatRow>
+            <StatRow label="Открытые позиции" hint="нереализованный PnL сейчас">
+              <span className={openPnl >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(openPnl)}</span>
+            </StatRow>
+            <StatRow label="Итого">
+              <span className={totalUp ? "text-profit" : "text-loss"}>
+                {fmtUsd(totalPnl)}
+                {stats.total_pnl_pct != null && (
+                  <span className="stat-value-sub"> ({fmtPct(stats.total_pnl_pct)} от баланса)</span>
+                )}
+              </span>
+            </StatRow>
+          </div>
+        </div>
+      )}
 
       {/* Stat chips */}
       <div className="chip-row">

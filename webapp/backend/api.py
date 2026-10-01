@@ -125,7 +125,7 @@ def _profit_factor(gross_profit: float, gross_loss: float) -> Optional[float]:
 
 
 @app.get("/api/stats")
-def get_stats(request: Request, period: str = Query("1W")):  
+async def get_stats(request: Request, period: str = Query("1W")):  
     db = _require_deps(request)
 
     all_closed = db.get_all_closed_positions()  # ORDER BY closed_at DESC
@@ -201,9 +201,43 @@ def get_stats(request: Request, period: str = Query("1W")):
     avg_loss = gross_loss / losing if losing else None   # модуль (положительное число)
     payoff_ratio = round(avg_win / avg_loss, 2) if avg_win is not None and avg_loss else None
 
+    exchange = request.app.state.exchange_client
+    open_unrealized_pnl = 0.0
+    account_equity: Optional[float] = None
+
+    if exchange is not None:
+        try:
+            live_positions = await exchange.get_positions()
+            open_unrealized_pnl = sum(
+                float(p.get("unrealizedProfit", 0) or 0)
+                for p in live_positions
+                if float(p.get("positionAmt", 0) or 0) != 0
+            )
+        except Exception as e:
+            logger.warning(f"/api/stats: failed to fetch live positions for unrealized PnL: {e}")
+
+        try:
+            balance_data = await exchange.get_account_balance()
+            if balance_data.get("code") == 0 and "data" in balance_data:
+                account_equity = float(balance_data["data"].get("balance", {}).get("equity", 0) or 0)
+        except Exception as e:
+            logger.warning(f"/api/stats: failed to fetch account equity: {e}")
+
+    total_pnl = round(running + open_unrealized_pnl, 2)
+    total_pnl_pct = round(total_pnl / account_equity * 100, 2) if account_equity else None
+    
+    period_change_usd = round((equity[-1]["v"] - equity[0]["v"]) if len(equity) >= 2 else 0.0, 2)
+    period_change_pct = round(period_change_usd / account_equity * 100, 2) if account_equity else None
+
     return {
         "equity": equity,  # кумулятивный net PnL закрытых сделок, не полный баланс аккаунта
-        "cumulative_pnl": round(running, 2),
+        "cumulative_pnl": round(running, 2),  # all-time реализованный PnL закрытых сделок (не завязан на period)
+        "open_unrealized_pnl": round(open_unrealized_pnl, 2),  # снимок "сейчас", period на него не влияет
+        "total_pnl": total_pnl,  # cumulative_pnl + open_unrealized_pnl — полная картина "как я сейчас"
+        "account_equity": account_equity,  # текущий equity с биржи, None если биржа недоступна
+        "total_pnl_pct": total_pnl_pct,
+        "period_change_usd": period_change_usd,
+        "period_change_pct": period_change_pct,
         "win_rate": win_rate,
         "total_trades": total_trades,
         "total_net_pnl": round(total_net_pnl, 2),
