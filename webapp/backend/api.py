@@ -105,6 +105,8 @@ def _closed_row_to_trade(row) -> dict:
         "strategy": meta.get("strategy"),
         "margin_usdt": row["margin_usdt"],
         "commission_usdt": row["commission_usdt"],
+        "commission_open": row.get("commission_open"),
+        "commission_close": row.get("commission_close"),
         "net_pnl": net_pnl,
         "roe_percent": row["roe_percent"],
         "closed_at": row["closed_at"],

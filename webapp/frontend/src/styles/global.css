@@ -199,10 +199,16 @@
   margin-bottom: 6px;
 }
 .day-sep-label { font-size: 12px; font-weight: 600; color: var(--text-dim); }
+.day-sep-end { display: flex; align-items: baseline; gap: 8px; }
 .day-sep-pnl {
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   font-weight: 600;
+}
+.day-sep-commission {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-faint);
 }
 
 .list {

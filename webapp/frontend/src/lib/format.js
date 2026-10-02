@@ -80,20 +80,33 @@ export function fmtDayLabel(iso) {
   });
 }
 
+// Суммарная комиссия одной сделки (открытие + закрытие). commission_usdt —
+// уже готовая сумма с бэкенда, но считаем и сами на случай, если пришли
+// только commission_open/close без него (напр. более старый бэкенд) —
+// тогда хотя бы частичная комиссия всё равно не потеряется молча.
+export function tradeCommission(t) {
+  if (t.commission_usdt != null) return t.commission_usdt;
+  if (t.commission_open == null && t.commission_close == null) return null;
+  return (t.commission_open ?? 0) + (t.commission_close ?? 0);
+}
+
 // Группирует уже отсортированный по убыванию closed_at список сделок в
 // последовательные блоки по календарному дню (сегодня выше, дальше в
-// прошлое) — ключ, заголовок и сумма net PnL за день.
+// прошлое) — ключ, заголовок, сумма net PnL и сумма комиссии за день
+// (комиссия — отдельно от pnl, net_pnl её уже учитывает внутри, это для
+// наглядности "сколько чистыми, а сколько конкретно съела биржа").
 export function groupTradesByDay(trades) {
   const groups = [];
   let current = null;
   for (const t of trades) {
     const key = dayKey(t.closed_at);
     if (!current || current.key !== key) {
-      current = { key, label: fmtDayLabel(t.closed_at), items: [], pnl: 0 };
+      current = { key, label: fmtDayLabel(t.closed_at), items: [], pnl: 0, commission: 0 };
       groups.push(current);
     }
     current.items.push(t);
     current.pnl += t.net_pnl ?? 0;
+    current.commission += tradeCommission(t) ?? 0;
   }
   return groups;
 }
