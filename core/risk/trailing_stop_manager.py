@@ -89,8 +89,18 @@ class TrailingStopManager:
         if levels == self.trail_levels_percent:
             return
         self.trail_levels_percent = levels
+
+        reset_count = 0
+        for state in self._states.values():
+            if state.last_applied_level_index != -1:
+                state.last_applied_level_index = -1
+                reset_count += 1
+
         if levels:
-            logger.info(f"TrailingStop: levels updated (%ROI): {levels}")
+            logger.info(
+                f"TrailingStop: levels updated (%ROI): {levels}"
+                + (f" — re-evaluating {reset_count} open position(s) from scratch" if reset_count else "")
+            )
         else:
             logger.warning("TrailingStop: levels list is empty — trailing is effectively OFF")
 
