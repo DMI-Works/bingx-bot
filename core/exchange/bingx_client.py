@@ -360,8 +360,15 @@ class BingXClient:
         position_side: Optional[str] = None,
         client_order_id: Optional[str] = None,
         close_position: bool = False,
+        working_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
+        working_type: 'MARK_PRICE' | 'CONTRACT_PRICE' | 'INDEX_PRICE' — за якою
+        ціною тригериться STOP_MARKET/TAKE_PROFIT_MARKET. Не задано — біржа
+        використовує свій дефолт (MARK_PRICE, див. get_mark_price). Явний
+        'MARK_PRICE' потрібен там, де важливо, щоб стоп не вибивало тіньовим
+        сквізом last-price (TrailingStopManager, режим atr_3step).
+
         close_position: якщо True — позиція закривається ПОВНІСТЮ по факту
         спрацювання (лише STOP_MARKET / TAKE_PROFIT_MARKET).
 
@@ -402,6 +409,8 @@ class BingXClient:
                 params['stopPrice'] = stop_price
             if client_order_id:
                 params['clientOrderID'] = client_order_id
+            if working_type:
+                params['workingType'] = working_type
 
             response = await self.rest_client.post('/openApi/swap/v2/trade/order', params)
             self._raise_if_error(response, '/openApi/swap/v2/trade/order')

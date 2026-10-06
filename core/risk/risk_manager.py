@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional
 
 from ..database import Database
@@ -36,6 +37,17 @@ class RiskManager:
         # CONSECUTIVE_LOSSES_KEY), поэтому переживают рестарт бота.
         self.consecutive_losses: dict[str, int] = self._load_consecutive_losses()
 
+        # --- предохранитель "серия стоп-лоссов": N стопов В МИНУС подряд за
+        # window часов -> блок НОВЫХ входов на block часов. Глобальный (по
+        # аккаунту, не по монете): в отличие от max_consecutive_losses выше,
+        # который выкидывает из торговли одну монету. 0 = выключено.
+        self.stop_loss_streak_limit = config.get('stop_loss_streak_limit', 3)
+        self.stop_loss_streak_window_hours = config.get('stop_loss_streak_window_hours', 24)
+        self.stop_loss_block_hours = config.get('stop_loss_block_hours', 8)
+        self._sl_streak: list[float] = []
+        self._entry_blocked_until: float = 0.0
+        self._load_stop_loss_state()
+
         # события нужны для серий убытков по монетам, но НЕ для счёта открытых позиций
         self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed_event)
 
@@ -46,6 +58,88 @@ class RiskManager:
         )
 
     CONSECUTIVE_LOSSES_KEY = 'risk.consecutive_losses'
+    STOP_LOSS_STREAK_KEY = 'risk.stop_loss_streak'
+
+    def _load_stop_loss_state(self) -> None:
+        if self.settings_manager is None:
+            return
+        try:
+            raw = dict(self.settings_manager.get(self.STOP_LOSS_STREAK_KEY, {}) or {})
+            self._sl_streak = [float(t) for t in raw.get('streak', [])]
+            self._entry_blocked_until = float(raw.get('blocked_until', 0.0))
+        except Exception as e:
+            logger.error(f"Failed to load stop-loss streak state from DB, starting from zero: {e}", exc_info=True)
+            self._sl_streak = []
+            self._entry_blocked_until = 0.0
+            return
+        if self._entry_blocked_until > time.time():
+            logger.warning(
+                f"Restored entry block from DB: {(self._entry_blocked_until - time.time()) / 3600:.1f}h left"
+            )
+
+    async def _save_stop_loss_state(self) -> None:
+        if self.settings_manager is None:
+            return
+        try:
+            await self.settings_manager.set(self.STOP_LOSS_STREAK_KEY, {
+                'streak': list(self._sl_streak),
+                'blocked_until': self._entry_blocked_until,
+            })
+        except Exception as e:
+            logger.error(f"Failed to persist stop-loss streak state: {e}", exc_info=True)
+
+    def get_entry_block_remaining(self) -> float:
+        """Сколько секунд ещё действует блок входов (0 — не заблокировано)."""
+        return max(0.0, self._entry_blocked_until - time.time())
+
+    async def _register_closed_trade(self, pnl: float, close_order_type: Optional[str]) -> None:
+        """
+        Серия = подряд идущие закрытия СТОПОМ В МИНУС (STOP_MARKET и net_pnl < 0).
+        Любое другое закрытие (стоп в плюс/безубыток, TP, ручное, MARKET)
+        серию обрывает. Старше window часов отсекаются.
+        """
+        if self.stop_loss_streak_limit <= 0:
+            return
+
+        is_stop_loss = close_order_type == 'STOP_MARKET' and pnl < 0
+        if not is_stop_loss:
+            if self._sl_streak:
+                self._sl_streak.clear()
+                await self._save_stop_loss_state()
+            return
+
+        now = time.time()
+        window = self.stop_loss_streak_window_hours * 3600
+        self._sl_streak = [t for t in self._sl_streak if now - t <= window]
+        self._sl_streak.append(now)
+        logger.info(
+            f"Stop-loss recorded (net pnl {pnl:.6f}). Streak: "
+            f"{len(self._sl_streak)}/{self.stop_loss_streak_limit} within {self.stop_loss_streak_window_hours}h"
+        )
+
+        if len(self._sl_streak) >= self.stop_loss_streak_limit:
+            streak_len = len(self._sl_streak)
+            self._entry_blocked_until = now + self.stop_loss_block_hours * 3600
+            self._sl_streak.clear()
+            await self._save_stop_loss_state()
+            logger.warning(
+                f"{streak_len} stop-losses in a row within {self.stop_loss_streak_window_hours}h — "
+                f"NEW ENTRIES BLOCKED for {self.stop_loss_block_hours}h"
+            )
+            await self.event_bus.publish(Event(
+                type=EventType.ERROR,
+                data={
+                    'context': (
+                        f"🛑 {streak_len} стоп-лоси підряд за {self.stop_loss_streak_window_hours}г — "
+                        f"нові входи заблоковано на {self.stop_loss_block_hours}г. "
+                        f"Відкриті позиції продовжують супроводжуватись."
+                    ),
+                    'error': '',
+                },
+                source='RiskManager',
+            ))
+        else:
+            await self._save_stop_loss_state()
 
     def _load_consecutive_losses(self) -> dict[str, int]:
         if self.settings_manager is None:
@@ -178,6 +272,15 @@ class RiskManager:
             logger.warning(reason)
             return False, reason
 
+        block_remaining = self.get_entry_block_remaining()
+        if block_remaining > 0:
+            reason = (
+                f"New entries blocked by stop-loss streak breaker: "
+                f"{block_remaining / 3600:.1f}h left"
+            )
+            logger.warning(reason)
+            return False, reason
+
         try:
             real_positions = await self._get_real_open_positions()
         except Exception as e:
@@ -284,6 +387,7 @@ class RiskManager:
         if pnl is None:
             pnl = event.data.get('realized_pnl', 0.0)
         symbol = event.data.get('symbol')
+        await self._register_closed_trade(pnl, event.data.get('close_order_type'))
         await self.position_closed(pnl=pnl, symbol=symbol)
 
     async def reset_consecutive_losses(self, symbol: Optional[str] = None) -> None:
@@ -304,6 +408,11 @@ class RiskManager:
         self.max_consecutive_losses = config.get('max_consecutive_losses', self.max_consecutive_losses)
         self.use_risk_based_sizing = config.get('use_risk_based_sizing', self.use_risk_based_sizing)
         self.risk_per_trade_percent = config.get('risk_per_trade_percent', self.risk_per_trade_percent)
+        self.stop_loss_streak_limit = config.get('stop_loss_streak_limit', self.stop_loss_streak_limit)
+        self.stop_loss_streak_window_hours = config.get(
+            'stop_loss_streak_window_hours', self.stop_loss_streak_window_hours
+        )
+        self.stop_loss_block_hours = config.get('stop_loss_block_hours', self.stop_loss_block_hours)
         logger.info("Risk config updated")
 
     async def get_status(self) -> dict:
@@ -328,4 +437,6 @@ class RiskManager:
             # лимита монеты не «на паузе», а убраны в чёрный список.
             'consecutive_losses_by_symbol': dict(self.consecutive_losses),
             'blacklisted_symbols': list(self.settings_manager.get_blacklist_symbols()) if self.settings_manager else [],
+            'stop_loss_streak': len(self._sl_streak),
+            'entry_block_remaining_seconds': self.get_entry_block_remaining(),
         }

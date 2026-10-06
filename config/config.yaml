@@ -26,6 +26,14 @@ trading:
     # на quantity = (equity * risk_per_trade_percent%) / |entry - stop_loss|
     use_risk_based_sizing: false
     risk_per_trade_percent: 0.5
+    # Предохранитель: stop_loss_streak_limit стоп-лоссов В МИНУС подряд за
+    # stop_loss_streak_window_hours часов -> новые входы блокируются на
+    # stop_loss_block_hours часов (по всему аккаунту, для всех стратегий;
+    # открытые позиции продолжают сопровождаться). Любое закрытие не по
+    # стопу в минус (стоп в плюс, TP, ручное) серию обрывает. 0 = выключено.
+    stop_loss_streak_limit: 3
+    stop_loss_streak_window_hours: 24
+    stop_loss_block_hours: 8
 
   # Filters — відбір монет для торгівлі, не залежить від стратегії.
   # СПІЛЬНИЙ пул для SMA/RejectionBlock/TrailingStop І OrderBookAnalyzer
@@ -92,6 +100,9 @@ trading:
     dynamic_stop_buffer_percent: 0.5
     # буфер не может съедать больше этой доли расстояния до уровня
     max_buffer_fraction_of_level: 0.8
+    # Режим atr_3step (TrendSupertrendStrategy): комиссия одной стороны
+    # (taker). Безубыток = entry ± 2 * taker_fee_rate * entry (вход + выход).
+    taker_fee_rate: 0.0005
 
 # Logging Configuration
 logging:

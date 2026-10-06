@@ -3,6 +3,12 @@
 СХОДИНКАМИ у бік прибутку, поки ціна не досягла чергового порогу — і
 ніколи не рухається назад.
 
+Два режими (вибираються по позиції, а не глобально):
+  - ladder (за замовчуванням): пороги у % ROI з trail_levels_percent;
+  - atr_3step: якщо в position['trail_meta'] mode == 'atr_3step' (його
+    кладе TrendSupertrendStrategy через сигнал), стоп веде 3-крокова
+    схема в кратних ATR на момент входу — див. _process_atr_position.
+
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from typing import Dict, List, Optional
 
 from ..events import EventBus, Event, EventType
 from ..exchange.bingx_client import BingXAPIError
+from ..strategies.indicators import interval_to_ms
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +38,13 @@ class _TrailState:
     last_positive_roi_percent: Optional[float] = None
     fallback_notice_key: Optional[str] = None
     critical_notice_key: Optional[str] = None
+    # --- режим atr_3step: кеш крок-3 (свінг-стоп за екстремумом свічок) ---
+    atr_swing_stop: Optional[float] = None
+    atr_candle_bucket: Optional[int] = None
+    atr_refresh_inflight: bool = False
+    atr_refresh_retry_after: float = 0.0
+    atr_not_ready_count: int = 0
+    atr_invalid_notice: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 class TrailingStopManager:
@@ -66,6 +80,13 @@ class TrailingStopManager:
         )
 
         self.move_retry_cooldown_seconds: float = 10.0 
+
+        # Комісія однієї сторони (taker) для розрахунку "безубитку" в режимі
+        # atr_3step: SL ставиться на entry ± 2 * taker_fee_rate * entry
+        # (вхід + вихід), щоб закриття по безубитку не йшло в мінус.
+        self.taker_fee_rate: float = cfg.get('taker_fee_rate', 0.0005)
+
+        self._bg_tasks: set = set()
 
         self._states: Dict[str, _TrailState] = {}
         self._retry_after: Dict[str, float] = {}
@@ -105,7 +126,7 @@ class TrailingStopManager:
             logger.warning("TrailingStop: levels list is empty — trailing is effectively OFF")
 
     async def _on_price_update(self, event: Event) -> None:
-        if not self.enabled or not self.trail_levels_percent:
+        if not self.enabled:
             return
 
         raw = event.data
@@ -130,6 +151,10 @@ class TrailingStopManager:
             position_key = f"{symbol}_{side}"
             position = self.trader.open_positions.get(position_key)
             if not position:
+                continue
+            # ladder-позиції без заданих рівнів не чіпаємо (як і раніше);
+            # atr_3step рівнів trail_levels_percent не потребує
+            if not self.trail_levels_percent and not self._is_atr_mode(position):
                 continue
             await self._process_position(position_key, position, price)
 
@@ -249,6 +274,10 @@ class TrailingStopManager:
         if state.last_positive_stop_price is None:
             self._track_last_positive(state, entry_price, side, position.get('stop_loss_price'), leverage)
 
+        if self._is_atr_mode(position):
+            await self._process_atr_position(position_key, position, state, price)
+            return
+
         current_sl_price = position.get('stop_loss_price')
         sl_roi_str = (
             f"{self._roi_percent(entry_price, side, current_sl_price, leverage):+.2f}%ROI"
@@ -309,8 +338,16 @@ class TrailingStopManager:
                 self._retry_after[position_key] = time.time() + self.move_retry_cooldown_seconds
 
     async def _move_stop_loss(
-        self, position_key: str, position: dict, state: "_TrailState", candidates: List[tuple]
+        self, position_key: str, position: dict, state: "_TrailState", candidates: List[tuple],
+        stage: Optional[str] = None, working_type: Optional[str] = None,
     ) -> Optional[int]:
+        """candidates: [(index, value, stop_price), ...] від найкращого до гіршого.
+        stage=None — ladder (value = рівень у % ROI); stage='atr_3step' —
+        index = номер кроку 1..3 (value не використовується в тексті).
+        working_type прокидається в create_order (напр. 'MARK_PRICE')."""
+        def describe(idx: int, value: float) -> str:
+            return f"{stage} step {idx}" if stage else f"level {value:g}%ROI"
+
         symbol = position['symbol']
         side = position['side']
         quantity = position.get('remaining_quantity') or position.get('quantity')
@@ -359,7 +396,7 @@ class TrailingStopManager:
                     )
                 if anchored_price != desired_stop_price:
                     logger.info(
-                        f"TrailingStop: {position_key} level {level_roi_percent:g}%ROI "
+                        f"TrailingStop: {position_key} {describe(level_index, level_roi_percent)} "
                         f"price anchored to live market {current_market_price:.6f}: "
                         f"{desired_stop_price:.6f} -> {anchored_price:.6f}"
                     )
@@ -375,13 +412,14 @@ class TrailingStopManager:
                     position_side=side,
                     close_position=True,
                     client_order_id=client_order_id,
+                    working_type=working_type,
                 )
             except BingXAPIError as e:
                 if e.code == 109429:
                     self._apply_rate_limit_backoff(position_key, e.msg)
                     logger.error(
                         f"TrailingStop: rate limited (109429) creating SL for {position_key} "
-                        f"mid-ladder (level {level_roi_percent:g}%ROI) — stopping, old SL already cancelled!"
+                        f"mid-ladder ({describe(level_index, level_roi_percent)}) — stopping, old SL already cancelled!"
                     )
                     rate_limited = True
                     break
@@ -394,14 +432,14 @@ class TrailingStopManager:
                     )
                     return None
                 logger.warning(
-                    f"TrailingStop: {position_key} level {level_roi_percent:g}%ROI "
+                    f"TrailingStop: {position_key} {describe(level_index, level_roi_percent)} "
                     f"({desired_stop_price:.6f}) REJECTED: {e.code} {e.msg} — trying next closer level..."
                 )
                 continue
             except Exception as e:
                 logger.error(
                     f"TrailingStop: unexpected error creating SL for {position_key} at "
-                    f"level {level_roi_percent:g}%ROI: {e}", exc_info=True
+                    f"{describe(level_index, level_roi_percent)}: {e}", exc_info=True
                 )
                 continue
 
@@ -425,8 +463,8 @@ class TrailingStopManager:
 
             if level_index != candidates[0][0]:
                 logger.warning(
-                    f"TrailingStop: {position_key} ЦІЛЬОВИЙ рівень {candidates[0][1]:g}%ROI "
-                    f"провалився — застосовано найближчий доступний {level_roi_percent:g}%ROI"
+                    f"TrailingStop: {position_key} ЦІЛЬОВИЙ рівень ({describe(candidates[0][0], candidates[0][1])}) "
+                    f"провалився — застосовано найближчий доступний ({describe(level_index, level_roi_percent)})"
                 )
 
             try:
@@ -435,7 +473,10 @@ class TrailingStopManager:
                     data={
                         'symbol': symbol,
                         'side': side,
-                        'stage': f"level_{level_roi_percent:g}pct_roi",
+                        'stage': (
+                            f"{stage}_step_{level_index}" if stage
+                            else f"level_{level_roi_percent:g}pct_roi"
+                        ),
                         'entry_price': entry_price,
                         'old_stop_price': old_stop_price,
                         'new_stop_price': desired_stop_price,
@@ -458,6 +499,165 @@ class TrailingStopManager:
         )
         ok = await self._place_fallback_to_last_stop(position_key, position)
         return state.last_applied_level_index if ok else None
+
+    # ---------- режим atr_3step ----------
+
+    @staticmethod
+    def _is_atr_mode(position: dict) -> bool:
+        meta = position.get('trail_meta')
+        return isinstance(meta, dict) and meta.get('mode') == 'atr_3step'
+
+    async def _process_atr_position(
+        self, position_key: str, position: dict, state: "_TrailState", price: float
+    ) -> None:
+        """
+        3-кроковий супровід (усе в кратних ATR, виміряному в момент входу):
+          1) профіт >= breakeven_atr*ATR  -> SL = entry ± 2*taker_fee*entry (безубиток з комісіями)
+          2) профіт >= lock_trigger_atr*ATR -> SL = entry ± lock_offset_atr*ATR
+          3) після кроку 2 -> SL за екстремумом останніх `lookback` ЗАКРИТИХ
+             свічок робочого ТФ (Low для LONG / High для SHORT) із зазором
+             gap_atr*ATR. Оновлюється раз на закриття свічки.
+        SL рухається ТІЛЬКИ в бік прибутку. Ордер переставляється через
+        існуючий _move_stop_loss (cancel -> create, fallback, rate-limit),
+        тригер — MARK_PRICE.
+        """
+        meta = position['trail_meta']
+        entry_price = position['entry_price']
+        side = position['side']
+
+        try:
+            atr_value = float(meta.get('atr') or 0)
+            breakeven_atr = float(meta.get('breakeven_atr', 1.0))
+            lock_trigger_atr = float(meta.get('lock_trigger_atr', 2.0))
+            lock_offset_atr = float(meta.get('lock_offset_atr', 1.0))
+        except (TypeError, ValueError):
+            atr_value = 0.0
+        if atr_value <= 0:
+            if not state.atr_invalid_notice:
+                state.atr_invalid_notice = True
+                logger.error(f"TrailingStop: {position_key} atr_3step: invalid trail_meta {meta!r} — trailing skipped")
+            return
+
+        sign = 1.0 if side == 'LONG' else -1.0
+        profit = sign * (price - entry_price)
+        current_stop = position.get('stop_loss_price')
+
+        breakeven_price = entry_price + sign * entry_price * 2.0 * self.taker_fee_rate
+        lock_price = entry_price + sign * lock_offset_atr * atr_value
+
+        def improves(candidate_price: float, stop: Optional[float]) -> bool:
+            if stop is None:
+                return True
+            return candidate_price > stop if side == 'LONG' else candidate_price < stop
+
+        step3_active = profit >= lock_trigger_atr * atr_value or (
+            current_stop is not None
+            and (current_stop >= lock_price if side == 'LONG' else current_stop <= lock_price)
+        )
+
+        candidates = []
+        if profit >= breakeven_atr * atr_value:
+            candidates.append((1, breakeven_atr, breakeven_price))
+        if profit >= lock_trigger_atr * atr_value:
+            candidates.append((2, lock_trigger_atr, lock_price))
+        if step3_active:
+            self._schedule_swing_refresh(position_key, position, state, meta, atr_value)
+            if state.atr_swing_stop is not None:
+                candidates.append((3, float(meta.get('gap_atr', 0.5)), state.atr_swing_stop))
+
+        candidates = [c for c in candidates if improves(c[2], current_stop)]
+        if not candidates:
+            return
+        candidates.sort(key=lambda c: c[2], reverse=(side == 'LONG'))  # найкращий — першим
+
+        async with state.lock:
+            position = self.trader.open_positions.get(position_key)
+            if not position or not position.get('sl_order_id'):
+                return
+            current_stop = position.get('stop_loss_price')
+            candidates = [c for c in candidates if improves(c[2], current_stop)]
+            if not candidates:
+                return
+
+            new_index = await self._move_stop_loss(
+                position_key, position, state, candidates,
+                stage='atr_3step', working_type='MARK_PRICE',
+            )
+            if new_index is None:
+                self._retry_after[position_key] = time.time() + self.move_retry_cooldown_seconds
+            else:
+                state.last_applied_level_index = max(state.last_applied_level_index, new_index)
+                state.fallback_notice_key = None
+                state.critical_notice_key = None
+
+    def _schedule_swing_refresh(
+        self, position_key: str, position: dict, state: "_TrailState", meta: dict, atr_value: float
+    ) -> None:
+        """Раз на закриття свічки робочого ТФ оновлює state.atr_swing_stop у
+        ФОНОВІЙ задачі (EventBus послідовний — REST у обробнику тіків
+        заблокував би всю шину)."""
+        try:
+            interval = meta['interval']
+            interval_ms = interval_to_ms(interval)
+        except (KeyError, ValueError):
+            if not state.atr_invalid_notice:
+                state.atr_invalid_notice = True
+                logger.error(f"TrailingStop: {position_key} atr_3step: invalid interval in trail_meta {meta!r}")
+            return
+
+        bucket = int(time.time() * 1000) // interval_ms
+        if (
+            state.atr_candle_bucket == bucket
+            or state.atr_refresh_inflight
+            or time.time() < state.atr_refresh_retry_after
+        ):
+            return
+
+        state.atr_refresh_inflight = True
+        task = asyncio.create_task(self._refresh_swing_stop(
+            position_key, position['symbol'], position['side'], state, meta, atr_value, interval_ms, bucket
+        ))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _refresh_swing_stop(
+        self, position_key: str, symbol: str, side: str, state: "_TrailState",
+        meta: dict, atr_value: float, interval_ms: int, bucket: int,
+    ) -> None:
+        try:
+            lookback = max(1, int(meta.get('lookback', 3)))
+            gap = float(meta.get('gap_atr', 0.5)) * atr_value
+            bucket_start_ms = bucket * interval_ms
+
+            klines = await self.exchange.get_klines(symbol, meta['interval'], limit=lookback + 3)
+            closed = [k for k in klines if int(k['time']) < bucket_start_ms]
+
+            latest_is_fresh = bool(closed) and int(closed[-1]['time']) == bucket_start_ms - interval_ms
+            if len(closed) < lookback or not latest_is_fresh:
+                # свічка могла ще не долетіти до REST біржі — кілька швидких
+                # повторів; якщо так і нема (у свічці не було угод) — беремо,
+                # що є, аби не стояти на старому стопі
+                state.atr_not_ready_count += 1
+                if not closed or state.atr_not_ready_count < 5:
+                    state.atr_refresh_retry_after = time.time() + 3.0
+                    return
+
+            state.atr_not_ready_count = 0
+            window = closed[-lookback:]
+            if side == 'LONG':
+                state.atr_swing_stop = min(float(k['low']) for k in window) - gap
+            else:
+                state.atr_swing_stop = max(float(k['high']) for k in window) + gap
+            state.atr_candle_bucket = bucket
+            logger.debug(
+                f"TrailingStop: {position_key} atr_3step swing stop refreshed: "
+                f"{state.atr_swing_stop:.6f} (lookback={lookback}, gap={gap:.6f})"
+            )
+        except Exception as e:
+            logger.error(f"TrailingStop: {position_key} failed to refresh swing stop: {e}", exc_info=True)
+            state.atr_refresh_retry_after = time.time() + self.move_retry_cooldown_seconds
+        finally:
+            state.atr_refresh_inflight = False
 
     # ---------- автоматичний fallback: last positive -> initial ----------
 

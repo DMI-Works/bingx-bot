@@ -78,6 +78,8 @@ class SimpleTrader:
                     'sl_client_order_id': metadata.get('sl_client_order_id'),
                     'tp_client_order_ids': metadata.get('tp_client_order_ids', []),
                     'strategy': metadata.get('strategy'),
+                    # параметри супроводу стопу від стратегії (напр. atr_3step)
+                    'trail_meta': metadata.get('trail_meta'),
                     'realized_pnl_accum': metadata.get('realized_pnl_accum', 0.0),
                     # fallback на старе поле commission_accum — для позицій,
                     # відкритих ДО розділення на open/close (ТЗ, задача 2):
@@ -138,6 +140,8 @@ class SimpleTrader:
                 symbol=signal['symbol'],
                 side=signal['side'],
                 quantity=signal['quantity'],
+                risk_percent=signal.get('risk_percent'),
+                trail_meta=signal.get('trail_meta'),
                 leverage=signal.get('leverage', 10),
                 stop_loss_price=signal.get('stop_loss_price'),
                 take_profit_levels=signal.get('take_profit_levels'),
@@ -248,12 +252,14 @@ class SimpleTrader:
         self,
         symbol: str,
         side: str,
-        quantity: float,
+        quantity: Optional[float],
         leverage: int = 10,
         stop_loss_price: Optional[float] = None,
         take_profit_levels: Optional[list] = None,
         strategy: Optional[str] = None,
-        reference_price: Optional[float] = None
+        reference_price: Optional[float] = None,
+        risk_percent: Optional[float] = None,
+        trail_meta: Optional[dict] = None,
     ) -> bool:
         try:
             positions_info_message = None
@@ -276,7 +282,31 @@ class SimpleTrader:
             # неудаче (нет equity, нет stop_loss/reference_price) — тихо
             # остаёмся на исходном quantity стратегии, никогда не блокируем
             # открытие позиции из-за этого пересчёта.
-            if (
+            if risk_percent:
+                # Стратегія ЯВНО запросила риск на угоду (risk_percent в сигналі) —
+                # це працює незалежно від глобального use_risk_based_sizing.
+                # На відміну від гілки нижче, тут НЕМАЄ тихого fallback на
+                # quantity стратегії: її quantity для такого сигналу — None,
+                # а відкрити позицію "якимось" розміром означало б обійти
+                # саме той ліміт ризику, заради якого ця гілка існує.
+                risk_quantity = None
+                if self.risk_manager and stop_loss_price and reference_price:
+                    risk_quantity = await self.risk_manager.compute_risk_based_quantity(
+                        entry_price=reference_price,
+                        stop_loss_price=stop_loss_price,
+                        risk_percent=risk_percent,
+                    )
+                if not risk_quantity or risk_quantity <= 0:
+                    logger.warning(
+                        f"Risk-based sizing ({risk_percent}%) failed for {symbol} {side} — "
+                        f"position NOT opened (no safe quantity)"
+                    )
+                    return False
+                logger.info(
+                    f"Risk-based sizing for {symbol} {side}: {risk_percent}% risk -> quantity={risk_quantity}"
+                )
+                quantity = risk_quantity
+            elif (
                 self.risk_manager
                 and getattr(self.risk_manager, 'use_risk_based_sizing', False)
                 and stop_loss_price
@@ -438,6 +468,9 @@ class SimpleTrader:
                 'tp_client_order_ids': [],
                 # ім'я стратегії, яка згенерувала сигнал на відкриття
                 'strategy': strategy,
+                # параметри супроводу стопу від стратегії (напр. atr_3step);
+                # зберігаються в metadata → переживають рестарт бота
+                'trail_meta': trail_meta,
                 'realized_pnl_accum': 0.0,
                 # Розділено на open/close (ТЗ, задача 2): раніше було єдине
                 # commission_accum, яке рахувалось ЛИШЕ в _handle_order_update
@@ -961,6 +994,9 @@ class SimpleTrader:
                 'margin_usdt': margin_usdt,
                 'roe_percent': roe_percent,
                 'closed_by': closed_by,
+                # тип закриваючого ордера ('STOP_MARKET' | 'TAKE_PROFIT_MARKET' |
+                # 'MARKET') — по ньому RiskManager відрізняє закриття по стопу
+                'close_order_type': order_type,
                 'order_id': position.get('order_id'),
                 'entry_price': position.get('entry_price'),
                 'quantity': position.get('quantity'),
