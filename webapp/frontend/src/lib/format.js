@@ -31,6 +31,17 @@ export const fmtDate = (iso) => {
   return d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 };
 
+// Длительность сделки (duration_seconds из trade_analytics) в коротком виде:
+// "2ч 15м", "45м", "<1м".
+export const fmtDuration = (seconds) => {
+  if (seconds == null) return null;
+  const totalMin = Math.round(seconds / 60);
+  if (totalMin < 1) return "<1м";
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return h > 0 ? `${h}ч ${m}м` : `${m}м`;
+};
+
 // Только время — используется внутри группы "по дням", где дата уже
 // показана один раз в заголовке-разделителе.
 export const fmtTime = (iso) => {

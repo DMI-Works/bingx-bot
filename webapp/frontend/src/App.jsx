@@ -1,13 +1,15 @@
 import { useState } from "react";
-import { BarChart3, User, SettingsIcon, Coins } from "lucide-react";
+import { BarChart3, User, SettingsIcon, Coins, Microscope } from "lucide-react";
 import StatisticsTab from "./components/stats/StatisticsTab";
 import ProfileTab from "./components/profile/ProfileTab";
 import SettingsTab from "./components/settings/SettingsTab";
 import CoinsTab from "./components/coins/CoinsTab";
+import AnalyticsTab from "./components/analytics/AnalyticsTab";
 import "./styles/global.css";
 
 const TABS = [
   { id: "stats", label: "Статистика", icon: BarChart3, render: StatisticsTab },
+  { id: "analytics", label: "Аналитика", icon: Microscope, render: AnalyticsTab },
   { id: "coins", label: "Монеты", icon: Coins, render: CoinsTab },
   { id: "profile", label: "Профиль", icon: User, render: ProfileTab },
   { id: "settings", label: "Настройки", icon: SettingsIcon, render: SettingsTab },
