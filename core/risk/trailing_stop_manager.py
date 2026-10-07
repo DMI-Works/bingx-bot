@@ -467,16 +467,15 @@ class TrailingStopManager:
                     f"провалився — застосовано найближчий доступний ({describe(level_index, level_roi_percent)})"
                 )
 
+            trigger_label = f"{stage}_step_{level_index}" if stage else f"level_{level_roi_percent:g}pct_roi"
+
             try:
                 await self.event_bus.publish(Event(
                     type=EventType.STOP_LOSS_MOVED,
                     data={
                         'symbol': symbol,
                         'side': side,
-                        'stage': (
-                            f"{stage}_step_{level_index}" if stage
-                            else f"level_{level_roi_percent:g}pct_roi"
-                        ),
+                        'stage': trigger_label,
                         'entry_price': entry_price,
                         'old_stop_price': old_stop_price,
                         'new_stop_price': desired_stop_price,
@@ -487,6 +486,21 @@ class TrailingStopManager:
                 ))
             except Exception as e:
                 logger.error(f"TrailingStop: failed to publish STOP_LOSS_MOVED event: {e}")
+
+            try:
+                self.db.append_sl_move(
+                    order_id=position['order_id'],
+                    trigger=trigger_label,
+                    old_stop_price=old_stop_price,
+                    new_stop_price=desired_stop_price,
+                    old_order_id=old_sl_order_id,
+                    new_order_id=position.get('sl_order_id'),
+                    leverage=leverage,
+                    roi_percent=self._roi_percent(entry_price, side, desired_stop_price, leverage) if entry_price else None,
+                    reason='trail',
+                )
+            except Exception as e:
+                logger.error(f"TrailingStop: failed to append sl_move to trade_analytics for {position_key}: {e}", exc_info=True)
 
             return level_index
 
@@ -668,6 +682,9 @@ class TrailingStopManager:
         close_side = 'SELL' if side == 'LONG' else 'BUY'
         entry_price = position.get('entry_price')
         leverage = self._safe_leverage(position, position_key)
+        # фіксуємо ДО того, як цикл нижче перезапише position['stop_loss_price'] —
+        # інакше в trade_analytics old==new на кожному fallback-переносі
+        pre_fallback_stop_price = position.get('stop_loss_price')
 
         state = self._states.setdefault(position_key, _TrailState())
 
@@ -765,6 +782,21 @@ class TrailingStopManager:
             stop_roi = self._roi_percent(entry, side, stop_price, leverage) if entry else 0.0
 
             self._track_last_positive(state, entry, side, stop_price, leverage)
+
+            try:
+                self.db.append_sl_move(
+                    order_id=position['order_id'],
+                    trigger=f"fallback:{candidate_name}",
+                    old_stop_price=pre_fallback_stop_price,
+                    new_stop_price=stop_price,
+                    old_order_id=None,
+                    new_order_id=position.get('sl_order_id'),
+                    leverage=leverage,
+                    roi_percent=stop_roi,
+                    reason='fallback',
+                )
+            except Exception as e:
+                logger.error(f"TrailingStop: failed to append fallback sl_move to trade_analytics for {position_key}: {e}", exc_info=True)
 
             notice_key = f"fallback:{position_key}:{candidate_name}:{stop_price:.12g}"
             if state.fallback_notice_key != notice_key:

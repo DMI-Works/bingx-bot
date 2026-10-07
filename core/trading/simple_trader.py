@@ -25,6 +25,7 @@ class SimpleTrader:
         db: Database,
         risk_manager: Optional[RiskManager] = None,
         settings_manager=None,
+        strategy_settings=None,
     ):
         self.exchange = exchange
         self.event_bus = event_bus
@@ -34,6 +35,11 @@ class SimpleTrader:
         # «Настройки» в мініаппі. Опціональний — якщо не передали (наприклад,
         # у старих тестах), поведінка як і раніше: сигнали виконуються завжди.
         self.settings_manager = settings_manager
+        # StrategySettingsStore — потрібен ЛИШЕ для знімку активних параметрів
+        # стратегії в trade_analytics на момент відкриття угоди (аналітика,
+        # не впливає на торгову логіку). Опціональний: якщо не передали —
+        # записи аналітики просто йдуть без strategy_params.
+        self.strategy_settings = strategy_settings
 
         self.open_positions = {}
 
@@ -103,6 +109,20 @@ class SimpleTrader:
                 logger.info(f"Restored {len(rows)} open positions from DB")
         except Exception as e:
             logger.error(f"Failed to restore open positions from DB: {e}", exc_info=True)
+
+    def _strategy_params_snapshot(self, strategy: Optional[str]) -> Optional[dict]:
+        """Знімок активних параметрів стратегії станом на ЦЮ МИТЬ — пишеться
+        в trade_analytics одноразово при відкритті угоди і більше ніколи не
+        змінюється, навіть якщо потім параметри стратегії зміняться в
+        міні-аппі. Це і є відповідь на "з якими налаштуваннями відіграла
+        угода", коли налаштування вже встигли поміняти кілька разів."""
+        if not strategy or not self.strategy_settings:
+            return None
+        try:
+            return self.strategy_settings.get_params(strategy)
+        except Exception as e:
+            logger.warning(f"Failed to snapshot strategy params for {strategy}: {e}")
+            return None
 
     async def _notify_error(self, error: str, context: str, critical: bool = False) -> None:
         """
@@ -505,6 +525,27 @@ class SimpleTrader:
             except Exception as e:
                 logger.error(f"Failed to save position to DB: {e}", exc_info=True)
 
+            try:
+                self.db.insert_trade_analytics(
+                    order_id=str(order_id),
+                    symbol=symbol,
+                    side=side,
+                    opened_by='bot',
+                    entry_price=entry_price,
+                    quantity=executed_qty,
+                    leverage=leverage,
+                    margin_usdt=self._calc_margin_usdt(position_data),
+                    strategy=strategy,
+                    strategy_params=self._strategy_params_snapshot(strategy),
+                    stop_loss_price_initial=stop_loss_price,
+                    take_profit_levels_initial=take_profit_levels,
+                    trail_meta=trail_meta,
+                    risk_percent=risk_percent,
+                    reference_price=reference_price,
+                )
+            except Exception as e:
+                logger.error(f"Failed to insert trade_analytics for {symbol} {side}: {e}", exc_info=True)
+
             # Створюємо стоп/тейк ордери — використовуємо реально виконаний обсяг
             # (executed_qty), а не запитаний quantity, щоб уникнути розсинхрону
             # з реальним залишком позиції на біржі
@@ -897,6 +938,21 @@ class SimpleTrader:
         commission = float(order_data.get('n', 0) or 0)
         commission_asset = order_data.get('N')
 
+        if order_type == 'TAKE_PROFIT_MARKET':
+            try:
+                self.db.append_tp_fill(
+                    order_id=position['order_id'],
+                    tp_order_id=exchange_order_id,
+                    client_order_id=client_order_id,
+                    price=float(order_data.get('ap', 0) or 0),
+                    quantity=filled_qty,
+                    realized_pnl=trade_realized_pnl,
+                    commission=commission,
+                    trade_id=trade_id,
+                )
+            except Exception as e:
+                logger.error(f"Failed to append tp_fill to trade_analytics for {symbol} {position_side}: {e}", exc_info=True)
+
         # накопичуємо ID закриваючих угод — тільки ID, жодних цін/PnL
         position.setdefault('closing_trade_ids', [])
         if trade_id is not None:
@@ -975,6 +1031,29 @@ class SimpleTrader:
             )
         except Exception as e:
             logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
+
+        close_reason = {
+            'STOP_MARKET': 'stop_loss',
+            'TAKE_PROFIT_MARKET': 'take_profit',
+        }.get(order_type, 'manual')
+
+        try:
+            self.db.close_trade_analytics(
+                order_id=position['order_id'],
+                close_price=close_price,
+                realized_pnl=realized_pnl,
+                commission_open=commission_open,
+                commission_close=commission_close,
+                funding_fee=funding_fee,
+                net_pnl=net_pnl,
+                roe_percent=roe_percent,
+                margin_usdt=margin_usdt,
+                closed_by=closed_by,
+                close_reason=close_reason,
+                quantity=position.get('quantity'),
+            )
+        except Exception as e:
+            logger.error(f"Failed to close trade_analytics for {symbol} {position_side}: {e}", exc_info=True)
 
         strategy = position.get('strategy')
         close_info_message = f"Стратегія: {strategy}" if strategy else None
@@ -1063,6 +1142,19 @@ class SimpleTrader:
                     logger.error(f"Failed to save manual position to DB: {e}", exc_info=True)
 
                 margin_usdt = self._calc_margin_usdt(position_data)
+
+                try:
+                    self.db.insert_trade_analytics(
+                        order_id=manual_order_id,
+                        symbol=symbol,
+                        side=position_side,
+                        opened_by='user',
+                        entry_price=position_data['entry_price'],
+                        quantity=position_data['quantity'],
+                        margin_usdt=margin_usdt,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to insert trade_analytics for manual {symbol} {position_side}: {e}", exc_info=True)
 
                 # Публікуємо подію POSITION_OPENED
                 await self.event_bus.publish(Event(
@@ -1157,6 +1249,24 @@ class SimpleTrader:
                     )
                 except Exception as e:
                     logger.error(f"Failed to update manual position status in DB: {e}", exc_info=True)
+
+                try:
+                    self.db.close_trade_analytics(
+                        order_id=existing['order_id'],
+                        close_price=close_price,
+                        realized_pnl=realized_pnl,
+                        commission_open=commission_open,
+                        commission_close=commission_close,
+                        funding_fee=funding_fee,
+                        net_pnl=net_pnl,
+                        roe_percent=roe_percent,
+                        margin_usdt=margin_usdt,
+                        closed_by=existing.get('opened_by', 'user'),
+                        close_reason='manual',
+                        quantity=existing.get('quantity'),
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to close trade_analytics (manual) for {symbol} {position_side}: {e}", exc_info=True)
 
                 strategy = existing.get('strategy')
                 close_info_message = f"Стратегія: {strategy}" if strategy else None

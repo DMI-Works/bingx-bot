@@ -106,12 +106,19 @@ async def main():
     risk_manager = RiskManager(db, event_bus, exchange, risk_config, settings_manager=settings_manager)
     logger.info("[OK] Risk Manager initialized")
 
+    # Створюється ДО SimpleTrader (раніше створювався нижче, разом з
+    # StrategyManager) — трейдеру потрібен для знімку параметрів стратегії
+    # в trade_analytics у момент відкриття угоди.
+    strategy_settings = StrategySettingsStore(db)
+    logger.info("[OK] Strategy Settings Store initialized")
+
     trader = SimpleTrader(
         exchange=exchange,
         event_bus=event_bus,
         db=db,
         risk_manager=risk_manager,
         settings_manager=settings_manager,
+        strategy_settings=strategy_settings,
     )
     logger.info("[OK] Simple Trader initialized")
 
@@ -148,12 +155,6 @@ async def main():
         "trading happens only if WallBreakoutStrategy is enabled via Telegram /settings)"
     )
 
-    # --- Strategy settings + live strategy manager створюються ДО
-    # TelegramBot. StrategyManager — єдина точка, через яку миттєво
-    # застосовуються зміни з мініаппу (тумблер enabled, зміна параметра,
-    # reset), без рестарту бота — див. апдейти нижче через webapp_app.state ---
-    strategy_settings = StrategySettingsStore(db)
-    logger.info("[OK] Strategy Settings Store initialized")
 
     strategy_manager = StrategyManager(event_bus, config, logger, strategy_settings, bingx_client=exchange)
     strategies = strategy_manager.setup()

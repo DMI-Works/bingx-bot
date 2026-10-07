@@ -389,6 +389,56 @@ def get_trades(request: Request, limit: int = 50, offset: int = 0, period: str =
 
 
 # ---------------------------------------------------------------------------
+# /api/analytics — колекція trade_analytics: повна історія угоди (перенесення
+# SL, часткові TP, знімок налаштувань стратегії на момент входу). На відміну
+# від /api/trades (читає positions — лише фінальний стан), тут можна
+# розібрати КОЖНУ угоду покроково і порівняти стратегії/монети між собою.
+# ---------------------------------------------------------------------------
+
+def _sanitize_trade_analytics(doc: dict) -> dict:
+    doc = dict(doc)
+    doc["_id"] = str(doc["_id"])
+    return doc
+
+
+@app.get("/api/analytics/trades")
+def get_analytics_trades(
+    request: Request,
+    symbol: Optional[str] = None,
+    strategy: Optional[str] = None,
+    mode: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    db = _require_deps(request)
+    rows = db.get_trade_analytics_list(
+        symbol=symbol, strategy=strategy, mode=mode, status=status, limit=limit, offset=offset,
+    )
+    return {"trades": [_sanitize_trade_analytics(r) for r in rows]}
+
+
+@app.get("/api/analytics/trades/{order_id}")
+def get_analytics_trade_detail(request: Request, order_id: str):
+    db = _require_deps(request)
+    row = db.get_trade_analytics(order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    return _sanitize_trade_analytics(row)
+
+
+@app.get("/api/analytics/summary")
+def get_analytics_summary(
+    request: Request, mode: Optional[str] = None, strategy: Optional[str] = None
+):
+    """Агрегація по (strategy, symbol): win-rate, середній net_pnl/ROE%,
+    середня кількість переносів SL до закриття — для порівняння стратегій
+    і монет між собою."""
+    db = _require_deps(request)
+    return {"summary": db.get_trade_analytics_summary(mode=mode, strategy=strategy)}
+
+
+# ---------------------------------------------------------------------------
 # /api/profile — баланс биржи (live) + режим testnet/live
 # ---------------------------------------------------------------------------
 

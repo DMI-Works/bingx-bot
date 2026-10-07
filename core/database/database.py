@@ -25,6 +25,14 @@ def _load_testnet_flag() -> bool:
 
 IS_TESTNET = _load_testnet_flag()
 
+# Режим, у якому зараз працює бот — пишеться в кожен запис trade_analytics,
+# щоб тестові та бойові угоди завжди можна було відфільтрувати окремо навіть
+# якщо колись дані з обох БД (_testnet / основної) опиняться поряд (напр.
+# експорт в один CSV для порівняння). У звичайному випадку testnet і prod і
+# так лежать у РІЗНИХ базах (MONGO_DB_NAME vs MONGO_DB_NAME_testnet) — це
+# поле лишається додатковим запобіжником, а не єдиним механізмом розділення.
+TRADE_MODE = "testnet" if IS_TESTNET else "live"
+
 MONGO_URI = os.getenv("MONGO_URI")
 
 _base_db_name = os.getenv("MONGO_DB_NAME") or "trading_bot"
@@ -63,6 +71,21 @@ class Database:
         self.db.positions.create_index([("symbol", ASCENDING), ("side", ASCENDING), ("status", ASCENDING)])
 
         self.db.settings.create_index("key", unique=True)
+
+        # trade_analytics — окрема від positions таблиця: тут накопичується
+        # ВСЯ історія угоди (а не лише останній стан), включно з кожним
+        # перенесенням SL і кожним частковим TP. positions лишається
+        # недоторканою (її читає webapp, risk_manager і т.д.) — trade_analytics
+        # існує ПОРЯД, спеціально для аналізу "що саме пішло не так".
+        self.db.trade_analytics.create_index("order_id", unique=True, sparse=True)
+        self.db.trade_analytics.create_index([("status", ASCENDING), ("opened_at", DESCENDING)])
+        self.db.trade_analytics.create_index([("status", ASCENDING), ("closed_at", DESCENDING)])
+        self.db.trade_analytics.create_index(
+            [("symbol", ASCENDING), ("strategy", ASCENDING), ("mode", ASCENDING), ("closed_at", DESCENDING)]
+        )
+        self.db.trade_analytics.create_index(
+            [("strategy", ASCENDING), ("mode", ASCENDING), ("closed_at", DESCENDING)]
+        )
 
         logger.info("Database indexes created/verified")
 
@@ -269,6 +292,271 @@ class Database:
         with self._lock:
             rows = list(self.db.positions.aggregate(pipeline))
         return {row["_id"]: row["last_at"] for row in rows}
+
+    # ------------------------------------------------------------------
+    # trade_analytics — повна історія угоди: як саме переставлявся SL,
+    # якими частками спрацював TP, з якими налаштуваннями стратегії угода
+    # була відкрита, в якому режимі (testnet/live). positions лишається
+    # "оперативною" таблицею (останній стан), trade_analytics — архівом
+    # для розбору "чому саме ця угода пішла в мінус".
+    # ------------------------------------------------------------------
+
+    def insert_trade_analytics(
+        self,
+        order_id: str,
+        symbol: str,
+        side: str,
+        opened_by: str,
+        entry_price: float,
+        quantity: float,
+        leverage: Any = None,
+        margin_usdt: Optional[float] = None,
+        strategy: Optional[str] = None,
+        strategy_params: Optional[dict] = None,
+        stop_loss_price_initial: Optional[float] = None,
+        take_profit_levels_initial: Optional[list] = None,
+        trail_meta: Optional[dict] = None,
+        risk_percent: Optional[float] = None,
+        reference_price: Optional[float] = None,
+    ) -> Any:
+        """
+        Пишеться ОДИН раз при відкритті угоди (бот або ручне відкриття,
+        що його підхопив _handle_account_update). strategy_params — знімок
+        активних параметрів стратегії станом на момент входу (з
+        StrategySettingsStore.get_params), щоб пізніше можна було чесно
+        порівняти результати угод, відкритих ДО і ПІСЛЯ зміни налаштувань
+        в міні-аппі — на відміну від positions.metadata, це значення
+        НІКОЛИ не перезаписується.
+        """
+        doc = {
+            "order_id": order_id,
+            "symbol": symbol,
+            "side": side,
+            "mode": TRADE_MODE,
+            "status": "OPEN",
+            "opened_by": opened_by,
+            "strategy": strategy,
+            "strategy_params": strategy_params,
+            "risk_percent": risk_percent,
+            "opened_at": datetime.utcnow(),
+            "closed_at": None,
+            "duration_seconds": None,
+            "entry_price": entry_price,
+            "reference_price": reference_price,
+            "close_price": None,
+            "quantity": quantity,
+            "leverage": leverage,
+            "margin_usdt": margin_usdt,
+            "stop_loss_price_initial": stop_loss_price_initial,
+            "take_profit_levels_initial": take_profit_levels_initial,
+            "trail_meta": trail_meta,
+            "realized_pnl": None,
+            "commission_open": None,
+            "commission_close": None,
+            "commission_usdt": None,
+            "funding_fee": None,
+            "net_pnl": None,
+            "roe_percent": None,
+            "close_reason": None,
+            "closed_by": None,
+            "sl_moves": [],
+            "tp_fills": [],
+        }
+        with self._lock:
+            result = self.db.trade_analytics.insert_one(doc)
+        return result.inserted_id
+
+    def append_sl_move(
+        self,
+        order_id: str,
+        trigger: str,
+        old_stop_price: Optional[float],
+        new_stop_price: float,
+        old_order_id: Optional[str] = None,
+        new_order_id: Optional[str] = None,
+        leverage: Any = None,
+        roi_percent: Optional[float] = None,
+        reason: str = "trail",
+    ) -> None:
+        """
+        Один рядок на КОЖНЕ успішне перенесення SL (ladder-рівень, atr_3step
+        крок, або аварійний fallback). trigger — людиночитний опис, що саме
+        спрацювало (напр. "level_2pct_roi", "atr_3step_step_2",
+        "fallback:last_positive"). reason розрізняє штатний trail від
+        аварійного fallback — саме це дозволить потім подивитись "скільки
+        разів бот взагалі залишався без штатного SL".
+        Якщо запису в trade_analytics ще немає (угода відкрита до того, як
+        з'явилась ця таблиця) — update_one з order_id, що не matched,
+        просто нічого не зробить, і це нормально (не кидаємо виняток).
+        """
+        move = {
+            "at": datetime.utcnow(),
+            "trigger": trigger,
+            "reason": reason,
+            "old_stop_price": old_stop_price,
+            "new_stop_price": new_stop_price,
+            "old_order_id": old_order_id,
+            "new_order_id": new_order_id,
+            "leverage": leverage,
+            "roi_percent": roi_percent,
+        }
+        with self._lock:
+            self.db.trade_analytics.update_one(
+                {"order_id": order_id},
+                {"$push": {"sl_moves": move}},
+            )
+
+    def append_tp_fill(
+        self,
+        order_id: str,
+        tp_order_id: Optional[str],
+        client_order_id: Optional[str],
+        price: float,
+        quantity: float,
+        realized_pnl: float,
+        commission: float,
+        trade_id: Any = None,
+    ) -> None:
+        """Один рядок на кожне (часткове чи фінальне) спрацювання TAKE_PROFIT_MARKET ордера."""
+        fill = {
+            "at": datetime.utcnow(),
+            "order_id": tp_order_id,
+            "client_order_id": client_order_id,
+            "price": price,
+            "quantity": quantity,
+            "realized_pnl": realized_pnl,
+            "commission": commission,
+            "trade_id": trade_id,
+        }
+        with self._lock:
+            self.db.trade_analytics.update_one(
+                {"order_id": order_id},
+                {"$push": {"tp_fills": fill}},
+            )
+
+    def close_trade_analytics(
+        self,
+        order_id: str,
+        close_price: Optional[float],
+        realized_pnl: Optional[float],
+        commission_open: Optional[float],
+        commission_close: Optional[float],
+        funding_fee: Optional[float],
+        net_pnl: Optional[float],
+        roe_percent: Optional[float],
+        margin_usdt: Optional[float],
+        closed_by: Optional[str],
+        close_reason: Optional[str],
+        quantity: Optional[float] = None,
+    ) -> None:
+        """Пишеться ОДИН раз, коли угода закрита ПОВНІСТЮ (а не на кожному
+        частковому закритті — для цього є append_tp_fill/append_sl_move)."""
+        now = datetime.utcnow()
+        commission_usdt = None
+        if commission_open is not None or commission_close is not None:
+            commission_usdt = (commission_open or 0.0) + (commission_close or 0.0)
+
+        update_fields: Dict[str, Any] = {
+            "status": "CLOSED",
+            "closed_at": now,
+            "close_price": close_price,
+            "realized_pnl": realized_pnl,
+            "commission_open": commission_open,
+            "commission_close": commission_close,
+            "commission_usdt": commission_usdt,
+            "funding_fee": funding_fee,
+            "net_pnl": net_pnl,
+            "roe_percent": roe_percent,
+            "closed_by": closed_by,
+            "close_reason": close_reason,
+        }
+        if margin_usdt is not None:
+            update_fields["margin_usdt"] = margin_usdt
+        if quantity is not None:
+            update_fields["quantity"] = quantity
+
+        with self._lock:
+            row = self.db.trade_analytics.find_one({"order_id": order_id}, {"opened_at": 1})
+            if row and row.get("opened_at"):
+                update_fields["duration_seconds"] = (now - row["opened_at"]).total_seconds()
+
+            self.db.trade_analytics.update_one(
+                {"order_id": order_id},
+                {"$set": update_fields},
+            )
+
+    def get_trade_analytics(self, order_id: str) -> Optional[dict]:
+        with self._lock:
+            return self.db.trade_analytics.find_one({"order_id": order_id})
+
+    def get_trade_analytics_list(
+        self,
+        symbol: Optional[str] = None,
+        strategy: Optional[str] = None,
+        mode: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[dict]:
+        query: Dict[str, Any] = {}
+        if symbol:
+            query["symbol"] = symbol
+        if strategy:
+            query["strategy"] = strategy
+        if mode:
+            query["mode"] = mode
+        if status:
+            query["status"] = status
+
+        with self._lock:
+            return list(
+                self.db.trade_analytics.find(query)
+                .sort([("opened_at", DESCENDING)])
+                .skip(offset)
+                .limit(limit)
+            )
+
+    def get_trade_analytics_summary(
+        self, mode: Optional[str] = None, strategy: Optional[str] = None
+    ) -> List[dict]:
+        """
+        Агрегація по (strategy, symbol) серед ЗАКРИТИХ угод: win-rate,
+        середній ROE%, скільки разів в середньому переносився SL до
+        закриття — найшвидший спосіб побачити, яка стратегія/монета
+        реально відпрацьовує, а яка зливає депозит.
+        """
+        match: Dict[str, Any] = {"status": "CLOSED"}
+        if mode:
+            match["mode"] = mode
+        if strategy:
+            match["strategy"] = strategy
+
+        pipeline = [
+            {"$match": match},
+            {"$group": {
+                "_id": {"strategy": "$strategy", "symbol": "$symbol"},
+                "trades": {"$sum": 1},
+                "wins": {"$sum": {"$cond": [{"$gt": ["$net_pnl", 0]}, 1, 0]}},
+                "losses": {"$sum": {"$cond": [{"$lt": ["$net_pnl", 0]}, 1, 0]}},
+                "total_net_pnl": {"$sum": "$net_pnl"},
+                "avg_net_pnl": {"$avg": "$net_pnl"},
+                "avg_roe_percent": {"$avg": "$roe_percent"},
+                "avg_sl_moves": {"$avg": {"$size": {"$ifNull": ["$sl_moves", []]}}},
+                "avg_duration_seconds": {"$avg": "$duration_seconds"},
+            }},
+            {"$sort": {"total_net_pnl": 1}},
+        ]
+
+        with self._lock:
+            rows = list(self.db.trade_analytics.aggregate(pipeline))
+
+        result = []
+        for row in rows:
+            key = row.pop("_id")
+            row["strategy"] = key.get("strategy")
+            row["symbol"] = key.get("symbol")
+            result.append(row)
+        return result
 
     # ------------------------------------------------------------------
     # settings (generic key-value)
