@@ -46,6 +46,90 @@ if not MONGO_URI:
     )
 
 
+def _entry_derived_fields(
+    side: Optional[str],
+    entry_price: Optional[float],
+    quantity: Optional[float],
+    leverage: Any,
+    margin_usdt: Optional[float],
+    stop_loss_price_initial: Optional[float],
+    reference_price: Optional[float],
+    equity_at_entry: Optional[float],
+    opened_at: datetime,
+) -> Dict[str, Any]:
+    """Похідні метрики входу — рахуються один раз при відкритті (чиста функція,
+    без БД). Усі "pct" — у відсотках; slippage > 0 означає ПОГІРШЕННЯ."""
+    out: Dict[str, Any] = {
+        "opened_hour_utc": opened_at.hour,
+        "opened_weekday": opened_at.weekday(),  # 0 = понеділок
+    }
+    try:
+        leverage_value = float(leverage)
+    except (TypeError, ValueError):
+        leverage_value = None
+
+    if entry_price and quantity:
+        out["notional_usdt"] = entry_price * quantity
+
+        if stop_loss_price_initial:
+            distance = abs(entry_price - stop_loss_price_initial)
+            out["stop_distance_pct"] = distance / entry_price * 100.0
+            out["planned_risk_usdt"] = quantity * distance
+            if leverage_value:
+                out["stop_distance_roi_pct"] = out["stop_distance_pct"] * leverage_value
+
+    if entry_price and reference_price and side in ("LONG", "SHORT"):
+        sign = 1.0 if side == "LONG" else -1.0
+        out["entry_slippage_pct"] = sign * (entry_price - reference_price) / reference_price * 100.0
+
+    if equity_at_entry and equity_at_entry > 0:
+        out["equity_at_entry"] = equity_at_entry
+        if margin_usdt:
+            out["margin_pct_of_equity"] = margin_usdt / equity_at_entry * 100.0
+        if "planned_risk_usdt" in out:
+            out["planned_risk_pct_of_equity"] = out["planned_risk_usdt"] / equity_at_entry * 100.0
+    return out
+
+
+def _exit_derived_fields(
+    row: Optional[dict],
+    close_price: Optional[float],
+    net_pnl: Optional[float],
+    commission_open: Optional[float],
+    commission_close: Optional[float],
+    close_reason: Optional[str],
+) -> Dict[str, Any]:
+    """Похідні метрики виходу з уже збереженого рядка trade_analytics (чиста функція)."""
+    out: Dict[str, Any] = {}
+    if not row:
+        return out
+
+    entry_price = row.get("entry_price")
+    side = row.get("side")
+    sign = 1.0 if side == "LONG" else -1.0
+    moves = row.get("sl_moves") or []
+
+    out["sl_moves_count"] = len(moves)
+    final_stop = moves[-1].get("new_stop_price") if moves else row.get("stop_loss_price_initial")
+    out["final_stop_price"] = final_stop
+
+    planned_risk = row.get("planned_risk_usdt")
+    if planned_risk and planned_risk > 0 and net_pnl is not None:
+        out["r_multiple"] = net_pnl / planned_risk  # -1.0 = збиток рівно в запланований ризик
+
+    if entry_price and close_price and side in ("LONG", "SHORT"):
+        out["price_move_pct"] = sign * (close_price - entry_price) / entry_price * 100.0
+        if close_reason == "stop_loss" and final_stop:
+            # > 0: закрито ГІРШЕ за рівень стопу (проскальзування), у % від ціни входу
+            out["stop_slippage_pct"] = sign * (final_stop - close_price) / entry_price * 100.0
+
+    notional = row.get("notional_usdt")
+    if notional and (commission_open is not None or commission_close is not None):
+        fees = abs((commission_open or 0.0) + (commission_close or 0.0))
+        out["commission_pct_of_notional"] = fees / notional * 100.0
+    return out
+
+
 class Database:
     def __init__(self):
         self.uri = MONGO_URI
@@ -318,8 +402,18 @@ class Database:
         trail_meta: Optional[dict] = None,
         risk_percent: Optional[float] = None,
         reference_price: Optional[float] = None,
+        equity_at_entry: Optional[float] = None,
+        concurrent_positions: Optional[int] = None,
+        signal_context: Optional[dict] = None,
     ) -> Any:
         """
+        equity_at_entry / concurrent_positions / signal_context — контекст
+        входу для розбору "чому збиткова": equity на момент входу, скільки
+        інших позицій було відкрито, і знімок індикаторів стратегії на сигнальній
+        свічці (ATR%, об'єм до середнього, відстань до EMA тощо). Окремо від
+        них рахуються похідні метрики (notional, стоп у %, запланований ризик,
+        проскальзування входу, година/день тижня) — див. _entry_derived_fields.
+
         Пишеться ОДИН раз при відкритті угоди (бот або ручне відкриття,
         що його підхопив _handle_account_update). strategy_params — знімок
         активних параметрів стратегії станом на момент входу (з
@@ -361,7 +455,17 @@ class Database:
             "closed_by": None,
             "sl_moves": [],
             "tp_fills": [],
+            "concurrent_positions": concurrent_positions,
+            "signal_context": signal_context,
+            # MFE/MAE по ходу угоди пише ExcursionTracker (update_trade_excursion)
+            "excursion": None,
         }
+        doc.update(_entry_derived_fields(
+            side=side, entry_price=entry_price, quantity=quantity, leverage=leverage,
+            margin_usdt=margin_usdt, stop_loss_price_initial=stop_loss_price_initial,
+            reference_price=reference_price, equity_at_entry=equity_at_entry,
+            opened_at=doc["opened_at"],
+        ))
         with self._lock:
             result = self.db.trade_analytics.insert_one(doc)
         return result.inserted_id
@@ -476,13 +580,25 @@ class Database:
             update_fields["quantity"] = quantity
 
         with self._lock:
-            row = self.db.trade_analytics.find_one({"order_id": order_id}, {"opened_at": 1})
+            row = self.db.trade_analytics.find_one({"order_id": order_id})
             if row and row.get("opened_at"):
                 update_fields["duration_seconds"] = (now - row["opened_at"]).total_seconds()
+            update_fields.update(_exit_derived_fields(
+                row, close_price, net_pnl, commission_open, commission_close, close_reason,
+            ))
 
             self.db.trade_analytics.update_one(
                 {"order_id": order_id},
                 {"$set": update_fields},
+            )
+
+    def update_trade_excursion(self, order_id: str, excursion: dict) -> None:
+        """Перезаписує піддокумент excursion (MFE/MAE) — його повністю
+        перераховує ExcursionTracker, тому $set цілого піддокумента безпечний."""
+        with self._lock:
+            self.db.trade_analytics.update_one(
+                {"order_id": order_id},
+                {"$set": {"excursion": excursion}},
             )
 
     def get_trade_analytics(self, order_id: str) -> Optional[dict]:

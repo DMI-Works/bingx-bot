@@ -110,6 +110,16 @@ class SimpleTrader:
         except Exception as e:
             logger.error(f"Failed to restore open positions from DB: {e}", exc_info=True)
 
+    def _recent_equity(self, max_age_seconds: float = 120.0) -> Optional[float]:
+        """equity, який RiskManager отримав під час сайзингу цієї ж угоди (без
+        додаткового запиту до біржі). Старіше max_age_seconds — не віримо (None):
+        краще порожнє поле в аналітиці, ніж чужий equity."""
+        rm = self.risk_manager
+        last_equity = getattr(rm, 'last_equity', None) if rm else None
+        if last_equity and time.time() - getattr(rm, 'last_equity_at', 0.0) <= max_age_seconds:
+            return last_equity
+        return None
+
     def _strategy_params_snapshot(self, strategy: Optional[str]) -> Optional[dict]:
         """Знімок активних параметрів стратегії станом на ЦЮ МИТЬ — пишеться
         в trade_analytics одноразово при відкритті угоди і більше ніколи не
@@ -162,6 +172,7 @@ class SimpleTrader:
                 quantity=signal['quantity'],
                 risk_percent=signal.get('risk_percent'),
                 trail_meta=signal.get('trail_meta'),
+                signal_context=signal.get('analytics_context'),
                 leverage=signal.get('leverage', 10),
                 stop_loss_price=signal.get('stop_loss_price'),
                 take_profit_levels=signal.get('take_profit_levels'),
@@ -280,6 +291,7 @@ class SimpleTrader:
         reference_price: Optional[float] = None,
         risk_percent: Optional[float] = None,
         trail_meta: Optional[dict] = None,
+        signal_context: Optional[dict] = None,
     ) -> bool:
         try:
             positions_info_message = None
@@ -543,6 +555,9 @@ class SimpleTrader:
                     trail_meta=trail_meta,
                     risk_percent=risk_percent,
                     reference_price=reference_price,
+                    equity_at_entry=self._recent_equity(),
+                    concurrent_positions=max(0, len(self.open_positions) - 1),
+                    signal_context=signal_context,
                 )
             except Exception as e:
                 logger.error(f"Failed to insert trade_analytics for {symbol} {side}: {e}", exc_info=True)

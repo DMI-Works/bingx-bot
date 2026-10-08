@@ -14,7 +14,9 @@ import unittest.mock
 
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
 
-from core.events import EventBus, EventType  # noqa: E402
+from core.analytics import ExcursionTracker  # noqa: E402
+from core.database.database import _entry_derived_fields, _exit_derived_fields  # noqa: E402
+from core.events import Event, EventBus, EventType  # noqa: E402
 from core.exchange.bingx_client import BingXAPIError  # noqa: E402
 from core.risk import RiskManager, TrailingStopManager  # noqa: E402
 from core.strategies.indicators import (  # noqa: E402
@@ -221,9 +223,9 @@ class FakeDb:
         pass
 
     def __getattr__(self, name):
-        # аналітика (insert/close/append_*_trade_analytics) у цих тестах не
-        # перевіряється — достатньо no-op, щоб не засмічувати лог помилками
-        if 'analytics' in name:
+        # аналітика (insert/close/append_*) у цих тестах не перевіряється —
+        # достатньо no-op, щоб не засмічувати лог помилками
+        if 'analytics' in name or name.startswith('append_'):
             return lambda *a, **k: None
         raise AttributeError(name)
 
@@ -435,6 +437,10 @@ class FakeTradeExchange:
 class FakeTradeDb:
     def __init__(self):
         self.metadata = None
+        self.analytics = None
+
+    def insert_trade_analytics(self, **kwargs):
+        self.analytics = kwargs
 
     def get_active_positions(self):
         return []
@@ -591,6 +597,206 @@ class TestRiskSizingProtections(unittest.IsolatedAsyncioTestCase):
         rm.max_margin_percent_per_trade = 0
         qty = await rm.compute_risk_based_quantity(100.0, 99.9, risk_percent=1.0, leverage=10)
         self.assertAlmostEqual(qty, 1000.0 / (0.1 + 0.1), places=6)
+
+
+# ----------------------------------------------- розширена аналітика: поля, MFE/MAE, контекст
+
+class TestAnalyticsDerivedFields(unittest.TestCase):
+    def test_entry_fields_for_oversized_tight_stop_trade(self):
+        from datetime import datetime
+        out = _entry_derived_fields(
+            side='SHORT', entry_price=1.318020, quantity=681_275.84, leverage=10, margin_usdt=89_793.5,
+            stop_loss_price_initial=1.319423, reference_price=1.318710, equity_at_entry=95_600.0,
+            opened_at=datetime(2026, 10, 8, 9, 15, 2),  # четвер
+        )
+        self.assertAlmostEqual(out['notional_usdt'], 897_935.0, delta=5)
+        self.assertAlmostEqual(out['stop_distance_pct'], 0.1064, places=3)
+        self.assertAlmostEqual(out['stop_distance_roi_pct'], 1.064, places=2)
+        self.assertAlmostEqual(out['planned_risk_usdt'], 955.8, delta=1)
+        self.assertAlmostEqual(out['margin_pct_of_equity'], 93.9, delta=0.1)
+        self.assertAlmostEqual(out['planned_risk_pct_of_equity'], 1.0, places=2)
+        self.assertAlmostEqual(out['entry_slippage_pct'], 0.0523, places=3)  # шорт продали НИЖЧЕ reference => гірше (>0)
+        self.assertEqual(out['opened_hour_utc'], 9)
+        self.assertEqual(out['opened_weekday'], 3)
+
+    def test_entry_slippage_sign_means_worse_when_positive(self):
+        from datetime import datetime
+        now = datetime(2026, 1, 1)
+        common = dict(quantity=1, leverage=10, margin_usdt=None, stop_loss_price_initial=None,
+                      equity_at_entry=None, opened_at=now)
+        long_worse = _entry_derived_fields(side='LONG', entry_price=101, reference_price=100, **common)
+        short_worse = _entry_derived_fields(side='SHORT', entry_price=99, reference_price=100, **common)
+        long_better = _entry_derived_fields(side='LONG', entry_price=99, reference_price=100, **common)
+        self.assertGreater(long_worse['entry_slippage_pct'], 0)
+        self.assertGreater(short_worse['entry_slippage_pct'], 0)
+        self.assertLess(long_better['entry_slippage_pct'], 0)
+
+    def test_exit_fields_stop_slippage_and_r_multiple(self):
+        row = {'side': 'LONG', 'entry_price': 100.0, 'stop_loss_price_initial': 98.0,
+               'planned_risk_usdt': 1000.0, 'notional_usdt': 50_000.0, 'sl_moves': []}
+        out = _exit_derived_fields(row, close_price=96.0, net_pnl=-3000.0,
+                                   commission_open=-25.0, commission_close=-25.0, close_reason='stop_loss')
+        self.assertAlmostEqual(out['stop_slippage_pct'], 2.0)      # закрилось на 2% нижче стопу
+        self.assertAlmostEqual(out['r_multiple'], -3.0)
+        self.assertAlmostEqual(out['price_move_pct'], -4.0)
+        self.assertAlmostEqual(out['commission_pct_of_notional'], 0.1)
+        self.assertEqual(out['sl_moves_count'], 0)
+        self.assertEqual(out['final_stop_price'], 98.0)
+
+    def test_exit_fields_use_last_moved_stop_and_short_side(self):
+        row = {'side': 'SHORT', 'entry_price': 100.0, 'stop_loss_price_initial': 103.0,
+               'planned_risk_usdt': 300.0, 'sl_moves': [{'new_stop_price': 99.9}, {'new_stop_price': 99.0}]}
+        out = _exit_derived_fields(row, close_price=99.5, net_pnl=-10.0,
+                                   commission_open=None, commission_close=None, close_reason='stop_loss')
+        self.assertEqual(out['final_stop_price'], 99.0)
+        self.assertEqual(out['sl_moves_count'], 2)
+        self.assertAlmostEqual(out['stop_slippage_pct'], 0.5)       # шорт закрито на 0.5% вище стопу
+        self.assertNotIn('commission_pct_of_notional', out)
+
+    def test_exit_fields_empty_row_is_safe(self):
+        self.assertEqual(_exit_derived_fields(None, 1.0, 1.0, 0.0, 0.0, 'manual'), {})
+
+
+class FakeExcursionDb:
+    def __init__(self, stored=None):
+        self.saved = []
+        self.stored = stored
+
+    def update_trade_excursion(self, order_id, excursion):
+        self.saved.append((order_id, dict(excursion)))
+
+    def get_trade_analytics(self, order_id):
+        return self.stored
+
+
+def _tick(symbol, price):
+    return Event(type=EventType.PRICE_UPDATED, data=[{'s': symbol, 'p': str(price)}])
+
+
+class TestExcursionTracker(unittest.IsolatedAsyncioTestCase):
+    def _make(self, side='LONG', stored=None):
+        position = {'order_id': '42', 'symbol': 'BTC-USDT', 'side': side, 'entry_price': 100.0,
+                    'leverage': 10, 'trail_meta': {'atr': 2.0}}
+        trader = FakeTrader(position)
+        db = FakeExcursionDb(stored)
+        tracker = ExcursionTracker(EventBus(), db, trader, {'excursion_flush_seconds': 0})
+        return tracker, db, trader
+
+    async def _settle(self, tracker):
+        import asyncio
+        while tracker._tasks:
+            await asyncio.gather(*list(tracker._tasks))
+
+    async def test_long_mfe_mae_and_final_record(self):
+        tracker, db, trader = self._make('LONG')
+        for price in (101.0, 104.0, 99.0, 97.0, 100.5):
+            await tracker._on_price_update(_tick('BTC-USDT', price))
+        await self._settle(tracker)
+
+        saved_order, snap = db.saved[-1]
+        self.assertEqual(saved_order, '42')
+        self.assertAlmostEqual(snap['mfe_pct'], 4.0)
+        self.assertAlmostEqual(snap['mae_pct'], -3.0)
+        self.assertAlmostEqual(snap['mfe_roi_pct'], 40.0)       # плече 10
+        self.assertAlmostEqual(snap['mfe_atr'], 2.0)            # +4 / ATR 2
+        self.assertAlmostEqual(snap['mae_atr'], -1.5)
+
+        # закриття по стопу ПОГАНІШЕ за мінімум тіка (проскальзування) -> входить у MAE
+        trader.open_positions.clear()
+        await tracker._on_position_closed(Event(
+            type=EventType.POSITION_CLOSED, data={'order_id': '42', 'close_price': 95.0}))
+        _, final = db.saved[-1]
+        self.assertTrue(final['final'])
+        self.assertAlmostEqual(final['mae_pct'], -5.0)
+        self.assertAlmostEqual(final['exit_pct'], -5.0)
+        self.assertAlmostEqual(final['gave_back_pct'], 4.0 - (-5.0))
+        self.assertAlmostEqual(final['captured_pct_of_mfe'], -5.0 / 4.0 * 100.0)  # вийшли в мінус при MFE +4%
+        self.assertEqual(tracker._state, {})                     # стан прибрано
+
+    async def test_short_side_is_mirrored(self):
+        tracker, db, _ = self._make('SHORT')
+        for price in (99.0, 96.0, 103.0):
+            await tracker._on_price_update(_tick('BTC-USDT', price))
+        await self._settle(tracker)
+        _, snap = db.saved[-1]
+        self.assertAlmostEqual(snap['mfe_pct'], 4.0)     # шорт: найнижча ціна = макс. профіт
+        self.assertAlmostEqual(snap['mae_pct'], -3.0)    # найвища ціна = макс. збиток
+        self.assertAlmostEqual(snap['mfe_price'], 96.0)
+
+    async def test_restores_saved_extremes_after_restart(self):
+        from datetime import datetime, timezone
+        two_hours_ago = datetime.fromtimestamp(time.time() - 7200, timezone.utc).replace(tzinfo=None)
+        stored = {'opened_at': two_hours_ago,
+                  'excursion': {'mfe_price': 108.0, 'mfe_after_seconds': 600.0,
+                                'mae_price': 98.0, 'mae_after_seconds': 60.0}}
+        tracker, db, _ = self._make('LONG', stored=stored)
+        await tracker._on_price_update(_tick('BTC-USDT', 101.0))   # перший тик після "рестарту"
+        await self._settle(tracker)
+        await tracker._on_price_update(_tick('BTC-USDT', 101.0))
+        await self._settle(tracker)
+        _, snap = db.saved[-1]
+        self.assertAlmostEqual(snap['mfe_pct'], 8.0)     # піки зі збереженого, а не лише від поточного тіка
+        self.assertAlmostEqual(snap['mae_pct'], -2.0)
+
+    async def test_other_symbols_and_garbage_ticks_are_ignored(self):
+        tracker, db, _ = self._make('LONG')
+        await tracker._on_price_update(_tick('ETH-USDT', 5.0))
+        await tracker._on_price_update(Event(type=EventType.PRICE_UPDATED, data=[]))
+        await tracker._on_price_update(Event(type=EventType.PRICE_UPDATED, data=[{'s': 'BTC-USDT', 'p': 'x'}]))
+        await self._settle(tracker)
+        self.assertEqual(db.saved, [])
+        self.assertEqual(tracker._state, {})
+
+
+class TestSignalContextAndTraderPassThrough(unittest.IsolatedAsyncioTestCase):
+    async def test_signal_carries_analytics_context(self):
+        entry, trend, bucket, entry_ms, last_close = _flip_scenario(trend_close=50.0)
+        client = FakeKlineClient(entry, trend)
+        strategy = TrendSupertrendStrategy(EventBus(), TrendSupertrendStrategy.build_config(None), bingx_client=client)
+        strategy._last_price['BTC-USDT'] = last_close
+        signal = await strategy._check_signal('BTC-USDT', bucket, entry_ms)
+        ctx = signal['analytics_context']
+        for key in ('atr_pct', 'volume_ratio', 'close_vs_ema_pct', 'close_vs_supertrend_pct',
+                    'prev_trend_length_candles', 'recent_flips_20', 'candle_range_pct',
+                    'candle_body_pct', 'stop_distance_pct', 'stop_fee_multiple', 'htf_ema'):
+            self.assertIn(key, ctx)
+        self.assertGreater(ctx['volume_ratio'], 1.0)           # фільтр об'єму пройдено
+        self.assertGreater(ctx['close_vs_ema_pct'], 0)         # LONG => вище EMA
+        self.assertGreater(ctx['prev_trend_length_candles'], 10)
+        self.assertGreater(ctx['stop_fee_multiple'], 5.0)
+
+    async def test_trader_passes_context_equity_and_concurrency_to_db(self):
+        exchange, db, risk = FakeTradeExchange(), FakeTradeDb(), FakeSizingRisk(0.5)
+        risk.last_equity, risk.last_equity_at = 95_000.0, time.time()
+        trader = SimpleTrader(exchange, EventBus(), db, risk_manager=risk)
+        ok = await trader.open_position(
+            symbol='BTC-USDT', side='LONG', quantity=None, leverage=10, stop_loss_price=97.0,
+            strategy='TrendSupertrendStrategy', reference_price=100.0, risk_percent=1.0,
+            signal_context={'atr_pct': 0.9},
+        )
+        self.assertTrue(ok)
+        self.assertEqual(db.analytics['signal_context'], {'atr_pct': 0.9})
+        self.assertEqual(db.analytics['equity_at_entry'], 95_000.0)
+        self.assertEqual(db.analytics['concurrent_positions'], 0)   # інших відкритих не було
+
+    async def test_stale_equity_is_not_recorded(self):
+        exchange, db, risk = FakeTradeExchange(), FakeTradeDb(), FakeSizingRisk(0.5)
+        risk.last_equity, risk.last_equity_at = 95_000.0, time.time() - 3600
+        trader = SimpleTrader(exchange, EventBus(), db, risk_manager=risk)
+        await trader.open_position(symbol='BTC-USDT', side='LONG', quantity=None, leverage=10,
+                                   stop_loss_price=97.0, reference_price=100.0, risk_percent=1.0)
+        self.assertIsNone(db.analytics['equity_at_entry'])         # годинний equity — не віримо
+
+    async def test_risk_manager_remembers_last_equity(self):
+        class BalanceExchange:
+            async def get_account_balance(self):
+                return {'code': 0, 'data': {'balance': {'equity': '12345.5'}}}
+        rm = RiskManager(db=None, event_bus=EventBus(), exchange=BalanceExchange(),
+                         config={'max_consecutive_losses': 0}, settings_manager=FakeSettings())
+        self.assertIsNone(rm.last_equity)
+        self.assertEqual(await rm.get_equity(), 12345.5)
+        self.assertEqual(rm.last_equity, 12345.5)
+        self.assertAlmostEqual(rm.last_equity_at, time.time(), delta=5)
 
 
 if __name__ == '__main__':

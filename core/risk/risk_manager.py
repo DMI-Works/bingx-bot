@@ -46,6 +46,11 @@ class RiskManager:
         self.max_margin_percent_per_trade = config.get('max_margin_percent_per_trade', 5.0)
         self.taker_fee_rate = config.get('taker_fee_rate', 0.0005)
 
+        # Останній успішно отриманий equity і коли — SimpleTrader кладе його в
+        # trade_analytics (equity_at_entry), щоб не робити зайвий запит до біржі.
+        self.last_equity: Optional[float] = None
+        self.last_equity_at: float = 0.0
+
         self.stop_loss_streak_limit = config.get('stop_loss_streak_limit', 3)
         self.stop_loss_streak_window_hours = config.get('stop_loss_streak_window_hours', 24)
         self.stop_loss_block_hours = config.get('stop_loss_block_hours', 8)
@@ -192,6 +197,8 @@ class RiskManager:
             logger.error(f"RiskManager: got non-positive equity ({equity}) — cannot size position")
             return None
 
+        self.last_equity = equity
+        self.last_equity_at = time.time()
         return equity
 
     async def compute_risk_based_quantity(

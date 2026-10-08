@@ -17,6 +17,7 @@ from core.exchange import BingXClient
 from core.exchange import SymbolSelector
 from core.state import SettingsManager
 from core.risk import RiskManager, TrailingStopManager
+from core.analytics import ExcursionTracker
 from core.trading import SimpleTrader
 from core.strategies import StrategyManager, SignalActivityTracker
 from core.strategies.orderbook_analyzer import OrderBookAnalyzer
@@ -131,6 +132,10 @@ async def main():
         config=trailing_stop_config,
     )
     logger.info("[OK] Trailing Stop Manager initialized")
+
+    # MFE/MAE угод для trade_analytics (лише читає тики, у торгівлю не втручається)
+    excursion_tracker = ExcursionTracker(event_bus, db, trader, config.get('analytics', {}))
+    logger.info("[OK] Excursion Tracker initialized (MFE/MAE -> trade_analytics)")
 
     filters_config = config.get('trading.filters', {})
     refresh_interval = config.get('trading.filters.rotation_interval_seconds', 1800)
@@ -275,6 +280,9 @@ async def main():
 
     await event_bus.stop()
     logger.info("[OK] Event Bus stopped")
+
+    await excursion_tracker.flush_all()
+    logger.info("[OK] Excursion Tracker flushed")
 
     db.close()
     logger.info("[OK] Database closed")

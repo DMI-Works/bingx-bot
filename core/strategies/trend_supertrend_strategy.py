@@ -314,12 +314,13 @@ class TrendSupertrendStrategy(BaseStrategy):
         if len(closed) < 2 or int(closed[-1]['time']) != bucket_start_ms - entry_ms:
             return 'not_ready'
 
+        opens = [float(k['open']) for k in closed]
         highs = [float(k['high']) for k in closed]
         lows = [float(k['low']) for k in closed]
         closes = [float(k['close']) for k in closed]
         volumes = [float(k['volume']) for k in closed]
 
-        direction, _ = supertrend(highs, lows, closes, p['supertrend_period'], p['supertrend_multiplier'])
+        direction, st_line = supertrend(highs, lows, closes, p['supertrend_period'], p['supertrend_multiplier'])
         current_dir, previous_dir = direction[-1], direction[-2]
         if current_dir is None or previous_dir is None or current_dir == previous_dir:
             return None  # розвороту на останній закритій свічці немає
@@ -373,10 +374,48 @@ class TrendSupertrendStrategy(BaseStrategy):
             f"vol={volumes[-1]:.4f} > SMA={volume_sma:.4f}"
         )
 
+        # Скільки свічок тривав ПОПЕРЕДНІЙ напрям і скільки розворотів було за
+        # останні 20 свічок: багато розворотів поспіль = "пила" (флет), де
+        # Supertrend дає хибні сигнали.
+        prev_trend_length = 0
+        for j in range(len(direction) - 2, -1, -1):
+            if direction[j] != previous_dir:
+                break
+            prev_trend_length += 1
+        recent_flips_20 = sum(
+            1 for j in range(max(1, len(direction) - 20), len(direction))
+            if direction[j] is not None and direction[j - 1] is not None and direction[j] != direction[j - 1]
+        )
+
+        # Знімок для trade_analytics (ключі лише для аналізу, на торгівлю не впливають)
+        analytics_context = {
+            'signal_candle_open_ms': int(closed[-1]['time']),
+            'entry_timeframe': p['entry_timeframe'],
+            'trend_timeframe': p['trend_timeframe'],
+            'close': close,
+            'atr': atr_value,
+            'atr_pct': atr_value / close * 100.0,
+            'htf_ema': trend_ema,
+            'close_vs_ema_pct': (close - trend_ema) / trend_ema * 100.0,
+            'supertrend_line': st_line[-1],
+            'close_vs_supertrend_pct': (close - st_line[-1]) / close * 100.0,
+            'prev_trend_length_candles': prev_trend_length,
+            'recent_flips_20': recent_flips_20,
+            'volume': volumes[-1],
+            'volume_sma': volume_sma,
+            'volume_ratio': volumes[-1] / volume_sma,
+            # розмір сигнальної свічки: велика => ми входимо ПІСЛЯ основного руху
+            'candle_range_pct': (highs[-1] - lows[-1]) / close * 100.0,
+            'candle_body_pct': (closes[-1] - opens[-1]) / opens[-1] * 100.0,
+            'stop_distance_pct': stop_distance / price * 100.0,
+            'stop_fee_multiple': stop_distance / round_trip_fee if round_trip_fee > 0 else None,
+        }
+
         return {
             'action': 'OPEN',
             'symbol': symbol,
             'side': side,
+            'analytics_context': analytics_context,
             # quantity считает SimpleTrader по risk_percent (см. докстринг модуля)
             'quantity': None,
             'risk_percent': p['risk_per_trade_percent'],

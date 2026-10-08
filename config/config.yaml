@@ -132,3 +132,10 @@ telegram:
 webapp:
   enabled: true
   port: 8000
+
+# Додаткова аналітика угод (колекція trade_analytics).
+analytics:
+  enabled: true
+  # як часто (сек) дописувати MFE/MAE відкритої угоди в БД; фінальний запис —
+  # завжди при закритті
+  excursion_flush_seconds: 30
