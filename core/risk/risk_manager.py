@@ -41,6 +41,11 @@ class RiskManager:
         # window часов -> блок НОВЫХ входов на block часов. Глобальный (по
         # аккаунту, не по монете): в отличие от max_consecutive_losses выше,
         # который выкидывает из торговли одну монету. 0 = выключено.
+        # Стеля маржі на одну угоду (% від equity) і комісія taker однієї
+        # сторони — див. compute_risk_based_quantity. 0 = стелю вимкнено.
+        self.max_margin_percent_per_trade = config.get('max_margin_percent_per_trade', 5.0)
+        self.taker_fee_rate = config.get('taker_fee_rate', 0.0005)
+
         self.stop_loss_streak_limit = config.get('stop_loss_streak_limit', 3)
         self.stop_loss_streak_window_hours = config.get('stop_loss_streak_window_hours', 24)
         self.stop_loss_block_hours = config.get('stop_loss_block_hours', 8)
@@ -190,10 +195,21 @@ class RiskManager:
         return equity
 
     async def compute_risk_based_quantity(
-        self, entry_price: float, stop_loss_price: float, risk_percent: Optional[float] = None
+        self, entry_price: float, stop_loss_price: float, risk_percent: Optional[float] = None,
+        leverage: Optional[float] = None,
     ) -> Optional[float]:
         """
-        quantity = (equity * risk_percent%) / |entry_price - stop_loss_price|
+        quantity = (equity * risk_percent%) / (|entry_price - stop_loss_price| + комісія round-trip на 1 шт.)
+
+        Два захисти (працюють, лише коли передано leverage — тобто для
+        ЯВНОГО risk_percent зі стратегії; старий шлях use_risk_based_sizing
+        викликає без leverage і поводиться як раніше):
+          1) комісія входить у ризик: при тісному стопі (порівнянному з
+             комісією) без цього реальний збиток — у рази більший за заплановані
+             risk_percent. Комісія = 2 * taker_fee_rate * entry_price на одиницю;
+          2) стеля розміру: маржа позиції <= max_margin_percent_per_trade % від
+             equity. Без неї тісний стоп роздуває позицію до майже всього
+             депозиту (так на тестнеті NCFXGBP2USD взяла 94% equity під 1% ризику).
 
         entry_price здесь — reference_price сигнала (цена, от которой стратегия
         считала SL/TP), т.к. для MARKET-ордера реальная entry_price появится
@@ -227,12 +243,27 @@ class RiskManager:
 
         pct = risk_percent if risk_percent is not None else self.risk_per_trade_percent
         risk_usdt = equity * (pct / 100.0)
-        quantity = risk_usdt / distance
+
+        fee_per_unit = 2.0 * self.taker_fee_rate * entry_price if leverage else 0.0
+        quantity = risk_usdt / (distance + fee_per_unit)
 
         logger.info(
             f"RiskManager: risk-based sizing: equity={equity:.2f}, risk={pct}% -> "
-            f"risk_usdt={risk_usdt:.4f}, sl_distance={distance:.6f} -> quantity={quantity:.8f}"
+            f"risk_usdt={risk_usdt:.4f}, sl_distance={distance:.6f}, fee_per_unit={fee_per_unit:.6f} "
+            f"-> quantity={quantity:.8f}"
         )
+
+        if leverage and self.max_margin_percent_per_trade > 0:
+            max_margin = equity * (self.max_margin_percent_per_trade / 100.0)
+            max_quantity = max_margin * leverage / entry_price
+            if quantity > max_quantity:
+                logger.warning(
+                    f"RiskManager: quantity {quantity:.8f} capped to {max_quantity:.8f} — margin would be "
+                    f"{quantity * entry_price / leverage:.2f} USDT "
+                    f"(> {self.max_margin_percent_per_trade}% of equity = {max_margin:.2f} USDT); "
+                    f"actual risk is lower than requested {pct}%"
+                )
+                quantity = max_quantity
         return quantity
 
     async def _get_real_open_positions(self) -> list[dict]:
@@ -408,6 +439,10 @@ class RiskManager:
         self.max_consecutive_losses = config.get('max_consecutive_losses', self.max_consecutive_losses)
         self.use_risk_based_sizing = config.get('use_risk_based_sizing', self.use_risk_based_sizing)
         self.risk_per_trade_percent = config.get('risk_per_trade_percent', self.risk_per_trade_percent)
+        self.max_margin_percent_per_trade = config.get(
+            'max_margin_percent_per_trade', self.max_margin_percent_per_trade
+        )
+        self.taker_fee_rate = config.get('taker_fee_rate', self.taker_fee_rate)
         self.stop_loss_streak_limit = config.get('stop_loss_streak_limit', self.stop_loss_streak_limit)
         self.stop_loss_streak_window_hours = config.get(
             'stop_loss_streak_window_hours', self.stop_loss_streak_window_hours

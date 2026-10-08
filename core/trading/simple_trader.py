@@ -315,6 +315,7 @@ class SimpleTrader:
                         entry_price=reference_price,
                         stop_loss_price=stop_loss_price,
                         risk_percent=risk_percent,
+                        leverage=leverage,  # вмикає комісію в ризику і стелю маржі
                     )
                 if not risk_quantity or risk_quantity <= 0:
                     logger.warning(

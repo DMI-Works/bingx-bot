@@ -10,6 +10,7 @@ TrailingStopManager, предохранитель серії стоп-лоссі
 import os
 import time
 import unittest
+import unittest.mock
 
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
 
@@ -75,10 +76,14 @@ def _v_shaped_series(n_down=60, n_up=60):
 # ------------------------------------------------------------------ стратегія
 
 class FakeKlineClient:
-    def __init__(self, entry_klines, trend_klines):
+    def __init__(self, entry_klines, trend_klines, quote_volume=1_000_000_000.0):
         self.entry_klines = entry_klines
         self.trend_klines = trend_klines
+        self.quote_volume = quote_volume
         self.calls = []
+
+    async def get_all_tickers(self):
+        return [{'symbol': 'BTC-USDT', 'quoteVolume': str(self.quote_volume)}]
 
     async def get_klines(self, symbol, interval, limit=500, **kwargs):
         self.calls.append((symbol, interval, limit))
@@ -128,9 +133,10 @@ def _flip_scenario(trend_close):
 
 
 class TestStrategySignal(unittest.IsolatedAsyncioTestCase):
-    def _make(self, entry_klines, trend_klines):
-        client = FakeKlineClient(entry_klines, trend_klines)
-        strategy = TrendSupertrendStrategy(EventBus(), TrendSupertrendStrategy.build_config(None), bingx_client=client)
+    def _make(self, entry_klines, trend_klines, quote_volume=1_000_000_000.0, **overrides):
+        client = FakeKlineClient(entry_klines, trend_klines, quote_volume)
+        config = dict(TrendSupertrendStrategy.build_config(None), **overrides)
+        strategy = TrendSupertrendStrategy(EventBus(), config, bingx_client=client)
         return strategy, client
 
     async def test_long_signal_contract(self):
@@ -213,6 +219,13 @@ class FakeExchange:
 class FakeDb:
     def update_position_metadata(self, order_id, metadata):
         pass
+
+    def __getattr__(self, name):
+        # аналітика (insert/close/append_*_trade_analytics) у цих тестах не
+        # перевіряється — достатньо no-op, щоб не засмічувати лог помилками
+        if 'analytics' in name:
+            return lambda *a, **k: None
+        raise AttributeError(name)
 
 
 class FakeTrader:
@@ -432,6 +445,11 @@ class FakeTradeDb:
     def update_position_metadata(self, order_id, metadata):
         self.metadata = metadata
 
+    def __getattr__(self, name):
+        if 'analytics' in name:
+            return lambda *a, **k: None
+        raise AttributeError(name)
+
 
 class FakeSizingRisk:
     def __init__(self, quantity):
@@ -441,8 +459,8 @@ class FakeSizingRisk:
     async def can_open_position(self, symbol, risk_amount=0.0):
         return True, None
 
-    async def compute_risk_based_quantity(self, entry_price, stop_loss_price, risk_percent=None):
-        self.calls.append((entry_price, stop_loss_price, risk_percent))
+    async def compute_risk_based_quantity(self, entry_price, stop_loss_price, risk_percent=None, leverage=None):
+        self.calls.append((entry_price, stop_loss_price, risk_percent, leverage))
         return self.quantity
 
 
@@ -462,7 +480,7 @@ class TestSimpleTraderRiskPercent(unittest.IsolatedAsyncioTestCase):
         import json
         ok, exchange, db, risk, trader = await self._open(0.5)
         self.assertTrue(ok)
-        self.assertEqual(risk.calls, [(100.0, 97.0, 1.0)])
+        self.assertEqual(risk.calls, [(100.0, 97.0, 1.0, 10)])  # leverage -> комісія в ризику + стеля маржі
         types = [o['order_type'] for o in exchange.orders]
         self.assertEqual(types, ['MARKET', 'STOP_MARKET'])          # НИКАКОГО TAKE_PROFIT_MARKET
         self.assertEqual(exchange.orders[0]['quantity'], 0.5)
@@ -474,6 +492,105 @@ class TestSimpleTraderRiskPercent(unittest.IsolatedAsyncioTestCase):
         ok, exchange, *_ = await self._open(None)
         self.assertFalse(ok)
         self.assertEqual(exchange.orders, [])  # без безопасного quantity — НЕ открываем "каким-нибудь" размером
+
+
+# ------------------------------------------- захист від збиткових входів (тестнет 2026-10-08)
+
+class TestLossProtections(unittest.IsolatedAsyncioTestCase):
+    def _make(self, **overrides):
+        entry, trend, bucket, entry_ms, last_close = _flip_scenario(trend_close=50.0)
+        client = FakeKlineClient(entry, trend, overrides.pop('quote_volume', 1_000_000_000.0))
+        config = dict(TrendSupertrendStrategy.build_config(None), **overrides)
+        strategy = TrendSupertrendStrategy(EventBus(), config, bingx_client=client)
+        strategy._last_price['BTC-USDT'] = last_close
+        return strategy, client, bucket, entry_ms
+
+    async def test_non_crypto_prefix_is_ignored_without_any_work(self):
+        strategy, client, _, _ = self._make()
+        self.assertIsNone(await strategy.analyze('NCFXGBP2USD-USDT', 1.32))
+        self.assertEqual(strategy._last_bucket, {})
+        self.assertEqual(client.calls, [])
+
+    async def test_illiquid_symbol_filtered_before_klines(self):
+        strategy, client, bucket, entry_ms = self._make(quote_volume=1_000_000.0)  # < 20M
+        self.assertIsNone(await strategy._check_signal('BTC-USDT', bucket, entry_ms))
+        self.assertEqual(client.calls, [])  # до запиту свічок не дійшло
+
+    async def test_liquidity_filter_can_be_disabled(self):
+        strategy, _, bucket, entry_ms = self._make(quote_volume=1.0, min_quote_volume_24h_usdt=0)
+        self.assertIsInstance(await strategy._check_signal('BTC-USDT', bucket, entry_ms), dict)
+
+    async def test_stop_tighter_than_fee_multiple_is_skipped(self):
+        strategy, _, bucket, entry_ms = self._make(min_stop_fee_multiple=1000.0)
+        self.assertIsNone(await strategy._check_signal('BTC-USDT', bucket, entry_ms))
+
+    async def test_stale_signal_is_dropped_and_fresh_one_published(self):
+        strategy, _, bucket, entry_ms = self._make()
+        bucket_start_s = bucket * entry_ms / 1000.0
+
+        with unittest.mock.patch.object(time, 'time', return_value=bucket_start_s + 30):
+            await strategy._evaluate('BTC-USDT', bucket, bucket - 1, entry_ms)
+        self.assertEqual(strategy.event_bus.get_queue_size(), 1)  # свіжий (30с) — опубліковано
+
+        strategy.event_bus._queue = type(strategy.event_bus._queue)()  # очистили чергу
+        with unittest.mock.patch.object(time, 'time', return_value=bucket_start_s + 120):
+            await strategy._evaluate('BTC-USDT', bucket, bucket - 1, entry_ms)
+        self.assertEqual(strategy.event_bus.get_queue_size(), 0)      # застарілий (120с > 90с)
+
+    async def test_retry_after_error_is_cancelled_when_signal_is_stale(self):
+        strategy, client, bucket, entry_ms = self._make()
+
+        async def boom(*a, **k):
+            raise RuntimeError("REST timeout")
+        client.get_klines = boom
+        bucket_start_s = bucket * entry_ms / 1000.0
+
+        with unittest.mock.patch.object(time, 'time', return_value=bucket_start_s + 30):
+            strategy._last_bucket['BTC-USDT'] = bucket
+            await strategy._evaluate('BTC-USDT', bucket, bucket - 1, entry_ms)
+        self.assertEqual(strategy._last_bucket['BTC-USDT'], bucket - 1)   # свіжий — повтор дозволено
+
+        with unittest.mock.patch.object(time, 'time', return_value=bucket_start_s + 120):
+            strategy._last_bucket['BTC-USDT'] = bucket
+            await strategy._evaluate('BTC-USDT', bucket, bucket - 1, entry_ms)
+        self.assertEqual(strategy._last_bucket['BTC-USDT'], bucket)       # пізно — повтору немає
+
+
+class TestRiskSizingProtections(unittest.IsolatedAsyncioTestCase):
+    def _make(self, equity=100_000.0):
+        rm = RiskManager(db=None, event_bus=EventBus(), exchange=FakeRiskExchange(),
+                         config={'max_consecutive_losses': 0}, settings_manager=FakeSettings())
+
+        async def fake_equity():
+            return equity
+        rm.get_equity = fake_equity
+        return rm
+
+    async def test_tight_stop_is_capped_by_margin_limit(self):
+        # NCFXGBP2USD-сценарій: стоп 0.1% від ціни, equity 100k, ризик 1%, плече 10
+        rm = self._make()
+        qty = await rm.compute_risk_based_quantity(100.0, 99.9, risk_percent=1.0, leverage=10)
+        margin = qty * 100.0 / 10
+        self.assertAlmostEqual(margin, 5_000.0, places=6)      # рівно 5% equity, а не 50%+
+        self.assertLess(qty * 0.1, 1_000.0)                    # ризик нижчий за 1%
+
+    async def test_fee_is_included_in_risk_for_wide_stop(self):
+        rm = self._make()
+        qty = await rm.compute_risk_based_quantity(100.0, 95.0, risk_percent=1.0, leverage=10)
+        # 1000 / (5 + 2*0.0005*100) = 1000 / 5.1
+        self.assertAlmostEqual(qty, 1000.0 / 5.1, places=6)
+        self.assertLess(qty * 100.0 / 10, 5_000.0)             # стеля не спрацьовує
+
+    async def test_legacy_call_without_leverage_is_unchanged(self):
+        rm = self._make()
+        qty = await rm.compute_risk_based_quantity(100.0, 99.9, risk_percent=1.0)
+        self.assertAlmostEqual(qty, 1000.0 / 0.1, places=6)    # без leverage — стара формула, без стелі
+
+    async def test_margin_cap_can_be_disabled(self):
+        rm = self._make()
+        rm.max_margin_percent_per_trade = 0
+        qty = await rm.compute_risk_based_quantity(100.0, 99.9, risk_percent=1.0, leverage=10)
+        self.assertAlmostEqual(qty, 1000.0 / (0.1 + 0.1), places=6)
 
 
 if __name__ == '__main__':

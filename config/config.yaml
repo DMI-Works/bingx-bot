@@ -31,6 +31,14 @@ trading:
     # stop_loss_block_hours часов (по всему аккаунту, для всех стратегий;
     # открытые позиции продолжают сопровождаться). Любое закрытие не по
     # стопу в минус (стоп в плюс, TP, ручное) серию обрывает. 0 = выключено.
+    # Стеля маржі однієї угоди (% від equity) для угод із risk_percent зі
+    # стратегії (TrendSupertrendStrategy). Без неї тісний стоп роздуває
+    # позицію до майже всього депозиту. 0 = вимкнено.
+    max_margin_percent_per_trade: 5.0
+    # Комісія taker однієї сторони: у risk-sizing закладається round-trip
+    # (2 * taker_fee_rate * ціна) на одиницю, щоб реальний збиток не
+    # перевищував заплановані risk_percent на тісних стопах.
+    taker_fee_rate: 0.0005
     stop_loss_streak_limit: 3
     stop_loss_streak_window_hours: 24
     stop_loss_block_hours: 8

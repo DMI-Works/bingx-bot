@@ -56,6 +56,9 @@ _MAX_NOT_READY_ATTEMPTS = 5
 _NOT_READY_RETRY_SECONDS = 3.0
 _ERROR_RETRY_SECONDS = 10.0
 
+# 24h-об'єми по всіх контрактах приходять одним запитом — кешуємо
+_TICKERS_TTL_SECONDS = 900.0
+
 
 @register_strategy('TrendSupertrendStrategy')
 class TrendSupertrendStrategy(BaseStrategy):
@@ -71,6 +74,22 @@ class TrendSupertrendStrategy(BaseStrategy):
         'volume_sma_period': 20,
         'atr_period': 14,
         'atr_stop_multiplier': 1.5,
+        # --- захист від збиткових входів (розбір тестнет-угод 2026-10-08) ---
+        # Мінімальний стоп у кратних комісії round-trip (2 * taker * ціна):
+        # коли стоп порівнянний з комісією, будь-який збиток подвоюється, а
+        # позиція (при сайзингу за ризиком) роздувається. 5 => стоп >= ~0.5%.
+        'min_stop_fee_multiple': 5.0,
+        'taker_fee_rate': 0.0005,
+        # Фільтр монет саме для цієї стратегії (SymbolSelector спільний із
+        # WallBreakoutStrategy і підбирає під "стіни", а не під тренд):
+        # мінімальний 24h-оборот в USDT (0 = вимкнено) ...
+        'min_quote_volume_24h_usdt': 20_000_000,
+        # ... і префікси не-крипто контрактів BingX через кому
+        # (NCFX — форекс, NCCO — сировина, NCSK — акції, NCSI — індекси)
+        'excluded_symbol_prefixes': 'NCFX,NCCO,NCSK,NCSI',
+        # Сигнал живе лише N секунд після закриття свічки: повтори після
+        # помилок REST не повинні виконати вхід за вже застарілою ціною
+        'max_signal_age_seconds': 90,
         # --- параметри супроводу стопу (читає TrailingStopManager з trail_meta
         # позиції; всі кратні ATR, виміряному в момент входу) ---
         # крок 1: профіт >= N*ATR -> SL на ціну входу + комісії
@@ -105,6 +124,12 @@ class TrendSupertrendStrategy(BaseStrategy):
         # symbol -> (номер годинної свічки, EMA200) — старший ТФ міняється
         # рідко, тому не ходимо за ним на кожну свічку робочого ТФ
         self._trend_cache: Dict[str, tuple] = {}
+        # (час завантаження, {symbol: 24h quoteVolume}) + антидубль логу відсіву
+        self._volume_cache: tuple = (0.0, {})
+        self._volume_lock = asyncio.Lock()
+        self._liquidity_logged: Set[str] = set()
+        self._excluded_prefixes: tuple = ()
+        self._refresh_derived_params()
         self._tasks: Set[asyncio.Task] = set()
         self._klines_semaphore = asyncio.Semaphore(3)
         self._warned_no_client = False
@@ -142,7 +167,8 @@ class TrendSupertrendStrategy(BaseStrategy):
 
         positive_floats = ('supertrend_multiplier', 'atr_stop_multiplier', 'risk_per_trade_percent',
                            'trail_breakeven_atr', 'trail_lock_trigger_atr',
-                           'trail_lock_offset_atr', 'trail_gap_atr')
+                           'trail_lock_offset_atr', 'trail_gap_atr',
+                           'min_stop_fee_multiple', 'taker_fee_rate', 'max_signal_age_seconds')
         for key in positive_floats:
             if isinstance(p[key], bool) or not isinstance(p[key], (int, float)) or float(p[key]) <= 0:
                 raise ValueError(f"{key} must be > 0, got {p[key]!r}")
@@ -150,6 +176,14 @@ class TrendSupertrendStrategy(BaseStrategy):
 
         if p['risk_per_trade_percent'] > 10:
             raise ValueError(f"risk_per_trade_percent={p['risk_per_trade_percent']} looks unsafe (> 10)")
+
+        volume = p['min_quote_volume_24h_usdt']
+        if isinstance(volume, bool) or not isinstance(volume, (int, float)) or float(volume) < 0:
+            raise ValueError(f"min_quote_volume_24h_usdt must be >= 0, got {volume!r}")
+        p['min_quote_volume_24h_usdt'] = float(volume)
+
+        if not isinstance(p['excluded_symbol_prefixes'], str):
+            raise ValueError(f"excluded_symbol_prefixes must be a comma-separated string, got {p['excluded_symbol_prefixes']!r}")
 
         return p
 
@@ -161,13 +195,22 @@ class TrendSupertrendStrategy(BaseStrategy):
             return
         self.config = new_config
         self._params = params
+        self._refresh_derived_params()
         # кеш тренду міг бути пораховано зі старих параметрів
         self._trend_cache.clear()
+
+    def _refresh_derived_params(self) -> None:
+        self._excluded_prefixes = tuple(
+            x.strip().upper() for x in str(self._params['excluded_symbol_prefixes']).split(',') if x.strip()
+        )
 
     # ---------- тригер: нова свічка робочого ТФ ----------
 
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
         self._last_price[symbol] = price
+
+        if self._excluded_prefixes and symbol.upper().startswith(self._excluded_prefixes):
+            return None  # не-крипто контракт (форекс/сировина/акції/індекси) — не торгуємо
 
         if self.bingx_client is None:
             if not self._warned_no_client:
@@ -201,8 +244,19 @@ class TrendSupertrendStrategy(BaseStrategy):
     async def _evaluate(self, symbol: str, bucket: int, previous_bucket: int, entry_ms: int) -> None:
         retry_seconds: Optional[float] = None
         try:
+            if self._signal_age_exceeded(bucket, entry_ms):
+                logger.info(f"[{symbol}] TrendSupertrend: сигнал застарів ще до перевірки — пропускаю")
+                return
+
             async with self._klines_semaphore:
                 result = await self._check_signal(symbol, bucket, entry_ms)
+
+            if isinstance(result, dict) and self._signal_age_exceeded(bucket, entry_ms):
+                logger.warning(
+                    f"[{symbol}] TrendSupertrend: сигнал {result['side']} відкинуто — старший за "
+                    f"{self._params['max_signal_age_seconds']:g}с від закриття свічки (вхід був би за застарілою ціною)"
+                )
+                return
 
             if result == 'not_ready':
                 attempts = self._not_ready_attempts.get(symbol, 0) + 1
@@ -227,10 +281,19 @@ class TrendSupertrendStrategy(BaseStrategy):
             retry_seconds = _ERROR_RETRY_SECONDS
         finally:
             if retry_seconds is not None:
-                # відкочуємо номер свічки, щоб наступний тік повторив перевірку
-                self._last_bucket[symbol] = previous_bucket
-                self._retry_after[symbol] = time.time() + retry_seconds
+                if self._signal_age_exceeded(bucket, entry_ms):
+                    # повторювати вже пізно: сигнал свічки мертвий, чекаємо наступну
+                    logger.info(f"[{symbol}] TrendSupertrend: повтор скасовано — сигнал свічки застарів")
+                else:
+                    # відкочуємо номер свічки, щоб наступний тік повторив перевірку
+                    self._last_bucket[symbol] = previous_bucket
+                    self._retry_after[symbol] = time.time() + retry_seconds
             self._inflight.discard(symbol)
+
+    def _signal_age_exceeded(self, bucket: int, entry_ms: int) -> bool:
+        """Вік сигналу рахується від ЗАКРИТТЯ сигнальної свічки (= початок bucket)."""
+        age_seconds = time.time() - (bucket * entry_ms) / 1000.0
+        return age_seconds > self._params['max_signal_age_seconds']
 
     # ---------- розрахунок сигналу ----------
 
@@ -238,6 +301,10 @@ class TrendSupertrendStrategy(BaseStrategy):
         """Повертає dict-сигнал, None (немає сигналу) або 'not_ready'."""
         p = self._params
         bucket_start_ms = bucket * entry_ms
+
+        # дешевий відсів ДО запиту свічок (оборот кешується на 15 хв)
+        if not await self._passes_liquidity_filter(symbol):
+            return None
 
         klines = await self.bingx_client.get_klines(symbol, p['entry_timeframe'], limit=_ENTRY_KLINES_LIMIT)
         closed = [k for k in klines if int(k['time']) < bucket_start_ms]
@@ -291,6 +358,15 @@ class TrendSupertrendStrategy(BaseStrategy):
             logger.warning(f"[{symbol}] TrendSupertrend SKIP {side}: SL <= 0 (price={price}, ATR={atr_value})")
             return None
 
+        round_trip_fee = 2.0 * p['taker_fee_rate'] * price
+        if stop_distance < p['min_stop_fee_multiple'] * round_trip_fee:
+            logger.info(
+                f"[{symbol}] TrendSupertrend SKIP {side}: стоп {stop_distance / price * 100:.3f}% "
+                f"< {p['min_stop_fee_multiple']:g}× комісії round-trip ({round_trip_fee / price * 100:.3f}%) — "
+                f"волатильність монети замала для цієї стратегії"
+            )
+            return None
+
         logger.info(
             f"[{symbol}] TrendSupertrend SIGNAL: {side} price={price:.6f}, ATR={atr_value:.6f}, "
             f"SL={stop_loss_price:.6f}, EMA{p['ema_period']}={trend_ema:.6f}, "
@@ -324,6 +400,36 @@ class TrendSupertrendStrategy(BaseStrategy):
                 f"ATR={atr_value:.6f}"
             ),
         }
+
+    async def _passes_liquidity_filter(self, symbol: str) -> bool:
+        min_volume = self._params['min_quote_volume_24h_usdt']
+        if min_volume <= 0:
+            return True
+
+        async with self._volume_lock:
+            fetched_at, volumes = self._volume_cache
+            if time.time() - fetched_at > _TICKERS_TTL_SECONDS:
+                tickers = await self.bingx_client.get_all_tickers()  # помилка -> повтор через _evaluate
+                volumes = {}
+                for ticker in tickers:
+                    try:
+                        volumes[ticker['symbol']] = float(ticker.get('quoteVolume', 0))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                self._volume_cache = (time.time(), volumes)
+                self._liquidity_logged.clear()
+
+        volume = volumes.get(symbol)
+        if volume is not None and volume >= min_volume:
+            return True
+
+        if symbol not in self._liquidity_logged:
+            self._liquidity_logged.add(symbol)
+            logger.info(
+                f"[{symbol}] TrendSupertrend: монета відсіяна за ліквідністю — 24h оборот "
+                f"{'невідомий' if volume is None else f'{volume:,.0f}'} USDT < {min_volume:,.0f}"
+            )
+        return False
 
     async def _get_trend_ema(self, symbol: str) -> Optional[float]:
         p = self._params
