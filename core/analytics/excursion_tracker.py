@@ -15,6 +15,12 @@ MFE ≈ 0) від "вхід був нормальний, але вихід/тр�
 блокував EventBus. Фінальний запис — на POSITION_CLOSED (ціна закриття теж
 враховується як екстремум, тож проскальзування стопу потрапляє в MAE).
 
+Траєкторія (excursion.path): стиснений шлях ціни угоди — точка пишеться, коли
+рух від входу (у % ціни, + = у бік угоди) змінився щонайменше на path_step_pct
+від попередньої точки. Формат рядка "сек:pct;сек:pct;..." (один стовпець і в
+CSV-експорті). По ній scripts/trade_report.py точно перевіряє інші SL/TP/
+безубиток на реальних угодах, а не лише за MFE/MAE.
+
 Після рестарту бота стан підтягується з уже збереженого excursion в БД.
 """
 
@@ -40,6 +46,8 @@ class ExcursionTracker:
         self.trader = trader
         self.enabled: bool = cfg.get('enabled', True)
         self.flush_interval_seconds: float = float(cfg.get('excursion_flush_seconds', 30))
+        self.path_step_pct: float = float(cfg.get('path_step_pct', 0.05))
+        self.path_max_points: int = int(cfg.get('path_max_points', 2000))
 
         # order_id -> стан екстремумів (ціни й час — у секундах unix)
         self._state: Dict[str, dict] = {}
@@ -88,6 +96,9 @@ class ExcursionTracker:
                 'dirty': True,
                 'flushing': False,
                 'last_flush': now,  # перший запис — через flush_interval, не на кожен тік
+                'path': [(0.0, 0.0)],
+                'path_step': self.path_step_pct,
+                'path_max_points': self.path_max_points,
             }
             self._state[order_id] = state
             # якщо бот перезапускався посеред угоди — підтягуємо вже збережене
@@ -95,11 +106,36 @@ class ExcursionTracker:
         return state
 
     @staticmethod
-    def _apply_price(state: dict, price: float, now: float) -> None:
+    def _apply_price(state: dict, price: float, now: float, force_path_point: bool = False) -> None:
         if price > state['high']:
             state['high'], state['high_ts'], state['dirty'] = price, now, True
         if price < state['low']:
             state['low'], state['low_ts'], state['dirty'] = price, now, True
+
+        path = state['path']
+        move_pct = side_sign(state['side']) * (price - state['entry']) / state['entry'] * 100.0
+        if force_path_point or abs(move_pct - path[-1][1]) >= state['path_step']:
+            path.append((round(max(0.0, now - state['opened_ts']), 1), round(move_pct, 4)))
+            state['dirty'] = True
+            if len(path) > state['path_max_points']:
+                # проріджуємо вдвічі й грубішаємо крок (останню точку зберігаємо)
+                state['path'] = path[:-1:2] + [path[-1]]
+                state['path_step'] *= 2
+
+    @staticmethod
+    def encode_path(path) -> str:
+        return ';'.join(f"{t:g}:{p:g}" for t, p in path)
+
+    @staticmethod
+    def decode_path(raw) -> list:
+        points = []
+        for item in (raw or '').split(';'):
+            t, _, p = item.partition(':')
+            try:
+                points.append((float(t), float(p)))
+            except ValueError:
+                continue
+        return points
 
     # ---------- знімок ----------
 
@@ -122,6 +158,8 @@ class ExcursionTracker:
             'mae_pct': pct(mae_price),  # <= 0
             'mae_after_seconds': max(0.0, mae_ts - state['opened_ts']),
             'updated_at_ts': time.time(),
+            'path': ExcursionTracker.encode_path(state['path']),
+            'path_step_pct': state['path_step'],
         }
         if state['leverage'] > 0:
             snap['mfe_roi_pct'] = snap['mfe_pct'] * state['leverage']
@@ -165,9 +203,19 @@ class ExcursionTracker:
 
         opened_at = row.get('opened_at')
         if opened_at:
-            state['opened_ts'] = opened_at.replace(tzinfo=timezone.utc).timestamp()
+            # точки шляху, зібрані до відновлення, рахувались від "зараз" —
+            # переносимо їх на справжній відлік від opened_at
+            new_opened_ts = opened_at.replace(tzinfo=timezone.utc).timestamp()
+            shift = state['opened_ts'] - new_opened_ts
+            state['opened_ts'] = new_opened_ts
+            state['path'] = state['path'][:1] + [(round(t + shift, 1), p) for t, p in state['path'][1:]]
 
         saved = row.get('excursion') or {}
+        saved_path = self.decode_path(saved.get('path'))
+        if len(saved_path) > 1:
+            # шлях до рестарту — на початок, свіжі точки — після нього
+            state['path'] = saved_path + [p for p in state['path'][1:] if p[0] > saved_path[-1][0]]
+            state['path_step'] = max(state['path_step'], float(saved.get('path_step_pct') or 0))
         long_side = state['side'] == 'LONG'
         high_key, low_key = ('mfe', 'mae') if long_side else ('mae', 'mfe')
         for key, bound, more_extreme in (
@@ -198,7 +246,8 @@ class ExcursionTracker:
 
         now = time.time()
         if close_price and close_price > 0:
-            self._apply_price(state, close_price, now)  # проскальзування стопу -> у MAE
+            # проскальзування стопу -> у MAE; ціна закриття — завжди остання точка шляху
+            self._apply_price(state, close_price, now, force_path_point=True)
 
         extra = {'final': True}
         if close_price and close_price > 0:

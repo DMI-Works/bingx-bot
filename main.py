@@ -55,6 +55,10 @@ def setup_logging(config: ConfigLoader) -> None:
         handlers=[file_handler, console_handler]
     )
 
+    # httpx на INFO пише URL кожного запиту, а в URL Telegram Bot API —
+    # токен бота (api.telegram.org/bot<TOKEN>/getUpdates раз на 10 с)
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+
     logger = logging.getLogger(__name__)
     logger.info("Logging initialized")
 
@@ -155,6 +159,8 @@ async def main():
         settings_manager=settings_manager,
     )
     logger.info("[OK] Symbol Selector initialized (signal-activity-aware rotation, notifies Telegram)")
+    # 24h-знімок монети (об'єм, зміна, діапазон, спред) -> trade_analytics.market_context
+    trader.market_context_provider = symbol_selector.market_context
 
     orderbook_config = config.get('trading.orderbook', {})
     OrderBookAnalyzer(event_bus, orderbook_config)  # живе через підписки на EventBus

@@ -36,6 +36,7 @@ class TradeAnalyticsRepository:
         equity_at_entry: Optional[float] = None,
         concurrent_positions: Optional[int] = None,
         signal_context: Optional[dict] = None,
+        market_context: Optional[dict] = None,
     ) -> Any:
         """
         Пишеться ОДИН раз при відкритті угоди (ботом або ручне відкриття,
@@ -46,7 +47,8 @@ class TradeAnalyticsRepository:
 
         equity_at_entry / concurrent_positions / signal_context — контекст
         входу (equity, скільки інших позицій було відкрито, знімок індикаторів
-        стратегії на сигнальній свічці). Похідні метрики — entry_derived_fields.
+        стратегії на сигнальній свічці). market_context — 24h-об'єм, зміна,
+        діапазон і спред монети на вході. Похідні метрики — entry_derived_fields.
         """
         doc = {
             "order_id": order_id,
@@ -83,6 +85,7 @@ class TradeAnalyticsRepository:
             "tp_fills": [],
             "concurrent_positions": concurrent_positions,
             "signal_context": signal_context,
+            "market_context": market_context,
             # MFE/MAE по ходу угоди пише ExcursionTracker (update_trade_excursion)
             "excursion": None,
         }

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import List, Dict, Any, Set, Optional
 
@@ -8,6 +9,18 @@ from ..common.market_data import held_symbols, to_float
 from ..events import Event, EventBus, EventType
 
 logger = logging.getLogger(__name__)
+
+# Не-крипто контракти BingX (форекс, сировина, акції, індекси): торгуються не
+# цілодобово й майже не рухаються — у спільному пулі лише займають слоти.
+DEFAULT_EXCLUDED_PREFIXES = ('NCFX', 'NCCO', 'NCSK', 'NCSI')
+
+
+def _parse_prefixes(raw) -> tuple:
+    if raw is None:
+        return DEFAULT_EXCLUDED_PREFIXES
+    if isinstance(raw, str):
+        raw = raw.split(',')
+    return tuple(p.strip().upper() for p in raw if p and p.strip())
 
 
 @dataclass
@@ -20,10 +33,23 @@ class TickerCheck:
     passes_volume: bool
     passes_price: bool
     passes_spread: bool
+    # (high - low) / low за 24h, % — міра "живості" монети для ранжування
+    range_pct: float = 0.0
+    spread_pct: Optional[float] = None
+    passes_market: bool = True  # не з excluded_symbol_prefixes
 
     @property
     def passes(self) -> bool:
-        return self.passes_volume and self.passes_price and self.passes_spread
+        return self.passes_volume and self.passes_price and self.passes_spread and self.passes_market
+
+    def as_market_context(self) -> Dict[str, Any]:
+        """Знімок ринку монети для trade_analytics.market_context."""
+        return {
+            'quote_volume_24h': self.quote_volume,
+            'change_24h_pct': self.change_pct,
+            'range_24h_pct': self.range_pct,
+            'spread_pct': self.spread_pct,
+        }
 
 
 class SymbolSelector:
@@ -45,8 +71,17 @@ class SymbolSelector:
         self.settings_manager = settings_manager
         self._refresh_task: Optional[asyncio.Task] = None
         self.current_symbols: Set[str] = set()
-       
+
         self._apply_lock = asyncio.Lock()
+        self._excluded_prefixes = _parse_prefixes(filters.get('excluded_symbol_prefixes'))
+        # symbol -> час, коли монету прибрали як "тиху": до спливу
+        # quiet_cooldown_seconds вона не повертається в пул, щоб ротація
+        # пробувала інші монети, а не гойдалась між тими самими
+        self._quiet_since: Dict[str, float] = {}
+        # symbol -> час підписки (молоді підписки ще не можуть бути "тихими")
+        self._subscribed_at: Dict[str, float] = {}
+        # останні перевірки тикерів (із select()) — для market_context угод
+        self._last_checks: Dict[str, TickerCheck] = {}
 
         if self.event_bus is not None:
             # Монету убрал RiskManager (серия убытков) — сразу отписываемся,
@@ -63,9 +98,12 @@ class SymbolSelector:
           давали сигнал за останні `rotation_interval_seconds` — вони
           вважаються "активними" (п.2, дзеркально)
         - "тихі" (без жодного сигналу за цей час) НЕ утримувані символи —
-          явні кандидати на заміну свіжими за об'ємом (п.2)
-        - додає символи, що проходять фільтри 24h об'єму/спреду/ціни
-        - обмежує загальну кількість символів (max_symbols), пріоритет — за об'ємом
+          явні кандидати на заміну свіжими монетами (п.2)
+        - додає символи, що проходять фільтри 24h об'єму/спреду/ціни і не є
+          не-крипто контрактами (excluded_symbol_prefixes)
+        - обмежує загальну кількість символів (max_symbols), пріоритет —
+          rank_by: 'volatility' (24h діапазон, за замовчуванням) або 'volume'
+        - "тиха" монета не повертається в пул quiet_cooldown_seconds
 
         rotation_interval_seconds одночасно і період фонового рефрешу
         (SymbolSelector.start_refresh_loop), і поріг "тиші" тут — раніше це
@@ -74,8 +112,8 @@ class SymbolSelector:
         тобто тиха монета фактично чекала заміни ДО 90 хвилин замість
         заявлених 30. Одне значення на обидві ролі прибирає цей розрив.
 
-        Без signal_tracker (None) поведінка деградує до старої: ротація йде
-        лише за об'ємом, без урахування активності сигналів.
+        Без signal_tracker (None) ротація йде лише за rank_by, без урахування
+        активності сигналів.
         """
         blacklist = set(self.filters.get('blacklist_symbols', []))
         if self.settings_manager is not None:
@@ -95,19 +133,39 @@ class SymbolSelector:
         max_symbols = self.filters.get('max_symbols', None)
         rotation_interval_seconds = self.filters.get('rotation_interval_seconds', 1800)
 
+        quiet_cooldown_seconds = self.filters.get('quiet_cooldown_seconds', 7200)
+        rank_by = self.filters.get('rank_by', 'volatility')
+
         held = await self._get_held_symbols()
         tickers = await self._get_tickers()
 
+        now = time.time()
+        self._quiet_since = {
+            s: t for s, t in self._quiet_since.items() if now - t < quiet_cooldown_seconds
+        }
+
+        checks: Dict[str, TickerCheck] = {}
         candidates = []
         for ticker in tickers:
             symbol = ticker.get('symbol')
-            if not symbol or symbol in blacklist:
+            if not symbol:
                 continue
             check = self.check_ticker(ticker)
-            if check is not None and check.passes:
-                candidates.append((symbol, check.quote_volume))
+            if check is None:
+                continue
+            checks[symbol] = check
+            if symbol in blacklist:
+                continue
+            if check.passes:
+                rank_value = check.range_pct if rank_by == 'volatility' else check.quote_volume
+                candidates.append((symbol, rank_value))
+        if checks:
+            self._last_checks = checks
 
         candidates.sort(key=lambda c: c[1], reverse=True)
+        # монети на паузі після "тиші" — в кінець черги: беруться, лише якщо
+        # інших кандидатів не вистачає на всі слоти
+        candidates.sort(key=lambda c: c[0] in self._quiet_since)
 
         # --- захист від ротації ---
         # п.1: whitelist + held (відкриті позиції) — завжди захищені, незалежно
@@ -136,11 +194,23 @@ class SymbolSelector:
             # переобиралась сама на себе в тій же ротації — "заміна" була
             # лише в лозі, а не по факту. Тепер вона явно виключається з
             # пулу кандидатів ЦІЄЇ ротації, звільняючи слот для іншої монети.
-            quiet_unheld = currently_subscribed - protected - blacklist
+            # Молода підписка (менше половини rotation_interval, напр. додана
+            # позачерговою ротацією після чорного списку) тихою не вважається:
+            # монета просто не встигла дати сигнал. Половина, а не весь
+            # інтервал — щоб монета з попередньої планової ротації не
+            # проскочила як "молода" через мілісекунди різниці.
+            quiet_unheld = {
+                s for s in currently_subscribed - protected - blacklist
+                if now - self._subscribed_at.get(s, 0.0) >= rotation_interval_seconds / 2
+            }
+            protected |= (currently_subscribed - blacklist) - quiet_unheld
             if quiet_unheld:
+                for s in quiet_unheld:
+                    self._quiet_since[s] = now
                 logger.info(
                     f"[SYMBOLS] Replacing quiet symbols "
-                    f"(no signal in {rotation_interval_seconds}s): {sorted(quiet_unheld)}"
+                    f"(no signal in {rotation_interval_seconds}s, "
+                    f"cooldown {quiet_cooldown_seconds}s): {sorted(quiet_unheld)}"
                 )
         else:
             logger.debug("[SYMBOLS] No signal_tracker attached — rotation is volume-only")
@@ -175,6 +245,14 @@ class SymbolSelector:
         except (TypeError, ValueError):
             return None
 
+        high_price = to_float(ticker.get('highPrice', 0))
+        low_price = to_float(ticker.get('lowPrice', 0))
+        change_pct = to_float(ticker.get('priceChangePercent', 0))
+        # без high/low у тикері — грубо оцінюємо діапазон зміною за 24h
+        range_pct = (high_price - low_price) / low_price * 100 if low_price > 0 and high_price > 0 else abs(change_pct)
+
+        passes_market = not (symbol or '').upper().startswith(self._excluded_prefixes) if self._excluded_prefixes else True
+
         min_price = self.filters.get('min_price', {}) or {}
         max_price = self.filters.get('max_price', {}) or {}
         symbol_min_price = min_price.get(symbol) if isinstance(min_price, dict) else None
@@ -185,19 +263,26 @@ class SymbolSelector:
         )
 
         max_spread_percent = self.filters.get('max_spread_percent', None)
-        passes_spread = True
-        if max_spread_percent is not None and bid_price > 0 and ask_price > 0:
-            passes_spread = (ask_price - bid_price) / bid_price * 100 <= max_spread_percent
+        spread_pct = (ask_price - bid_price) / bid_price * 100 if bid_price > 0 and ask_price > 0 else None
+        passes_spread = max_spread_percent is None or spread_pct is None or spread_pct <= max_spread_percent
 
         return TickerCheck(
             symbol=symbol,
             quote_volume=quote_volume,
             last_price=last_price,
-            change_pct=to_float(ticker.get('priceChangePercent', 0)),
+            change_pct=change_pct,
             passes_volume=quote_volume >= self.filters.get('min_volume_24h', 0),
             passes_price=passes_price,
             passes_spread=passes_spread,
+            range_pct=range_pct,
+            spread_pct=spread_pct,
+            passes_market=passes_market,
         )
+
+    def market_context(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """24h-знімок монети з останньої ротації (None — монети не було в тикерах)."""
+        check = self._last_checks.get(symbol)
+        return check.as_market_context() if check else None
 
     async def apply(self) -> Set[str]:
         async with self._apply_lock:
@@ -232,6 +317,7 @@ class SymbolSelector:
             try:
                 await self.exchange.subscribe_trades(symbol)
                 subscribed_ok.add(symbol)
+                self._subscribed_at[symbol] = time.time()
             except Exception as e:
                 logger.error(f"Failed to subscribe {symbol}: {e}")
             try:
@@ -244,6 +330,7 @@ class SymbolSelector:
                 await self.exchange.unsubscribe_trades(symbol)
                 logger.info(f"[SYMBOLS] Unsubscribed: {symbol}")
                 unsubscribed_ok.add(symbol)
+                self._subscribed_at.pop(symbol, None)
             except Exception as e:
                 logger.error(f"Failed to unsubscribe {symbol}: {e}")
             try:

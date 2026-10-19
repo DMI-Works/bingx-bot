@@ -1,7 +1,7 @@
 import logging
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from ..common.market_data import extract_order_id, to_float
 from ..common.position_math import (
@@ -55,6 +55,9 @@ class SimpleTrader:
         # StrategySettingsStore — ЛИШЕ для знімку параметрів стратегії в
         # trade_analytics на момент відкриття (на торгівлю не впливає).
         self.strategy_settings = strategy_settings
+        # symbol -> dict | None: 24h-знімок ринку монети для trade_analytics
+        # (SymbolSelector.market_context; підключається в main.py)
+        self.market_context_provider: Optional[Callable[[str], Optional[dict]]] = None
         self.orders = ProtectiveOrderPlacer(exchange, event_bus)
 
         self.open_positions = {}
@@ -365,6 +368,15 @@ class SimpleTrader:
             )
             return False
 
+    def _market_context(self, symbol: str) -> Optional[dict]:
+        if self.market_context_provider is None:
+            return None
+        try:
+            return self.market_context_provider(symbol)
+        except Exception as e:
+            logger.warning(f"market_context for {symbol} unavailable: {e}")
+            return None
+
     def _insert_open_analytics(
         self,
         position: dict,
@@ -393,6 +405,7 @@ class SimpleTrader:
                 equity_at_entry=self._recent_equity(),
                 concurrent_positions=max(0, len(self.open_positions) - 1),
                 signal_context=signal_context,
+                market_context=self._market_context(position['symbol']),
             )
         except Exception as e:
             logger.error(

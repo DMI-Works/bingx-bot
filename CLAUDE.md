@@ -60,7 +60,7 @@ SimpleTrader --POSITION_OPENED/CLOSED, STOP_LOSS_*, ERROR/CRITICAL_ERROR--> Tele
   - `BingXClient`: REST + market WebSocket + user-data stream. Every REST call goes through `_request`, which raises `BingXAPIError` on a non-zero business code.
   - `errors.py`: `BingXAPIError`, error-code constants, `is_gone_error`, `parse_retry_after`.
   - `orders.py`: `place_stop_market` / `place_take_profit_market`, shared by the trader and the trailing stop.
-  - `SymbolSelector`: rotates the shared symbol pool (≤ `max_symbols`) every `rotation_interval_seconds`. It keeps symbols that produced a signal recently (via `SignalActivityTracker`) and honours the whitelist/blacklist. That pool is shared by all strategies and the order-book analyzer. `check_ticker()` is the single implementation of the volume/price/spread filters, and `/api/symbols/candidates` uses it too.
+  - `SymbolSelector`: rotates the shared symbol pool (≤ `max_symbols`) every `rotation_interval_seconds`. It keeps symbols that produced a signal recently (via `SignalActivityTracker`) and honours the whitelist/blacklist. That pool is shared by all strategies and the order-book analyzer. `check_ticker()` is the single implementation of the volume/price/spread/non-crypto-prefix filters, and `/api/symbols/candidates` uses it too. Candidates are ranked by `rank_by` (24h range by default); a symbol rotated out as quiet goes to the back of the queue for `quiet_cooldown_seconds`. `market_context(symbol)` feeds `trade_analytics.market_context` via `SimpleTrader.market_context_provider` (wired in `main.py`).
 - **`core/trading/`**: `SimpleTrader` is the only place that opens or closes positions.
   - Helper modules: `fill_resolver.py` (real entry price/qty of a MARKET order), `protective_orders.py` (first SL/TP), `position_records.py` (shape of a position record and its restore from DB).
   - In-memory `open_positions` is keyed `position_key(symbol, side)` and persisted as JSON in `positions.metadata`. New per-position fields go into both `new_bot_position()` and `position_from_db_row()` (with a fallback for old records).
@@ -70,7 +70,7 @@ SimpleTrader --POSITION_OPENED/CLOSED, STOP_LOSS_*, ERROR/CRITICAL_ERROR--> Tele
 - **`core/risk/trailing_stop_manager.py`**: moves SL on price ticks. `atr_3step` lives in `trailing_atr.py` and emergency SL recovery in `trailing_fallback.py` (mixins on the manager); per-position state is `TrailState` in `trailing_state.py`. It has two modes:
   - The default ROI ladder, `trail_levels_percent`. These levels come from WallBreakoutStrategy params via `strategy_manager.subscribe_params(...)`, not from `config.yaml`.
   - `atr_3step`, chosen when `position['trail_meta']['mode'] == 'atr_3step'`. TrendSupertrendStrategy sets it in the signal: move to breakeven including fees, then step on ATR, then a swing stop.
-- **`core/analytics/excursion_tracker.py`**: read-only. It tracks MFE/MAE per open trade into `trade_analytics`.
+- **`core/analytics/excursion_tracker.py`**: read-only. It tracks MFE/MAE and a compressed price path (`excursion.path`, string `"sec:move_pct;..."`) per open trade into `trade_analytics`. `scripts/trade_report.py` analyses a CSV export of that collection and simulates alternative SL/TP/breakeven exits on the paths.
 - **`core/database/`**:
   - `Database` composes `PositionsRepository` (`positions`) and `TradeAnalyticsRepository` (`trade_analytics`), plus the `settings` key-value collection. `trade_analytics` keeps the full history of a trade (SL moves, TP fills, a snapshot of the strategy params at entry, derived metrics from `analytics_fields.py`), separate from `positions`, which the rest of the system reads. Connection settings and the `MONGO_URI` check are in `mongo_config.py`.
   - `StrategySettingsStore` (`strategy_settings` collection): per-strategy default params, current params and an enabled flag.
@@ -95,7 +95,7 @@ Strategies are registered with `@register_strategy('Name')` (`core/strategies/re
 
 Strategies have no direct exchange access for trading; they only emit signals. Signal dict keys read by `SimpleTrader._handle_signal`: `action` (`'OPEN'`), `symbol`, `side` (`LONG`/`SHORT`), `quantity`, `leverage`, `stop_loss_price`, `take_profit_levels`, `strategy`, `reference_price` (SL/TP are rescaled to the actual fill price), `risk_percent`, `trail_meta`, `analytics_context`.
 
-`OrderBookAnalyzer` only detects walls and publishes `WALL_DETECTED`/`WALL_BREAKOUT` events. Trades happen only if `WallBreakoutStrategy` is enabled.
+`OrderBookAnalyzer` only detects walls and publishes `WALL_DETECTED`/`WALL_BREAKOUT` events (the breakout carries a `context` dict with wall/book/momentum metrics, which `WallBreakoutStrategy` passes on as `analytics_context`). Trades happen only if `WallBreakoutStrategy` is enabled.
 
 ## Configuration
 

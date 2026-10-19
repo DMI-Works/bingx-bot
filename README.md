@@ -22,7 +22,7 @@ BotBingx/
 ├── config/
 │   └── config.yaml            # Настройки уровня аккаунта (риск, фильтры, стакан, трейлинг, telegram, webapp)
 ├── core/
-│   ├── analytics/             # ExcursionTracker — MFE/MAE в trade_analytics
+│   ├── analytics/             # ExcursionTracker — MFE/MAE и траектория цены сделки в trade_analytics
 │   ├── common/                # Общие чистые хелперы: математика позиции (ROI, маржа, net PnL), разбор данных BingX
 │   ├── database/              # Database (MongoDB) + репозитории positions / trade_analytics, StrategySettingsStore
 │   ├── diagnostics/           # Генерация карточек PnL и статистики
@@ -36,6 +36,8 @@ BotBingx/
 ├── webapp/
 │   ├── backend/               # FastAPI: api.py (сборка), routes/ (эндпоинты), services/, deps.py, auth.py; static/ — собранный фронтенд
 │   └── frontend/              # React 18 + Vite
+├── scripts/
+│   └── trade_report.py        # Разбор CSV-экспорта trade_analytics: срезы, симуляция SL/TP
 ├── tests/                     # unittest
 ├── Dockerfile
 └── main.py                    # Точка входа: собирает и связывает все компоненты
@@ -129,10 +131,13 @@ npm run build   # сборка в webapp/backend/static, FastAPI отдаёт е
 
 - `exchange` — `testnet`, `websocket.enabled`.
 - `trading.risk` — лимиты позиций и риска (см. ниже).
-- `trading.filters` — белый и чёрный списки, `max_symbols`, минимальный объём за 24 ч, максимальный спред, `rotation_interval_seconds`.
+- `trading.filters` — белый и чёрный списки, `max_symbols`, минимальный объём за 24 ч, максимальный спред, `rotation_interval_seconds`. Кроме того:
+  - `excluded_symbol_prefixes` — не-крипто контракты BingX (форекс, сырьё, акции, индексы), которые не попадают в пул;
+  - `rank_by` — порядок отбора: `volatility` (по 24h-диапазону, по умолчанию) или `volume`;
+  - `quiet_cooldown_seconds` — монета, убранная из пула за отсутствие сигналов, на это время уходит в конец очереди, и ротация пробует другие монеты.
 - `trading.orderbook` — параметры детекта стен (`wall_multiplier`, `approach_threshold_pct`, `breakout_consumption_pct` и др.).
 - `trading.trailing_stop` — буферы трейлинга и `taker_fee_rate` для режима `atr_3step`. Блок должен быть вложен в `trading:`.
-- `logging`, `telegram`, `webapp`, `analytics`.
+- `logging`, `telegram`, `webapp`, `analytics` (`path_step_pct` и `path_max_points` — детализация траектории сделки).
 
 **Параметры стратегий в YAML не хранятся.** Значения по умолчанию берутся из `DEFAULT_PARAMS` каждой стратегии и при первом запуске записываются в MongoDB (коллекция `strategy_settings`). Дальше их меняют через Mini App, перезапуск не нужен.
 
@@ -140,7 +145,7 @@ npm run build   # сборка в webapp/backend/static, FastAPI отдаёт е
 
 ## Стратегии
 
-- **WallBreakoutStrategy** — торгует пробои стен, которые находит `OrderBookAnalyzer` по стакану `@depth20`. Сам анализатор сделок не открывает, а только публикует `WALL_DETECTED` и `WALL_BREAKOUT`. Уровни трейлинга по ROI (`trail_levels_percent`) задаются параметрами этой стратегии.
+- **WallBreakoutStrategy** — торгует пробои стен, которые находит `OrderBookAnalyzer` по стакану `@depth20`. Сам анализатор сделок не открывает, а только публикует `WALL_DETECTED` и `WALL_BREAKOUT`. Уровни трейлинга по ROI (`trail_levels_percent`) задаются параметрами этой стратегии. `reentry_cooldown_seconds` (по умолчанию 900) запрещает новый вход в монету после закрытия сделки по ней: повторные входы в «пилу» дали большую часть убытка на тестнете.
 - **TrendSupertrendStrategy** — фильтр тренда по EMA, вход по Supertrend с подтверждением объёмом, стоп по ATR, размер позиции от `risk_percent`. Использует трейлинг `atr_3step`.
 
 Все зарегистрированные стратегии создаются при запуске; выключенные просто игнорируют тики. Стратегии не имеют доступа к торговле на бирже: они только генерируют сигналы, а позиции открывает `SimpleTrader`.
@@ -195,9 +200,20 @@ MongoDB, коллекции:
 | `positions` | Открытые и закрытые позиции. Состояние позиции хранится JSON-строкой в поле `metadata` и восстанавливается при перезапуске |
 | `settings` | Runtime-настройки (`trading.enabled`, списки монет и др.), значения хранятся JSON-строками |
 | `strategy_settings` | Параметры по умолчанию и текущие параметры стратегий, флаг включения |
-| `trade_analytics` | Полная история сделки: MFE/MAE, перестановки SL, исполнения TP, снимок параметров, режим (`testnet`/`live`) |
+| `trade_analytics` | Полная история сделки: MFE/MAE и траектория цены (`excursion.path`), перестановки SL, исполнения TP, снимок параметров, контекст сигнала (`signal_context`) и рынка на входе (`market_context`), режим (`testnet`/`live`) |
 
 Чистый PnL сделки: `realized_pnl + commission_open + commission_close + funding_fee` (комиссии хранятся отрицательными числами).
+
+### Разбор сделок
+
+Экспортируйте `trade_analytics` в CSV (MongoDB Compass → Export Collection → CSV) и запустите:
+
+```bash
+python scripts/trade_report.py trading_bot_testnet.trade_analytics.csv
+python scripts/trade_report.py export.csv --strategy WallBreakoutStrategy
+```
+
+Скрипт показывает винрейт, profit factor и средний результат по стратегиям, срезы (LONG/SHORT, повторный вход, проскальзывание стопа, худшие монеты) и симуляцию выходов: дополнительный тейк по MFE и сетку SL/TP/безубытка по траектории `excursion.path`. Рядом с каждым вариантом указан винрейт, нужный для выхода в ноль: высокий винрейт сам по себе не означает прибыль.
 
 ## Тесты
 

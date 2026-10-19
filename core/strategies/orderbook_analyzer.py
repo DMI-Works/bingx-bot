@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import logging
 import statistics
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 
 from ..common.market_data import parse_price_tick
 from ..events import Event, EventBus, EventType
@@ -41,6 +43,7 @@ class _Wall:
     side: str                   # 'bid' | 'ask'
     first_seen: datetime
     initial_quantity: float     # обсяг у момент першого детекту — база для % "з'їдання"
+    avg_level_quantity: float = 0.0  # середній обсяг рівня того ж боку книги при детекті
 
 
 @dataclass
@@ -49,6 +52,11 @@ class _SymbolState:
     asks: List[Tuple[float, float]] = field(default_factory=list)
     walls: Dict[str, _Wall] = field(default_factory=dict)  # key = f"{side}:{price:.8f}"
     last_price: Optional[float] = None
+    # (unix-час, ціна) за останні _PRICE_HISTORY_SECONDS — імпульс перед пробоєм
+    prices: Deque[Tuple[float, float]] = field(default_factory=deque)
+
+
+_PRICE_HISTORY_SECONDS = 300.0
 
 
 class OrderBookAnalyzer:
@@ -123,7 +131,8 @@ class OrderBookAnalyzer:
             return []
         now = datetime.now(timezone.utc)
         return [
-            _Wall(price=price, quantity=qty, side=side, first_seen=now, initial_quantity=qty)
+            _Wall(price=price, quantity=qty, side=side, first_seen=now, initial_quantity=qty,
+                  avg_level_quantity=avg_qty)
             for price, qty in levels
             if qty >= avg_qty * self.wall_multiplier and qty >= self.min_wall_quantity
         ]
@@ -186,6 +195,10 @@ class OrderBookAnalyzer:
         if state is None:
             return
         state.last_price = price
+        now_ts = time.time()
+        state.prices.append((now_ts, price))
+        while state.prices and now_ts - state.prices[0][0] > _PRICE_HISTORY_SECONDS:
+            state.prices.popleft()
         if not state.walls:
             return
 
@@ -208,8 +221,43 @@ class OrderBookAnalyzer:
                     f"wall_price={wall.price:.6f} consumed={consumed_pct:.0f}% "
                     f"current_price={price:.6f}"
                 )
-                await self._notify_breakout(symbol, wall, price, consumed_pct)
+                context = self._breakout_context(state, wall, price, now_ts)
+                await self._notify_breakout(symbol, wall, price, consumed_pct, context)
                 del state.walls[key]
+
+    # ---------- контекст пробою (для trade_analytics) ----------
+
+    @staticmethod
+    def _price_change_pct(state: _SymbolState, price: float, now_ts: float, seconds: float) -> Optional[float]:
+        """Зміна ціни за останні `seconds` (None — історії ще замало)."""
+        if not state.prices or now_ts - state.prices[0][0] < seconds * 0.8:
+            return None
+        base = next((p for t, p in state.prices if now_ts - t <= seconds), None)
+        return (price - base) / base * 100.0 if base else None
+
+    def _breakout_context(self, state: _SymbolState, wall: _Wall, price: float, now_ts: float) -> dict:
+        bid_depth = sum(p * q for p, q in state.bids)
+        ask_depth = sum(p * q for p, q in state.asks)
+        best_bid = state.bids[0][0] if state.bids else None
+        best_ask = state.asks[0][0] if state.asks else None
+        return {
+            'wall_side': wall.side,
+            'wall_price': wall.price,
+            'wall_notional_usdt': wall.initial_quantity * wall.price,
+            'wall_multiple': (
+                wall.initial_quantity / wall.avg_level_quantity if wall.avg_level_quantity > 0 else None
+            ),
+            'wall_age_seconds': (datetime.now(timezone.utc) - wall.first_seen).total_seconds(),
+            'breakout_distance_pct': abs(price - wall.price) / wall.price * 100.0,
+            'book_imbalance': self.compute_imbalance(state.bids, state.asks),
+            'bid_depth_usdt': bid_depth,
+            'ask_depth_usdt': ask_depth,
+            'book_spread_pct': (
+                (best_ask - best_bid) / best_bid * 100.0 if best_bid and best_ask and best_bid > 0 else None
+            ),
+            'price_change_60s_pct': self._price_change_pct(state, price, now_ts, 60.0),
+            'price_change_300s_pct': self._price_change_pct(state, price, now_ts, 300.0),
+        }
 
     # ---------- сповіщення ----------
 
@@ -229,7 +277,9 @@ class OrderBookAnalyzer:
         except Exception as e:
             logger.error(f"OrderBook: failed to publish WALL_DETECTED: {e}")
 
-    async def _notify_breakout(self, symbol: str, wall: _Wall, price: float, consumed_pct: float) -> None:
+    async def _notify_breakout(
+        self, symbol: str, wall: _Wall, price: float, consumed_pct: float, context: Optional[dict] = None,
+    ) -> None:
         try:
             await self.event_bus.publish(Event(
                 type=EventType.WALL_BREAKOUT,
@@ -239,6 +289,7 @@ class OrderBookAnalyzer:
                     'wall_price': wall.price,
                     'current_price': price,
                     'consumed_pct': consumed_pct,
+                    'context': context or {},
                 },
                 source="OrderBookAnalyzer",
             ))
