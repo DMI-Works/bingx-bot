@@ -123,6 +123,8 @@ class RestClient:
 
             if params is None:
                 params = {}
+            if method not in ('GET', 'POST', 'DELETE', 'PUT'):
+                raise ValueError(f"Unsupported HTTP method: {method}")
 
             headers = {
                 'X-BX-APIKEY': self.api_key
@@ -147,24 +149,9 @@ class RestClient:
                 full_url = f"{url}?{query_string}" if query_string else url
 
                 try:
-                    if method == 'GET':
-                        async with session.get(full_url, headers=headers) as response:
-                            result = await response.json()
-                            response.raise_for_status()
-                    elif method == 'POST':
-                        async with session.post(full_url, headers=headers) as response:
-                            result = await response.json()
-                            response.raise_for_status()
-                    elif method == 'DELETE':
-                        async with session.delete(full_url, headers=headers) as response:
-                            result = await response.json()
-                            response.raise_for_status()
-                    elif method == 'PUT':
-                        async with session.put(full_url, headers=headers) as response:
-                            result = await response.json()
-                            response.raise_for_status()
-                    else:
-                        raise ValueError(f"Unsupported HTTP method: {method}")
+                    async with session.request(method, full_url, headers=headers) as response:
+                        result = await response.json()
+                        response.raise_for_status()
 
                     # BingX возвращает HTTP 200 даже при бизнес-ошибках (например,
                     # неверная подпись или expired timestamp) — код ошибки лежит в теле.

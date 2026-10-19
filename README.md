@@ -23,17 +23,18 @@ BotBingx/
 │   └── config.yaml            # Настройки уровня аккаунта (риск, фильтры, стакан, трейлинг, telegram, webapp)
 ├── core/
 │   ├── analytics/             # ExcursionTracker — MFE/MAE в trade_analytics
-│   ├── database/              # Database (MongoDB), StrategySettingsStore
+│   ├── common/                # Общие чистые хелперы: математика позиции (ROI, маржа, net PnL), разбор данных BingX
+│   ├── database/              # Database (MongoDB) + репозитории positions / trade_analytics, StrategySettingsStore
 │   ├── diagnostics/           # Генерация карточек PnL и статистики
-│   ├── events/                # EventBus, EventType
-│   ├── exchange/              # BingXClient (REST + WS + user data stream), SymbolSelector
-│   ├── risk/                  # RiskManager, TrailingStopManager
+│   ├── events/                # EventBus, EventType, publish_error
+│   ├── exchange/              # BingXClient (REST + WS + user data stream), ошибки BingX, SL/TP-ордера, SymbolSelector
+│   ├── risk/                  # RiskManager, TrailingStopManager (+ режим atr_3step и аварийный fallback SL)
 │   ├── state/                 # SettingsManager (runtime-настройки, kill switch)
 │   ├── strategies/            # Стратегии, реестр, индикаторы, OrderBookAnalyzer, StrategyManager
-│   ├── telegram/              # TelegramBot — уведомления и аварийная остановка
-│   └── trading/               # SimpleTrader — открытие и закрытие позиций, SL/TP
+│   ├── telegram/              # TelegramBot и тексты сообщений — уведомления и аварийная остановка
+│   └── trading/               # SimpleTrader — открытие и закрытие позиций, SL/TP, учёт PnL
 ├── webapp/
-│   ├── backend/               # FastAPI (api.py, auth.py), static/ — собранный фронтенд
+│   ├── backend/               # FastAPI: api.py (сборка), routes/ (эндпоинты), services/, deps.py, auth.py; static/ — собранный фронтенд
 │   └── frontend/              # React 18 + Vite
 ├── tests/                     # unittest
 ├── Dockerfile
@@ -192,8 +193,7 @@ MongoDB, коллекции:
 | Коллекция | Содержимое |
 |---|---|
 | `positions` | Открытые и закрытые позиции. Состояние позиции хранится JSON-строкой в поле `metadata` и восстанавливается при перезапуске |
-| `balance` | Снимки баланса |
-| `settings` | Runtime-настройки (`trading.enabled`, списки монет и др.) |
+| `settings` | Runtime-настройки (`trading.enabled`, списки монет и др.), значения хранятся JSON-строками |
 | `strategy_settings` | Параметры по умолчанию и текущие параметры стратегий, флаг включения |
 | `trade_analytics` | Полная история сделки: MFE/MAE, перестановки SL, исполнения TP, снимок параметров, режим (`testnet`/`live`) |
 
@@ -211,7 +211,7 @@ python -m unittest tests.test_trend_supertrend.TestIndicators.test_atr_wilder -v
 
 ## Логирование
 
-Логи пишутся в консоль и в `logs/trading_bot.log` (уровень и путь задаются в разделе `logging`).
+Логи пишутся в консоль и в `logs/trading_bot.log` с ротацией (уровень, путь, `max_bytes` и `backup_count` задаются в разделе `logging`).
 
 ## Безопасность
 

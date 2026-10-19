@@ -5,25 +5,17 @@
 
 export const tg = typeof window !== "undefined" ? window.Telegram?.WebApp : null;
 
-export async function apiGet(path) {
-  const res = await fetch(`/api${path}`, {
-    headers: {
-      // Бэкенд валидирует эту строку через HMAC с bot token — см. backend/auth.py
-      "X-Telegram-Init-Data": tg?.initData || "",
-    },
-  });
-  if (!res.ok) throw new Error(`API ${path} -> ${res.status}`);
-  return res.json();
-}
+async function request(method, path, body) {
+  const headers = {
+    // Бэкенд валидирует эту строку через HMAC с bot token — см. backend/auth.py
+    "X-Telegram-Init-Data": tg?.initData || "",
+  };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
 
-export async function apiPost(path, body) {
   const res = await fetch(`/api${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Telegram-Init-Data": tg?.initData || "",
-    },
-    body: JSON.stringify(body),
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
     let detail = "";
@@ -33,17 +25,6 @@ export async function apiPost(path, body) {
   return res.json();
 }
 
-export async function apiDelete(path) {
-  const res = await fetch(`/api${path}`, {
-    method: "DELETE",
-    headers: {
-      "X-Telegram-Init-Data": tg?.initData || "",
-    },
-  });
-  if (!res.ok) {
-    let detail = "";
-    try { detail = (await res.json()).detail || ""; } catch { /* noop */ }
-    throw new Error(detail || `API ${path} -> ${res.status}`);
-  }
-  return res.json();
-}
+export const apiGet = (path) => request("GET", path);
+export const apiPost = (path, body) => request("POST", path, body);
+export const apiDelete = (path) => request("DELETE", path);

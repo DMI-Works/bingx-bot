@@ -28,7 +28,7 @@ class StrategySettingsStore:
 
     Поле enabled зберігається лише на активному документі (is_default=False) —
     це прапорець "чи запускати цю стратегію взагалі", окремий від самих
-    параметрів. Вмикається/вимикається через Telegram-меню.
+    параметрів. Вмикається/вимикається в мініаппі.
 
     params зберігається як звичайний вкладений документ (не JSON-рядок,
     як було у SQLite-версії) — Mongo зберігає структуровані дані нативно.
@@ -197,7 +197,7 @@ class StrategySettingsStore:
         return bool(row.get("enabled", False))
 
     def set_enabled(self, strategy_name: str, enabled: bool, user_id: str = DEFAULT_USER_ID) -> None:
-        """Вмикає/вимикає стратегію (тумблер у Telegram-меню)."""
+        """Вмикає/вимикає стратегію (тумблер у мініаппі)."""
         existing = self._get_row(strategy_name, False, user_id)
         if not existing:
             raise ValueError(
@@ -214,7 +214,7 @@ class StrategySettingsStore:
         logger.info(f"Strategy '{strategy_name}' (user={user_id}) enabled={enabled}")
 
     def list_strategies(self, user_id: str = DEFAULT_USER_ID) -> List[Dict[str, Any]]:
-        """Повертає всі активні налаштування стратегій для юзера (для UI/Telegram-меню)."""
+        """Повертає всі активні налаштування стратегій для юзера (для мініаппу)."""
         rows = self.collection.find(
             {"user_id": user_id, "is_default": False}
         ).sort("strategy_name", ASCENDING)

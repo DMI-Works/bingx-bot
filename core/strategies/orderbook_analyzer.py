@@ -9,7 +9,7 @@ EventBus (WALL_DETECTED/WALL_BREAKOUT); TelegramBot завжди підписа�
 
 Чи відкриється реальна угода на основі WALL_BREAKOUT — залежить від
 core/strategies/wall_breakout_strategy.py (WallBreakoutStrategy): вона
-підписана на ту саму подію і, якщо увімкнена через Telegram /settings,
+підписана на ту саму подію і, якщо увімкнена в мініаппі,
 формує TradeSignal і публікує SIGNAL_GENERATED, який підхоплює
 SimpleTrader. За замовчуванням ця стратегія вимкнена.
 
@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+from ..common.market_data import parse_price_tick
 from ..events import Event, EventBus, EventType
 
 logger = logging.getLogger(__name__)
@@ -176,21 +177,10 @@ class OrderBookAnalyzer:
     async def _on_price_update(self, event: Event) -> None:
         if not self.enabled:
             return
-        raw = event.data
-        if not raw:
+        tick = parse_price_tick(event.data)
+        if tick is None:
             return
-        try:
-            tick = raw[0] if isinstance(raw, list) else raw
-        except (IndexError, TypeError):
-            return
-
-        symbol = tick.get('s')
-        try:
-            price = float(tick.get('p', 0))
-        except (TypeError, ValueError):
-            price = 0.0
-        if not symbol or price <= 0:
-            return
+        symbol, price = tick
 
         state = self._states.get(symbol)
         if state is None:

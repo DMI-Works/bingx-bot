@@ -1,22 +1,40 @@
-import asyncio
 import logging
 import time
-from typing import Optional, Dict, Any
 from datetime import datetime
-import json
+from typing import Optional
 
-from ..exchange import BingXClient
-from ..exchange.bingx_client import BingXAPIError
-from ..events import EventBus, Event, EventType
-from ..risk import RiskManager
+from ..common.market_data import extract_order_id, to_float
+from ..common.position_math import (
+    calc_margin_usdt,
+    calc_net_pnl,
+    calc_roe_percent,
+    entry_order_side,
+    close_order_side,
+    position_key,
+    rescale_to_fill,
+)
+from ..common.position_metadata import dump_metadata, persist_position_metadata
 from ..database import Database
+from ..events import EventBus, Event, EventType, publish_error
+from ..exchange import BingXClient
+from ..exchange.errors import API_ORDERS_DISABLED_CODE, BingXAPIError
+from ..risk import RiskManager
+from .fill_resolver import resolve_entry_fill
+from .position_records import new_bot_position, new_manual_position, position_from_db_row
+from .protective_orders import ProtectiveOrderPlacer
 
 
 logger = logging.getLogger(__name__)
 
+# тип закриваючого ордера -> close_reason у trade_analytics
+_CLOSE_REASON_BY_ORDER_TYPE = {
+    'STOP_MARKET': 'stop_loss',
+    'TAKE_PROFIT_MARKET': 'take_profit',
+}
+
 
 class SimpleTrader:
-    """Простий обробник торгових сигналів - відкриває/закриває позиції"""
+    """Єдине місце, яке відкриває/закриває позиції та веде їхній облік."""
 
     def __init__(
         self,
@@ -31,24 +49,18 @@ class SimpleTrader:
         self.event_bus = event_bus
         self.db = db
         self.risk_manager = risk_manager
-        # Глобальний kill-switch (trading.enabled), яким тепер керує вкладка
-        # «Настройки» в мініаппі. Опціональний — якщо не передали (наприклад,
-        # у старих тестах), поведінка як і раніше: сигнали виконуються завжди.
+        # Глобальний kill-switch (trading.enabled) з вкладки «Настройки» мініаппу.
+        # Не передали (старі тести) — сигнали виконуються завжди.
         self.settings_manager = settings_manager
-        # StrategySettingsStore — потрібен ЛИШЕ для знімку активних параметрів
-        # стратегії в trade_analytics на момент відкриття угоди (аналітика,
-        # не впливає на торгову логіку). Опціональний: якщо не передали —
-        # записи аналітики просто йдуть без strategy_params.
+        # StrategySettingsStore — ЛИШЕ для знімку параметрів стратегії в
+        # trade_analytics на момент відкриття (на торгівлю не впливає).
         self.strategy_settings = strategy_settings
+        self.orders = ProtectiveOrderPlacer(exchange, event_bus)
 
         self.open_positions = {}
 
-        # Підписуємось на сигнали від стратегій
         self.event_bus.subscribe(EventType.SIGNAL_GENERATED, self._handle_signal)
-
-        # Підписуємось на оновлення ордерів з WebSocket
         self.event_bus.subscribe(EventType.ORDER_FILLED, self._handle_order_update)
-
         self.event_bus.subscribe(EventType.HANDLE_ACCOUNT_INFO_UPDATE, self._handle_account_update)
 
         # Відновлюємо активні позиції з БД при старті (переживають рестарт бота)
@@ -59,56 +71,15 @@ class SimpleTrader:
         try:
             rows = self.db.get_active_positions()
             for row in rows:
-                position_key = f"{row['symbol']}_{row['side']}"
-                metadata = {}
-                try:
-                    metadata = json.loads(row['metadata']) if row['metadata'] else {}
-                except (TypeError, ValueError):
-                    metadata = {}
-
-                self.open_positions[position_key] = {
-                    'order_id': row['order_id'],
-                    'symbol': row['symbol'],
-                    'side': row['side'],
-                    'quantity': metadata.get('quantity', 0),
-                    'entry_price': metadata.get('entry_price', 0.0),
-                    'leverage': metadata.get('leverage', 10),
-                    'stop_loss_price': metadata.get('stop_loss_price'),
-                    # fallback на поточний stop_loss_price для позицій,
-                    # відкритих ДО появи цього поля (старі записи в БД)
-                    'initial_stop_loss_price': metadata.get('initial_stop_loss_price', metadata.get('stop_loss_price')),
-                    'take_profit_levels': metadata.get('take_profit_levels'),
-                    'opened_by': metadata.get('opened_by', 'bot'),
-                    'sl_order_id': metadata.get('sl_order_id'),
-                    'tp_order_ids': metadata.get('tp_order_ids', []),
-                    'sl_client_order_id': metadata.get('sl_client_order_id'),
-                    'tp_client_order_ids': metadata.get('tp_client_order_ids', []),
-                    'strategy': metadata.get('strategy'),
-                    # параметри супроводу стопу від стратегії (напр. atr_3step)
-                    'trail_meta': metadata.get('trail_meta'),
-                    'realized_pnl_accum': metadata.get('realized_pnl_accum', 0.0),
-                    # fallback на старе поле commission_accum — для позицій,
-                    # відкритих ДО розділення на open/close (ТЗ, задача 2):
-                    # старе значення — це накопичена комісія ЗАКРИТТЯ (єдине,
-                    # що рахувалось раніше), тому мапиться саме в close, а не
-                    # в open (open для таких позицій чесно лишається 0.0 —
-                    # ця конкретна комісія вже втрачена назавжди, без
-                    # ретроактивного пошуку через get_income_history її не
-                    # відновити, див. задачу 3/4 ТЗ).
-                    'commission_open_accum': metadata.get('commission_open_accum', 0.0),
-                    'commission_close_accum': metadata.get(
-                        'commission_close_accum', metadata.get('commission_accum', 0.0)
-                    ),
-                    'funding_fee_accum': metadata.get('funding_fee_accum', 0.0),
-                    'remaining_quantity': metadata.get('remaining_quantity') or metadata.get('quantity', 0),
-                    'closing_trade_ids': metadata.get('closing_trade_ids', []),
-                    'closing_orders': metadata.get('closing_orders', []),
-                }
-
+                self.open_positions[position_key(row['symbol'], row['side'])] = position_from_db_row(row)
             if rows:
                 logger.info(f"Restored {len(rows)} open positions from DB")
         except Exception as e:
             logger.error(f"Failed to restore open positions from DB: {e}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # допоміжне
+    # ------------------------------------------------------------------
 
     def _recent_equity(self, max_age_seconds: float = 120.0) -> Optional[float]:
         """equity, який RiskManager отримав під час сайзингу цієї ж угоди (без
@@ -121,11 +92,9 @@ class SimpleTrader:
         return None
 
     def _strategy_params_snapshot(self, strategy: Optional[str]) -> Optional[dict]:
-        """Знімок активних параметрів стратегії станом на ЦЮ МИТЬ — пишеться
-        в trade_analytics одноразово при відкритті угоди і більше ніколи не
-        змінюється, навіть якщо потім параметри стратегії зміняться в
-        міні-аппі. Це і є відповідь на "з якими налаштуваннями відіграла
-        угода", коли налаштування вже встигли поміняти кілька разів."""
+        """Знімок активних параметрів стратегії станом на ЦЮ МИТЬ — пишеться в
+        trade_analytics одноразово при відкритті і більше не змінюється, навіть
+        якщо параметри потім поміняють у мініаппі."""
         if not strategy or not self.strategy_settings:
             return None
         try:
@@ -135,149 +104,150 @@ class SimpleTrader:
             return None
 
     async def _notify_error(self, error: str, context: str, critical: bool = False) -> None:
-        """
-        Публікує подію ERROR/CRITICAL_ERROR в event_bus — TelegramBot вже
-        підписаний на обидва типи (_on_error/_on_critical_error) і надішле
-        коротке повідомлення в чат. Раніше ці обробники існували, але їх
-        ніхто не викликав — помилки залишались тільки в лог-файлі.
-        """
+        await publish_error(self.event_bus, context=context, error=error, critical=critical, source="SimpleTrader")
+
+    def _insert_position_record(self, position: dict) -> None:
         try:
-            await self.event_bus.publish(Event(
-                type=EventType.CRITICAL_ERROR if critical else EventType.ERROR,
-                data={'error': error, 'context': context}
-            ))
+            self.db.insert_position(
+                order_id=position['order_id'],
+                symbol=position['symbol'],
+                side=position['side'],
+                status='OPEN',
+                metadata=dump_metadata(position),
+            )
         except Exception as e:
-            logger.error(f"Failed to publish error notification ({context}): {e}")
+            logger.error(f"Failed to save position to DB: {e}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # відкриття
+    # ------------------------------------------------------------------
 
     async def _handle_signal(self, event: Event) -> None:
         """Обробка сигналу від стратегії"""
         signal = event.data
-        action = signal.get('action')
+        if signal.get('action') != 'OPEN':
+            return
 
-        if action == 'OPEN':
-            # Глобальний kill-switch (вкладка «Настройки» в мініаппі). Гейтимо
-            # лише ВІДКРИТТЯ нових позицій — закриття/супровід вже відкритих
-            # позицій (SL/TP/trailing) від нього не залежить і продовжує
-            # працювати, навіть якщо торгівлю вимкнули.
-            if self.settings_manager is not None and not self.settings_manager.get_trading_enabled():
-                logger.info(
-                    f"Signal for {signal.get('symbol')} ({signal.get('strategy')}) ignored — "
-                    f"trading is globally disabled (mini app toggle)"
-                )
-                return
-
-            await self.open_position(
-                symbol=signal['symbol'],
-                side=signal['side'],
-                quantity=signal['quantity'],
-                risk_percent=signal.get('risk_percent'),
-                trail_meta=signal.get('trail_meta'),
-                signal_context=signal.get('analytics_context'),
-                leverage=signal.get('leverage', 10),
-                stop_loss_price=signal.get('stop_loss_price'),
-                take_profit_levels=signal.get('take_profit_levels'),
-                strategy=signal.get('strategy'),
-                # ціна, від якої стратегія рахувала % для SL/TP — потрібна,
-                # щоб перерахувати рівні під фактичну ціну виконання ринкового ордера
-                reference_price=signal.get('reference_price')
+        # Kill-switch гейтить ЛИШЕ відкриття нових позицій — супровід уже
+        # відкритих (SL/TP/trailing) від нього не залежить.
+        if self.settings_manager is not None and not self.settings_manager.get_trading_enabled():
+            logger.info(
+                f"Signal for {signal.get('symbol')} ({signal.get('strategy')}) ignored — "
+                f"trading is globally disabled (mini app toggle)"
             )
+            return
 
-    @staticmethod
-    def _parse_fill(order_info: Optional[Dict[str, Any]]):
-        """Безпечно витягує (status, avg_price, executed_qty) з об'єкта ордера біржі."""
-        if not order_info:
-            return None, 0.0, 0.0
+        await self.open_position(
+            symbol=signal['symbol'],
+            side=signal['side'],
+            quantity=signal['quantity'],
+            risk_percent=signal.get('risk_percent'),
+            trail_meta=signal.get('trail_meta'),
+            signal_context=signal.get('analytics_context'),
+            leverage=signal.get('leverage', 10),
+            stop_loss_price=signal.get('stop_loss_price'),
+            take_profit_levels=signal.get('take_profit_levels'),
+            strategy=signal.get('strategy'),
+            # ціна, від якої стратегія рахувала SL/TP — щоб перерахувати рівні
+            # під фактичну ціну виконання ринкового ордера
+            reference_price=signal.get('reference_price')
+        )
 
-        status = order_info.get('status')
-        try:
-            avg_price = float(order_info.get('avgPrice', 0) or 0)
-        except (TypeError, ValueError):
-            avg_price = 0.0
-        try:
-            executed_qty = float(order_info.get('executedQty', 0) or 0)
-        except (TypeError, ValueError):
-            executed_qty = 0.0
-
-        return status, avg_price, executed_qty
-
-    async def _wait_for_confirmed_fill(
+    async def _resolve_quantity(
         self,
         symbol: str,
-        order_id: str,
-        max_attempts: int = 6,
-        delay_seconds: float = 0.3
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Для MARKET-ордера синхронна відповідь create_order часто повертає
-        avgPrice=0 / executedQty=0 — фактичне виконання ще не встигло
-        долетіти до REST-шару біржі. Тому запитуємо ордер окремо через
-        GET /trade/order, поки не отримаємо статус FILLED з реальними
-        avgPrice/executedQty (або не вичерпаємо спроби).
-        """
-        last_order_info = None
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                order_info = await self.exchange.get_order(symbol, order_id)
-            except Exception as e:
-                logger.warning(f"get_order attempt {attempt} failed for {symbol} order {order_id}: {e}")
-                order_info = None
-
-            if order_info:
-                last_order_info = order_info
-                if attempt == 1:
-                    logger.debug(f"Raw get_order response for {symbol} order {order_id}: {order_info}")
-                status, avg_price, executed_qty = self._parse_fill(order_info)
-
-                if status == 'FILLED' and avg_price > 0 and executed_qty > 0:
-                    logger.info(
-                        f"Confirmed fill for {symbol} order {order_id} on attempt {attempt}: "
-                        f"avgPrice={avg_price}, executedQty={executed_qty}"
-                    )
-                    return order_info
-
-            if attempt < max_attempts:
-                await asyncio.sleep(delay_seconds)
-
-        logger.warning(
-            f"Could not confirm fill for {symbol} order {order_id} after {max_attempts} attempts "
-            f"(last seen: {last_order_info}). Falling back to whatever data is available."
-        )
-        return last_order_info
-
-    async def _fetch_entry_from_positions(self, symbol: str, side: str) -> Optional[Dict[str, float]]:
-        """
-        Fallback-джерело реальної ціни входу: не статус ордера, а фактичний
-        стан позиції на біржі (entryPrice/positionAmt). Використовується,
-        коли get_order() за відведені спроби так і не показав FILLED —
-        позиція вже може бути фізично відкрита, навіть якщо статус ордера
-        це ще не відображає.
-        """
-        try:
-            positions = await self.exchange.get_positions()
-        except Exception as e:
-            logger.warning(f"Failed to fetch positions as entry_price fallback for {symbol}: {e}")
-            return None
-
-        position_side = 'LONG' if side == 'LONG' else 'SHORT'
-        for pos in positions:
-            if pos.get('symbol') != symbol:
-                continue
-            if pos.get('positionSide') != position_side:
-                continue
-            try:
-                entry_price = float(pos.get('entryPrice', 0) or 0)
-                position_amt = abs(float(pos.get('positionAmt', 0) or 0))
-            except (TypeError, ValueError):
-                continue
-            if entry_price > 0 and position_amt > 0:
-                logger.info(
-                    f"Fallback entry_price for {symbol} {side} from positions endpoint: "
-                    f"entryPrice={entry_price}, positionAmt={position_amt}"
+        side: str,
+        quantity: Optional[float],
+        leverage: int,
+        stop_loss_price: Optional[float],
+        reference_price: Optional[float],
+        risk_percent: Optional[float],
+    ) -> Optional[float]:
+        """Розмір позиції. None — позицію відкривати НЕ можна."""
+        if risk_percent:
+            # Стратегія ЯВНО запросила ризик на угоду — працює незалежно від
+            # глобального use_risk_based_sizing і БЕЗ fallback на quantity
+            # стратегії (вона тут None): відкрити "якимось" розміром означало б
+            # обійти саме той ліміт ризику, заради якого ця гілка існує.
+            risk_quantity = None
+            if self.risk_manager and stop_loss_price and reference_price:
+                risk_quantity = await self.risk_manager.compute_risk_based_quantity(
+                    entry_price=reference_price,
+                    stop_loss_price=stop_loss_price,
+                    risk_percent=risk_percent,
+                    leverage=leverage,  # вмикає комісію в ризику і стелю маржі
                 )
-                return {'entry_price': entry_price, 'quantity': position_amt}
+            if not risk_quantity or risk_quantity <= 0:
+                logger.warning(
+                    f"Risk-based sizing ({risk_percent}%) failed for {symbol} {side} — "
+                    f"position NOT opened (no safe quantity)"
+                )
+                return None
+            logger.info(f"Risk-based sizing for {symbol} {side}: {risk_percent}% risk -> quantity={risk_quantity}")
+            return risk_quantity
 
-        return None
+        # Глобальний use_risk_based_sizing: при невдачі тихо лишаємось на
+        # quantity стратегії — цей перерахунок ніколи не блокує відкриття.
+        if (
+            self.risk_manager
+            and getattr(self.risk_manager, 'use_risk_based_sizing', False)
+            and stop_loss_price
+            and reference_price
+        ):
+            risk_quantity = await self.risk_manager.compute_risk_based_quantity(
+                entry_price=reference_price,
+                stop_loss_price=stop_loss_price,
+            )
+            if risk_quantity and risk_quantity > 0:
+                logger.info(
+                    f"Risk-based sizing for {symbol} {side}: "
+                    f"strategy quantity={quantity} -> risk-based quantity={risk_quantity}"
+                )
+                return risk_quantity
+            logger.warning(
+                f"Risk-based sizing failed for {symbol} {side} — "
+                f"falling back to strategy quantity={quantity}"
+            )
+        return quantity
+
+    async def _place_entry_order(self, symbol: str, side: str, quantity: float, leverage: int):
+        """Плече + MARKET-ордер. Повертає (order_id, response) або (None, None)."""
+        try:
+            await self.exchange.set_leverage(symbol, leverage, side=side)
+        except BingXAPIError as e:
+            logger.warning(
+                f"set_leverage returned an error for {symbol} (leverage={leverage}, side={side}): "
+                f"{e.code} {e.msg}. Continuing with order placement anyway."
+            )
+
+        try:
+            response = await self.exchange.create_order(
+                symbol=symbol,
+                side=entry_order_side(side),
+                order_type='MARKET',
+                quantity=quantity
+            )
+        except BingXAPIError as e:
+            if e.code == API_ORDERS_DISABLED_CODE and 'temporarily disabled' in e.msg:
+                # обмеження біржі через волатильність, а не баг — лога достатньо
+                logger.warning(
+                    f"Order rejected by exchange (API orders temporarily disabled) "
+                    f"for {symbol} {side}: {e.msg}"
+                )
+            else:
+                logger.error(f"Order rejected by exchange for {symbol} {side}: {e.code} {e.msg}")
+                await self._notify_error(
+                    error=f"{e.code} {e.msg}",
+                    context=f"Не вдалося відкрити позицію {symbol} {side}"
+                )
+            return None, None
+
+        logger.info(f"Exchange order response: {response}")
+        order_id = extract_order_id(response)
+        if not order_id:
+            logger.error(f"Order accepted but no orderId found in response: {response}")
+            return None, None
+        return str(order_id), response
 
     async def open_position(
         self,
@@ -294,307 +264,83 @@ class SimpleTrader:
         signal_context: Optional[dict] = None,
     ) -> bool:
         try:
-            positions_info_message = None
+            positions_info_message = "Позицію відкрито."
             if self.risk_manager:
                 can_open, reason = await self.risk_manager.can_open_position(symbol)
-                positions_info_message = reason if reason else "Позицію відкрито."
-
                 if not can_open:
                     logger.warning(f"Risk manager blocked {symbol} {side}: {reason}")
                     return False
-            else:
-                positions_info_message = "Позицію відкрито."
-
+                positions_info_message = reason or positions_info_message
             if strategy:
                 positions_info_message = f"{positions_info_message} | Стратегія: {strategy}"
 
-            # --- risk-based sizing: заменяем fixed quantity от стратегии на
-            # quantity, посчитанный от equity * risk_per_trade_percent,
-            # ТОЛЬКО если явно включено в конфиге RiskManager. При любой
-            # неудаче (нет equity, нет stop_loss/reference_price) — тихо
-            # остаёмся на исходном quantity стратегии, никогда не блокируем
-            # открытие позиции из-за этого пересчёта.
-            if risk_percent:
-                # Стратегія ЯВНО запросила риск на угоду (risk_percent в сигналі) —
-                # це працює незалежно від глобального use_risk_based_sizing.
-                # На відміну від гілки нижче, тут НЕМАЄ тихого fallback на
-                # quantity стратегії: її quantity для такого сигналу — None,
-                # а відкрити позицію "якимось" розміром означало б обійти
-                # саме той ліміт ризику, заради якого ця гілка існує.
-                risk_quantity = None
-                if self.risk_manager and stop_loss_price and reference_price:
-                    risk_quantity = await self.risk_manager.compute_risk_based_quantity(
-                        entry_price=reference_price,
-                        stop_loss_price=stop_loss_price,
-                        risk_percent=risk_percent,
-                        leverage=leverage,  # вмикає комісію в ризику і стелю маржі
-                    )
-                if not risk_quantity or risk_quantity <= 0:
-                    logger.warning(
-                        f"Risk-based sizing ({risk_percent}%) failed for {symbol} {side} — "
-                        f"position NOT opened (no safe quantity)"
-                    )
-                    return False
-                logger.info(
-                    f"Risk-based sizing for {symbol} {side}: {risk_percent}% risk -> quantity={risk_quantity}"
-                )
-                quantity = risk_quantity
-            elif (
-                self.risk_manager
-                and getattr(self.risk_manager, 'use_risk_based_sizing', False)
-                and stop_loss_price
-                and reference_price
-            ):
-                risk_quantity = await self.risk_manager.compute_risk_based_quantity(
-                    entry_price=reference_price,
-                    stop_loss_price=stop_loss_price,
-                )
-                if risk_quantity and risk_quantity > 0:
-                    logger.info(
-                        f"Risk-based sizing for {symbol} {side}: "
-                        f"strategy quantity={quantity} -> risk-based quantity={risk_quantity}"
-                    )
-                    quantity = risk_quantity
-                else:
-                    logger.warning(
-                        f"Risk-based sizing failed for {symbol} {side} — "
-                        f"falling back to strategy quantity={quantity}"
-                    )
+            quantity = await self._resolve_quantity(
+                symbol, side, quantity, leverage, stop_loss_price, reference_price, risk_percent
+            )
+            if risk_percent and quantity is None:
+                return False
 
             logger.info(f"Opening position: {symbol} {side} {quantity} (strategy={strategy})")
 
-            try:
-                await self.exchange.set_leverage(symbol, leverage, side=side)
-            except BingXAPIError as e:
-                logger.warning(
-                    f"set_leverage returned an error for {symbol} (leverage={leverage}, side={side}): "
-                    f"{e.code} {e.msg}. Continuing with order placement anyway."
-                )
-
-            order_side = 'BUY' if side == 'LONG' else 'SELL'
-
-            try:
-                exchange_order = await self.exchange.create_order(
-                    symbol=symbol,
-                    side=order_side,
-                    order_type='MARKET',
-                    quantity=quantity
-                )
-            except BingXAPIError as e:
-                if e.code == 109400 and 'temporarily disabled' in e.msg:
-                    # це обмеження біржі через волатильність, а не баг —
-                    # не спамимо в Telegram, лога достатньо
-                    logger.warning(
-                        f"Order rejected by exchange (API orders temporarily disabled) "
-                        f"for {symbol} {side}: {e.msg}"
-                    )
-                else:
-                    logger.error(f"Order rejected by exchange for {symbol} {side}: {e.code} {e.msg}")
-                    await self._notify_error(
-                        error=f"{e.code} {e.msg}",
-                        context=f"Не вдалося відкрити позицію {symbol} {side}"
-                    )
-                return False
-
-            logger.info(f"Exchange order response: {exchange_order}")
-
-            order_id = None
-            if 'data' in exchange_order and 'order' in exchange_order['data']:
-                order_id = exchange_order['data']['order'].get('orderId')
-            elif 'orderId' in exchange_order:
-                order_id = exchange_order.get('orderId')
-            elif 'data' in exchange_order and 'orderId' in exchange_order['data']:
-                order_id = exchange_order['data'].get('orderId')
-
+            order_id, response = await self._place_entry_order(symbol, side, quantity, leverage)
             if not order_id:
-                logger.error(f"Order accepted but no orderId found in response: {exchange_order}")
                 return False
 
-            # Спершу пробуємо синхронну відповідь create_order напряму —
-            # на практиці біржа часто вже повертає status=FILLED з реальними
-            # avgPrice/executedQty одразу (без затримки). Опитування (poll)
-            # і позиції — це fallback тільки на випадок, коли синхронна
-            # відповідь цього не дає.
-            entry_price = 0.0
-            executed_qty = quantity
-
-            immediate_order_info = None
-            if 'data' in exchange_order and 'order' in exchange_order['data']:
-                immediate_order_info = exchange_order['data']['order']
-
-            status, avg_price, parsed_qty = self._parse_fill(immediate_order_info)
-
-            if status == 'FILLED' and avg_price > 0 and parsed_qty > 0:
-                entry_price = avg_price
-                executed_qty = parsed_qty
-                logger.info(
-                    f"Fill confirmed directly from create_order response for {symbol} {side}: "
-                    f"avgPrice={entry_price}, executedQty={executed_qty} (no extra polling needed)"
-                )
-            else:
-                confirmed_order = await self._wait_for_confirmed_fill(symbol, str(order_id))
-                if confirmed_order:
-                    _, confirmed_avg_price, confirmed_qty = self._parse_fill(confirmed_order)
-                    if confirmed_avg_price > 0:
-                        entry_price = confirmed_avg_price
-                    if confirmed_qty > 0:
-                        executed_qty = confirmed_qty
-
-            if entry_price <= 0:
-                # get_order() за відведені спроби не показав FILLED з ціною —
-                # пробуємо ще раз через фактичний стан позиції на біржі,
-                # перш ніж здаватись і рахувати SL/TP "наосліп"
-                fallback = await self._fetch_entry_from_positions(symbol, side)
-                if fallback:
-                    entry_price = fallback['entry_price']
-                    executed_qty = fallback['quantity']
-                else:
-                    logger.warning(
-                        f"Failed to confirm entry_price for {symbol} {side} order {order_id} "
-                        f"(both order status and positions endpoint gave nothing usable) — "
-                        f"SL/TP will be based on unconfirmed price, may be inaccurate"
-                    )
-
+            entry_price, executed_qty = await resolve_entry_fill(
+                self.exchange, symbol, side, order_id, response, quantity
+            )
             if executed_qty != quantity:
                 logger.info(
                     f"Using executedQty={executed_qty} instead of requested quantity={quantity} "
                     f"for {symbol} {side} SL/TP sizing"
                 )
 
-            # Якщо стратегія передала reference_price (ціну, від якої рахувала % для SL/TP),
-            # перераховуємо рівні під фактичну ціну виконання ринкового ордера —
-            # інакше SL/TP залишаться прив'язані до "старої" ціни сигналу, а не до реального входу
-            if reference_price and entry_price and reference_price > 0:
-                scale = entry_price / reference_price
-                if stop_loss_price:
-                    stop_loss_price = stop_loss_price * scale
-                if take_profit_levels:
-                    take_profit_levels = [
-                        {**lvl, 'price': lvl['price'] * scale}
-                        for lvl in take_profit_levels
-                    ]
+            stop_loss_price, take_profit_levels, scale = rescale_to_fill(
+                stop_loss_price, take_profit_levels, reference_price, entry_price
+            )
+            if scale is not None:
                 logger.info(
                     f"Rescaled SL/TP for {symbol} {side}: reference_price={reference_price}, "
                     f"entry_price={entry_price}, scale={scale:.6f}"
                 )
 
-            # Зберігаємо позицію в пам'яті
-            position_key = f"{symbol}_{side}"
-            position_data = {
-                'order_id': str(order_id),
-                'symbol': symbol,
-                'side': side,
-                'quantity': executed_qty,
-                'entry_price': entry_price,
-                'leverage': leverage,
-                'stop_loss_price': stop_loss_price,
-                # НЕЗМІННА копія самого першого SL, який порахувала стратегія.
-                # TrailingStopManager НІКОЛИ це поле не чіпає — використовує
-                # лише як fallback, якщо не вдалось перевиставити стоп на
-                # черговому рівні (замість "аварійного" стопу від live price).
-                'initial_stop_loss_price': stop_loss_price,
-                'take_profit_levels': take_profit_levels,
-                'opened_by': 'bot',
-                'sl_order_id': None,
-                'tp_order_ids': [],
-                'sl_client_order_id': None,
-                'tp_client_order_ids': [],
-                # ім'я стратегії, яка згенерувала сигнал на відкриття
-                'strategy': strategy,
-                # параметри супроводу стопу від стратегії (напр. atr_3step);
-                # зберігаються в metadata → переживають рестарт бота
-                'trail_meta': trail_meta,
-                'realized_pnl_accum': 0.0,
-                # Розділено на open/close (ТЗ, задача 2): раніше було єдине
-                # commission_accum, яке рахувалось ЛИШЕ в _handle_order_update
-                # на закриваючих ордерах — комісія за ВІДКРИТТЯ позиції (REST
-                # create_order/get_order її не повертає, вона приходить лише
-                # через WS ORDER_TRADE_UPDATE) ніколи не накопичувалась і
-                # взагалі губилась. Заповнюється нижче, одразу як прийде
-                # ORDER_TRADE_UPDATE по цьому order_id (див. _handle_order_update).
-                'commission_open_accum': 0.0,
-                'commission_close_accum': 0.0,
-                # Funding (нарахування/списання за утримання позиції, раз на
-                # ~8г) рушій поки НЕ відстежує по кожній позиції окремо — поле
-                # лишається 0.0 і бере участь у net_pnl формулі (_calc_net_pnl)
-                # для сумісності наперед, щоб не міняти формулу знову, коли
-                # funding з'явиться (задача 4 ТЗ, звірка через get_income_history).
-                'funding_fee_accum': 0.0,
-                'remaining_quantity': executed_qty,
-            }
-            self.open_positions[position_key] = position_data
-
+            position = new_bot_position(
+                order_id=order_id,
+                symbol=symbol,
+                side=side,
+                quantity=executed_qty,
+                entry_price=entry_price,
+                leverage=leverage,
+                stop_loss_price=stop_loss_price,
+                take_profit_levels=take_profit_levels,
+                strategy=strategy,
+                trail_meta=trail_meta,
+            )
+            self.open_positions[position_key(symbol, side)] = position
             logger.info(f"Position tracked: orderId={order_id}, {symbol} {side}, strategy={strategy}")
 
-            # Зберігаємо позицію в БД
-            try:
-                self.db.insert_position(
-                    order_id=str(order_id),
-                    symbol=symbol,
-                    side=side,
-                    status='OPEN',
-                    metadata=json.dumps(position_data)
-                )
-            except Exception as e:
-                logger.error(f"Failed to save position to DB: {e}", exc_info=True)
+            self._insert_position_record(position)
+            self._insert_open_analytics(position, risk_percent, reference_price, signal_context)
 
-            try:
-                self.db.insert_trade_analytics(
-                    order_id=str(order_id),
-                    symbol=symbol,
-                    side=side,
-                    opened_by='bot',
-                    entry_price=entry_price,
-                    quantity=executed_qty,
-                    leverage=leverage,
-                    margin_usdt=self._calc_margin_usdt(position_data),
-                    strategy=strategy,
-                    strategy_params=self._strategy_params_snapshot(strategy),
-                    stop_loss_price_initial=stop_loss_price,
-                    take_profit_levels_initial=take_profit_levels,
-                    trail_meta=trail_meta,
-                    risk_percent=risk_percent,
-                    reference_price=reference_price,
-                    equity_at_entry=self._recent_equity(),
-                    concurrent_positions=max(0, len(self.open_positions) - 1),
-                    signal_context=signal_context,
-                )
-            except Exception as e:
-                logger.error(f"Failed to insert trade_analytics for {symbol} {side}: {e}", exc_info=True)
-
-            # Створюємо стоп/тейк ордери — використовуємо реально виконаний обсяг
-            # (executed_qty), а не запитаний quantity, щоб уникнути розсинхрону
-            # з реальним залишком позиції на біржі
+            # SL/TP — на реально виконаний обсяг (executed_qty), а не запитаний
             if stop_loss_price:
-                sl_order_id, sl_client_order_id = await self._create_stop_loss(
+                sl_order_id, sl_client_order_id = await self.orders.create_stop_loss(
                     symbol, side, executed_qty, stop_loss_price, entry_price
                 )
-                if sl_order_id:
-                    self.open_positions[position_key]['sl_order_id'] = str(sl_order_id)
-                if sl_client_order_id:
-                    self.open_positions[position_key]['sl_client_order_id'] = sl_client_order_id
+                position['sl_order_id'] = sl_order_id
+                position['sl_client_order_id'] = sl_client_order_id
 
             if take_profit_levels:
-                tp_results = await self._create_take_profit_orders(symbol, side, executed_qty, take_profit_levels)
-                self.open_positions[position_key]['tp_order_ids'] = [
-                    str(r['order_id']) for r in tp_results if r.get('order_id')
-                ]
-                self.open_positions[position_key]['tp_client_order_ids'] = [
+                tp_results = await self.orders.create_take_profit_orders(
+                    symbol, side, executed_qty, take_profit_levels
+                )
+                position['tp_order_ids'] = [r['order_id'] for r in tp_results if r.get('order_id')]
+                position['tp_client_order_ids'] = [
                     r['client_order_id'] for r in tp_results if r.get('client_order_id')
                 ]
 
-            # Оновлюємо metadata в БД з sl_order_id/tp_order_ids
-            try:
-                self.db.update_position_metadata(
-                    order_id=str(order_id),
-                    metadata=json.dumps(self.open_positions[position_key])
-                )
-            except Exception as e:
-                logger.error(f"Failed to update position metadata in DB: {e}", exc_info=True)
+            persist_position_metadata(self.db, position, context="sl/tp order ids")
 
-            margin_usdt = self._calc_margin_usdt(self.open_positions[position_key])
-
-            # Публікуємо подію POSITION_OPENED
             await self.event_bus.publish(Event(
                 type=EventType.POSITION_OPENED,
                 data={
@@ -605,11 +351,10 @@ class SimpleTrader:
                     'leverage': leverage,
                     'stop_loss_price': stop_loss_price,
                     'take_profit_levels': take_profit_levels,
-                    'margin_usdt': margin_usdt,
+                    'margin_usdt': calc_margin_usdt(position),
                     'positions_info_message': positions_info_message
                 }
             ))
-
             return True
 
         except Exception as e:
@@ -620,339 +365,79 @@ class SimpleTrader:
             )
             return False
 
-    async def _create_stop_loss(
+    def _insert_open_analytics(
         self,
-        symbol: str,
-        side: str,
-        quantity: float,
-        stop_loss_price: float,
-        entry_price: Optional[float] = None
-    ) -> tuple:
-        """
-        SL всегда закрывает позицию целиком, поэтому используем closePosition=true
-        вместо quantity — биржа сама заквадратит позицию по факту срабатывания,
-        без хвостов и без ошибок округления (110424). quantity здесь больше не нужен
-        и не используется в запросе.
-        """
-        close_side = 'SELL' if side == 'LONG' else 'BUY'
-        position_side = 'LONG' if side == 'LONG' else 'SHORT'
-
-        current_stop_price = stop_loss_price
-
-        buffer_percent = None
-        if entry_price and entry_price > 0 and stop_loss_price:
-            buffer_percent = abs(entry_price - stop_loss_price) / entry_price
-
-        client_order_id = f"sl-{int(time.time() * 1000)}"
-        max_attempts = 3
-        last_error: Optional[BingXAPIError] = None
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = await self.exchange.create_order(
-                    symbol=symbol,
-                    quantity=quantity,
-                    side=close_side,
-                    order_type='STOP_MARKET',
-                    stop_price=current_stop_price,
-                    position_side=position_side,
-                    close_position=True,  
-                    client_order_id=client_order_id,
-                )
-
-                order_id = None
-                if 'data' in response and 'order' in response['data']:
-                    order_id = response['data']['order'].get('orderId')
-
-                logger.info(
-                    f"Stop loss created: {symbol} @ {current_stop_price}, "
-                    f"orderId={order_id}, clientOrderId={client_order_id}, closePosition=true"
-                )
-                return order_id, client_order_id
-
-            except BingXAPIError as e:
-                last_error = e
-
-                if 'current price' in (e.msg or '').lower() and buffer_percent is not None and attempt < max_attempts:
-                    try:
-                        mark_price = await self.exchange.get_mark_price(symbol)
-                        # +0.05% запасу понад buffer_percent — навіть mark
-                        # price, отримана через REST, встигає трохи
-                        # "постаріти" за час round-trip до біржі на
-                        # волатильних алтах
-                        safety_percent = buffer_percent + 0.0005
-                        new_stop_price = (
-                            mark_price * (1 - safety_percent) if side == 'LONG'
-                            else mark_price * (1 + safety_percent)
-                        )
-                        logger.warning(
-                            f"SL for {symbol} rejected as stale (price already passed target "
-                            f"{current_stop_price}). Re-anchoring to mark price {mark_price} -> "
-                            f"new stop={new_stop_price}, retrying (attempt {attempt+1})"
-                        )
-                        current_stop_price = new_stop_price
-                        continue
-                    except Exception as fetch_err:
-                        logger.error(f"Failed to fetch mark price to re-anchor SL for {symbol}: {fetch_err}")
-                        break
-
-                break
-
-            except Exception as e:
-                logger.error(f"Failed to create stop loss: {e}")
-                await self._notify_error(
-                    error=str(e),
-                    context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
-                    critical=True
-                )
-                return None, None
-
-        logger.error(
-            f"Failed to create stop loss for {symbol} after {max_attempts} attempts "
-            f"(last tried stopPrice={current_stop_price}): "
-            f"{last_error.code if last_error else '?'} {last_error.msg if last_error else ''}"
-        )
-        await self._notify_error(
-            error=f"{last_error.code} {last_error.msg}" if last_error else "unknown error",
-            context=f"Не вдалося поставити SL для {symbol} — позиція без захисту!",
-            critical=True
-        )
-        return None, None
-
-
-    async def _create_take_profit_orders(self, symbol: str, side: str, quantity: float, tp_levels: list) -> list:
-        """
-        Повертає список {'order_id': ..., 'client_order_id': ...} по кожному рівню TP.
-
-        Останній рівень TP завжди закривається через closePosition=true —
-        незалежно від того, скільки % він мав закрити за розрахунком. Це прибирає
-        хвости, що накопичуються з округлення quantity біржею на попередніх
-        часткових рівнях: замість закриття по розрахунковому quantity, останній
-        ордер квадратить фактичний залишок позиції на біржі в момент спрацювання.
-        Проміжні (не останні) рівні й далі закриваються точним quantity, бо
-        closePosition=true на них закрив би позицію повністю, зламавши інші рівні.
-        """
-        results = []
-        last_index = len(tp_levels) - 1
-
-        logger.info(f"Creating {len(tp_levels)} take profit orders for {symbol} {side}")
-        for i, tp_level in enumerate(tp_levels):
-            client_order_id = f"tp{i+1}-{int(time.time() * 1000)}"
-            is_last_level = (i == last_index)
-
-            try:
-                tp_price = tp_level['price']
-                close_side = 'SELL' if side == 'LONG' else 'BUY'
-                position_side = 'LONG' if side == 'LONG' else 'SHORT'
-
-                if is_last_level:
-                    response = await self.exchange.create_order(
-                        symbol=symbol,
-                        side=close_side,
-                        order_type='TAKE_PROFIT_MARKET',
-                        quantity=quantity,
-                        stop_price=tp_price,
-                        position_side=position_side,
-                        close_position=True,
-                        client_order_id=client_order_id
-                    )
-                else:
-                    tp_quantity = quantity * (tp_level['close_percent'] / 100)
-                    response = await self.exchange.create_order(
-                        symbol=symbol,
-                        side=close_side,
-                        order_type='TAKE_PROFIT_MARKET',
-                        quantity=tp_quantity,
-                        stop_price=tp_price,
-                        position_side=position_side,
-                        client_order_id=client_order_id
-                    )
-
-                order_id = None
-                if 'data' in response and 'order' in response['data']:
-                    order_id = response['data']['order'].get('orderId')
-
-                results.append({'order_id': order_id, 'client_order_id': client_order_id})
-                logger.info(
-                    f"Take profit {i+1}{'(final, closePosition=true)' if is_last_level else ''} created: "
-                    f"{symbol} @ {tp_price}, orderId={order_id}, clientOrderId={client_order_id}"
-                )
-
-            except BingXAPIError as e:
-                logger.error(f"Failed to create take profit {i+1} for {symbol}: {e.code} {e.msg}")
-                await self._notify_error(
-                    error=f"{e.code} {e.msg}",
-                    context=f"Не вдалося поставити TP{i+1} для {symbol} (SL, якщо є, залишається активним)"
-                )
-                results.append({'order_id': None, 'client_order_id': None})
-            except Exception as e:
-                logger.error(f"Failed to create take profit {i+1}: {e}")
-                results.append({'order_id': None, 'client_order_id': None})
-
-        return results
-
-    @staticmethod
-    def _calc_net_pnl(
-        realized_pnl: float,
-        commission_open: float = 0.0,
-        commission_close: float = 0.0,
-        funding_fee: float = 0.0,
-    ) -> float:
-        """
-        ЄДИНА точка правди для net_pnl у всьому боті (ТЗ TZ_fix_pnl_accounting.md,
-        задача 1). Угода про знак: усі комісії та funding зберігаються ТАКИМИ Ж,
-        якими їх віддає біржа — тобто ВІД'ЄМНИМИ, коли це списання (а не
-        нарахування). Тому формула — СУМА, а не різниця:
-
-            net_pnl = realized_pnl + commission_open + commission_close + funding_fee
-
-        Раніше було `realized_pnl - commission_total`, де commission_total уже
-        був від'ємним (мінус на мінус = плюс) — через це комісія ПРИБАВЛЯЛАСЬ
-        до прибутку замість віднімання. Приклад з реальних даних (звірка з
-        біржею, розбіжність ~15.6$ на 103 угодах): realized_pnl=0.384118,
-        commission_open=-0.0498, commission_close=-0.0498, funding=0.0 ->
-        старий код: 0.384118 - (-0.0996) = 0.4837 (завищено)
-        новий код:  0.384118 + (-0.0498) + (-0.0498) + 0.0 = 0.2845 (вірно)
-
-        funding_fee за замовчуванням 0.0 — рушій (SimpleTrader) наразі НЕ
-        відстежує funding у реальному часі на рівні окремої позиції (це
-        робиться пізніше, через звірку з /openApi/swap/v2/user/income, див.
-        TrailingStopManager/webapp get_income_history і задачу 4 ТЗ) — тут
-        просто залишено місце в формулі, щоб net_pnl не треба було рахувати
-        по-іншому, коли funding_fee нарешті з'явиться по кожній позиції.
-        """
-        return (
-            (realized_pnl or 0.0)
-            + (commission_open or 0.0)
-            + (commission_close or 0.0)
-            + (funding_fee or 0.0)
-        )
-
-    @staticmethod
-    def _calc_roe_percent(position: dict, realized_pnl: float) -> Optional[float]:
-        """
-        ROE% = PnL відносно маржі, використаної на відкриття (entry_price * quantity / leverage) —
-        так само, як біржа рахує ROE% в інтерфейсі. Повертає None, якщо бракує
-        даних для розрахунку (замість того щоб мовчки підставити 0).
-        """
-        entry_price = position.get('entry_price')
-        quantity = position.get('quantity')
-        leverage = position.get('leverage') or 1
-
-        if not entry_price or not quantity or entry_price <= 0 or quantity <= 0:
-            return None
-        # leverage може прилетіти з конфігу як щось не-числове (наприклад
-        # кортеж через баговану кому в конфізі стратегії) — краще явно
-        # впасти в None, ніж кидати неопрацьований TypeError і губити
-        # публікацію POSITION_CLOSED цілком
+        position: dict,
+        risk_percent: Optional[float],
+        reference_price: Optional[float],
+        signal_context: Optional[dict],
+    ) -> None:
+        strategy = position['strategy']
         try:
-            leverage = float(leverage)
-        except (TypeError, ValueError):
-            logger.error(f"Invalid leverage value in position data, cannot calc ROE%: {leverage!r}")
-            return None
+            self.db.insert_trade_analytics(
+                order_id=position['order_id'],
+                symbol=position['symbol'],
+                side=position['side'],
+                opened_by='bot',
+                entry_price=position['entry_price'],
+                quantity=position['quantity'],
+                leverage=position['leverage'],
+                margin_usdt=calc_margin_usdt(position),
+                strategy=strategy,
+                strategy_params=self._strategy_params_snapshot(strategy),
+                stop_loss_price_initial=position['stop_loss_price'],
+                take_profit_levels_initial=position['take_profit_levels'],
+                trail_meta=position['trail_meta'],
+                risk_percent=risk_percent,
+                reference_price=reference_price,
+                equity_at_entry=self._recent_equity(),
+                concurrent_positions=max(0, len(self.open_positions) - 1),
+                signal_context=signal_context,
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to insert trade_analytics for {position['symbol']} {position['side']}: {e}",
+                exc_info=True,
+            )
 
-        if leverage <= 0:
-            return None
-
-        margin = (entry_price * quantity) / leverage
-        if margin <= 0:
-            return None
-
-        return (realized_pnl / margin) * 100
-
-    @staticmethod
-    def _calc_margin_usdt(position: dict) -> Optional[float]:
-        """Скільки USDT реально було вкладено (маржа) — потрібно для статистики в $."""
-        entry_price = position.get('entry_price')
-        quantity = position.get('quantity')
-        leverage = position.get('leverage') or 1
-
-        if not entry_price or not quantity or entry_price <= 0 or quantity <= 0:
-            return None
-        try:
-            leverage = float(leverage)
-        except (TypeError, ValueError):
-            return None
-        if leverage <= 0:
-            return None
-
-        return (entry_price * quantity) / leverage
+    # ------------------------------------------------------------------
+    # виконання ордерів (WS ORDER_TRADE_UPDATE)
+    # ------------------------------------------------------------------
 
     async def _handle_order_update(self, event: Event) -> None:
-
         logger.info(f"[DEBUG] Close ORDER_TRADE_UPDATE event: {event.data}")
 
         order_data = event.data.get('o', {})
         exchange_order_id = str(order_data.get('i'))
-        client_order_id = order_data.get('c')  # clientOrderId — те, що ми самі задали при створенні SL/TP
-        status = order_data.get('X')
+        client_order_id = order_data.get('c')  # clientOrderId, який ми самі задали для SL/TP
         order_type = order_data.get('o')
-        order_side = order_data.get('S')
         symbol = order_data.get('s')
         position_side = order_data.get('ps')
 
-        if status != 'FILLED' or order_type not in ('STOP_MARKET', 'TAKE_PROFIT_MARKET', 'MARKET'):
+        if order_data.get('X') != 'FILLED' or order_type not in ('STOP_MARKET', 'TAKE_PROFIT_MARKET', 'MARKET'):
             return
 
-        position_key = f"{symbol}_{position_side}"
-        position = self.open_positions.get(position_key)
-
+        key = position_key(symbol, position_side)
+        position = self.open_positions.get(key)
         if not position:
             logger.debug(f"No open position tracked for {symbol} {position_side}, skipping")
             return
 
-        # Комісія ВІДКРИТТЯ позиції (ТЗ, задача 2). exchange_order_id тут
-        # дорівнює вхідному MARKET-ордеру, яким ми ж самі відкривали позицію
-        # (position['order_id']) — на відміну від закриваючих SL/TP/ручних
-        # ордерів, у яких свій окремий order_id. Перевірка по order_id (а не
-        # по стороні ордера) і зберігає точність, і коректно обробляє обидва
-        # напрямки (LONG вхід BUY, SHORT вхід SELL). Це ЄДИНЕ місце, де бот
-        # взагалі бачить комісію відкриття — REST create_order/get_order її
-        # не повертає, лише цей WS ORDER_TRADE_UPDATE.
+        # Виконання вхідного MARKET-ордера (того самого order_id, яким бот
+        # відкривав позицію) — ЄДИНЕ місце, де видно комісію відкриття:
+        # REST create_order/get_order її не повертає.
         if exchange_order_id == position.get('order_id'):
-            commission_open = float(order_data.get('n', 0) or 0)
-            position['commission_open_accum'] = position.get('commission_open_accum', 0.0) + commission_open
-            if order_data.get('N'):
-                position['commission_asset'] = order_data.get('N')
-            try:
-                self.db.update_position_metadata(
-                    order_id=position['order_id'],
-                    metadata=json.dumps(position)
-                )
-            except Exception as e:
-                logger.error(f"Failed to persist opening commission to DB: {e}", exc_info=True)
-            logger.info(
-                f"Captured opening commission for {symbol} {position_side}: "
-                f"{commission_open} (order={exchange_order_id})"
-            )
+            self._capture_opening_commission(position, order_data, exchange_order_id)
             return
 
-        expected_close_side = 'SELL' if position_side == 'LONG' else 'BUY'
-        if order_side != expected_close_side:
+        if order_data.get('S') != close_order_side(position_side):
             return
 
-        known_bot_client_order_ids = set(position.get('tp_client_order_ids', []) or [])
-        if position.get('sl_client_order_id'):
-            known_bot_client_order_ids.add(position['sl_client_order_id'])
-
-        known_bot_order_ids = set(position.get('tp_order_ids', []) or [])
-        if position.get('sl_order_id'):
-            known_bot_order_ids.add(position['sl_order_id'])
-
-        if client_order_id and client_order_id in known_bot_client_order_ids:
-            closed_by = 'bot'
-        elif exchange_order_id in known_bot_order_ids:
-            closed_by = 'bot'
-        else:
-            closed_by = 'user'
-
+        closed_by = 'bot' if self._is_bot_order(position, exchange_order_id, client_order_id) else 'user'
         trade_id = order_data.get('t')
-
-        filled_qty = float(order_data.get('l', 0) or order_data.get('q', 0) or 0)
-
-        trade_realized_pnl = float(order_data.get('rp', 0) or 0)
-        commission = float(order_data.get('n', 0) or 0)
-        commission_asset = order_data.get('N')
+        filled_qty = to_float(order_data.get('l', 0) or order_data.get('q', 0))
+        trade_realized_pnl = to_float(order_data.get('rp', 0))
+        commission = to_float(order_data.get('n', 0))
 
         if order_type == 'TAKE_PROFIT_MARKET':
             try:
@@ -960,7 +445,7 @@ class SimpleTrader:
                     order_id=position['order_id'],
                     tp_order_id=exchange_order_id,
                     client_order_id=client_order_id,
-                    price=float(order_data.get('ap', 0) or 0),
+                    price=to_float(order_data.get('ap', 0)),
                     quantity=filled_qty,
                     realized_pnl=trade_realized_pnl,
                     commission=commission,
@@ -970,11 +455,9 @@ class SimpleTrader:
                 logger.error(f"Failed to append tp_fill to trade_analytics for {symbol} {position_side}: {e}", exc_info=True)
 
         # накопичуємо ID закриваючих угод — тільки ID, жодних цін/PnL
-        position.setdefault('closing_trade_ids', [])
         if trade_id is not None:
-            position['closing_trade_ids'].append(trade_id)
-        position.setdefault('closing_orders', [])
-        position['closing_orders'].append({
+            position.setdefault('closing_trade_ids', []).append(trade_id)
+        position.setdefault('closing_orders', []).append({
             'order_id': exchange_order_id,
             'client_order_id': client_order_id,
             'closed_by': closed_by
@@ -982,14 +465,13 @@ class SimpleTrader:
 
         position['realized_pnl_accum'] = position.get('realized_pnl_accum', 0.0) + trade_realized_pnl
         position['commission_close_accum'] = position.get('commission_close_accum', 0.0) + commission
-        if commission_asset:
-            position['commission_asset'] = commission_asset
+        if order_data.get('N'):
+            position['commission_asset'] = order_data.get('N')
 
         remaining_quantity = position.get('remaining_quantity')
         if remaining_quantity is None:
             remaining_quantity = position.get('quantity', 0)
-        remaining = remaining_quantity - filled_qty
-        position['remaining_quantity'] = max(0.0, remaining)
+        position['remaining_quantity'] = max(0.0, remaining_quantity - filled_qty)
 
         logger.info(
             f"Partial/full close fill: {symbol} {position_side}, order={exchange_order_id}, "
@@ -998,37 +480,177 @@ class SimpleTrader:
             f"remaining={position['remaining_quantity']:.8f}, closed_by={closed_by}"
         )
 
+        persist_position_metadata(self.db, position, context="partial close")
+
         is_full_close = order_type == 'STOP_MARKET' or position['remaining_quantity'] <= 1e-8
-
-        try:
-            self.db.update_position_metadata(
-                order_id=position['order_id'],
-                metadata=json.dumps(position)
-            )
-        except Exception as e:
-            logger.error(f"Failed to update position metadata (partial close) in DB: {e}", exc_info=True)
-
         if not is_full_close:
             # позиція ще частково відкрита — НЕ видаляємо, НЕ закриваємо в БД
             return
 
-        del self.open_positions[position_key]
-
+        del self.open_positions[key]
         logger.info(f"Position fully closed: {symbol} {position_side}, closed_by={closed_by}")
 
-        close_price = float(order_data.get('ap', 0) or 0)
-        realized_pnl = position.get('realized_pnl_accum', 0.0)
+        await self._finalize_close(
+            position,
+            position_side=position_side,
+            close_price=to_float(order_data.get('ap', 0)),
+            realized_pnl=position.get('realized_pnl_accum', 0.0),
+            closed_by=closed_by,
+            close_reason=_CLOSE_REASON_BY_ORDER_TYPE.get(order_type, 'manual'),
+            close_order_type=order_type,
+        )
+
+    @staticmethod
+    def _is_bot_order(position: dict, exchange_order_id: str, client_order_id: Optional[str]) -> bool:
+        known_client_ids = set(position.get('tp_client_order_ids', []) or [])
+        known_order_ids = set(position.get('tp_order_ids', []) or [])
+        if position.get('sl_client_order_id'):
+            known_client_ids.add(position['sl_client_order_id'])
+        if position.get('sl_order_id'):
+            known_order_ids.add(position['sl_order_id'])
+        return (bool(client_order_id) and client_order_id in known_client_ids) or exchange_order_id in known_order_ids
+
+    def _capture_opening_commission(self, position: dict, order_data: dict, exchange_order_id: str) -> None:
+        commission_open = to_float(order_data.get('n', 0))
+        position['commission_open_accum'] = position.get('commission_open_accum', 0.0) + commission_open
+        if order_data.get('N'):
+            position['commission_asset'] = order_data.get('N')
+        persist_position_metadata(self.db, position, context="opening commission")
+        logger.info(
+            f"Captured opening commission for {position['symbol']} {position['side']}: "
+            f"{commission_open} (order={exchange_order_id})"
+        )
+
+    # ------------------------------------------------------------------
+    # ACCOUNT_UPDATE — safety net для ручних дій на біржі
+    # ------------------------------------------------------------------
+
+    async def _handle_account_update(self, event: Event) -> None:
+        """Ловить ручні дії на біржі, які не пройшли через ORDER_TRADE_UPDATE обробник"""
+        positions_data = event.data.get('a', {}).get('P', [])
+        logger.info(f"[WS] Publishing HANDLE_ACCOUNT_INFO_UPDATE event: {event}")
+        logger.info(f"[WS] Publishing HANDLE_ACCOUNT_INFO_UPDATE positions_data: {positions_data}")
+
+        for pos in positions_data:
+            symbol = pos.get('s')
+            position_side = pos.get('ps')
+            amount = to_float(pos.get('pa', 0))
+            if not symbol or not position_side:
+                continue
+
+            key = position_key(symbol, position_side)
+            existing = self.open_positions.get(key)
+
+            if amount != 0 and not existing:
+                await self._track_manual_position(symbol, position_side, to_float(pos.get('ep', 0)), abs(amount))
+
+            elif amount == 0 and existing:
+                if existing.get('opened_by') != 'user':
+                    # позиція бота — закриття вже (або вот-вот) обробить
+                    # _handle_order_update по ORDER_TRADE_UPDATE, не дублюємо
+                    logger.debug(
+                        f"Skipping account-update close for bot position {symbol} {position_side} "
+                        f"— expecting ORDER_TRADE_UPDATE to handle it"
+                    )
+                    return
+
+                del self.open_positions[key]
+                logger.info(f"Position closed (detected via account update): {symbol} {position_side}")
+
+                # До PnL, вже накопиченого з часткових закриттів через
+                # ORDER_TRADE_UPDATE, додаємо 'cr' — PnL САМЕ цього (останнього)
+                # закриття, яке через ORDER_TRADE_UPDATE не пройшло.
+                realized_pnl = existing.get('realized_pnl_accum', 0.0) + to_float(pos.get('cr', 0))
+                await self._finalize_close(
+                    existing,
+                    position_side=position_side,
+                    close_price=await self._derive_close_price(existing, position_side, realized_pnl),
+                    realized_pnl=realized_pnl,
+                    closed_by=existing.get('opened_by', 'user'),
+                    close_reason='manual',
+                    close_order_type=None,
+                )
+
+    async def _track_manual_position(self, symbol: str, side: str, entry_price: float, quantity: float) -> None:
+        """Позиція відкрита вручну на біржі — бот про неї не знав."""
+        position = new_manual_position(
+            order_id=f"manual-{symbol}-{side}-{int(time.time())}",
+            symbol=symbol,
+            side=side,
+            entry_price=entry_price,
+            quantity=quantity,
+        )
+        self.open_positions[position_key(symbol, side)] = position
+        logger.info(f"Manual position detected and tracked: {symbol} {side}")
+
+        self._insert_position_record(position)
+        margin_usdt = calc_margin_usdt(position)
+
+        try:
+            self.db.insert_trade_analytics(
+                order_id=position['order_id'],
+                symbol=symbol,
+                side=side,
+                opened_by='user',
+                entry_price=entry_price,
+                quantity=quantity,
+                margin_usdt=margin_usdt,
+            )
+        except Exception as e:
+            logger.error(f"Failed to insert trade_analytics for manual {symbol} {side}: {e}", exc_info=True)
+
+        await self.event_bus.publish(Event(
+            type=EventType.POSITION_OPENED,
+            data={
+                'symbol': symbol,
+                'side': side,
+                'entry_price': entry_price,
+                'quantity': quantity,
+                'leverage': 0,
+                'stop_loss_price': None,
+                'margin_usdt': margin_usdt,
+                'positions_info_message': "Позицію відкрито вручну."
+            }
+        ))
+
+    async def _derive_close_price(self, position: dict, side: str, realized_pnl: float) -> float:
+        """close_price виводимо з entry_price/quantity/сукупного realized_pnl, а
+        не з поточного тікера (він уже може відрізнятись від фактичної ціни
+        виконання закриваючого ордера). Тікер — лише якщо даних немає."""
+        entry_price = position.get('entry_price')
+        quantity = position.get('quantity')
+        if entry_price and quantity and quantity > 0:
+            per_unit = realized_pnl / quantity
+            return entry_price + per_unit if side == 'LONG' else entry_price - per_unit
+        try:
+            return await self.exchange.get_ticker_price(position['symbol'])
+        except Exception as e:
+            logger.warning(f"Failed to fetch close_price ticker for {position['symbol']}: {e}")
+            return 0.0
+
+    # ------------------------------------------------------------------
+    # фінал закриття — спільний для ORDER_TRADE_UPDATE і ACCOUNT_UPDATE
+    # ------------------------------------------------------------------
+
+    async def _finalize_close(
+        self,
+        position: dict,
+        *,
+        position_side: str,
+        close_price: float,
+        realized_pnl: float,
+        closed_by: str,
+        close_reason: str,
+        close_order_type: Optional[str],
+    ) -> None:
+        symbol = position['symbol']
         commission_open = position.get('commission_open_accum', 0.0)
-        commission_close = position.get('commission_close_accum', 0.0)
+        commission_close = position.get('commission_close_accum', position.get('commission_accum', 0.0))
         funding_fee = position.get('funding_fee_accum', 0.0)
         commission_total = commission_open + commission_close
-        net_pnl = self._calc_net_pnl(realized_pnl, commission_open, commission_close, funding_fee)
-        margin_usdt = self._calc_margin_usdt(position)
-        try:
-            roe_percent = self._calc_roe_percent(position, realized_pnl)
-        except Exception as e:
-            logger.error(f"Failed to calc ROE% for {symbol} {position_side}: {e}", exc_info=True)
-            roe_percent = None
+        net_pnl = calc_net_pnl(realized_pnl, commission_open, commission_close, funding_fee)
+        margin_usdt = calc_margin_usdt(position)
+        roe_percent = calc_roe_percent(position, realized_pnl)
 
         try:
             self.db.update_position_status(
@@ -1047,11 +669,6 @@ class SimpleTrader:
             )
         except Exception as e:
             logger.error(f"Failed to update position status in DB: {e}", exc_info=True)
-
-        close_reason = {
-            'STOP_MARKET': 'stop_loss',
-            'TAKE_PROFIT_MARKET': 'take_profit',
-        }.get(order_type, 'manual')
 
         try:
             self.db.close_trade_analytics(
@@ -1072,8 +689,6 @@ class SimpleTrader:
             logger.error(f"Failed to close trade_analytics for {symbol} {position_side}: {e}", exc_info=True)
 
         strategy = position.get('strategy')
-        close_info_message = f"Стратегія: {strategy}" if strategy else None
-
         await self.event_bus.publish(Event(
             type=EventType.POSITION_CLOSED,
             data={
@@ -1089,224 +704,14 @@ class SimpleTrader:
                 'margin_usdt': margin_usdt,
                 'roe_percent': roe_percent,
                 'closed_by': closed_by,
-                # тип закриваючого ордера ('STOP_MARKET' | 'TAKE_PROFIT_MARKET' |
-                # 'MARKET') — по ньому RiskManager відрізняє закриття по стопу
-                'close_order_type': order_type,
+                # 'STOP_MARKET' | 'TAKE_PROFIT_MARKET' | 'MARKET' | None (ручне
+                # закриття з ACCOUNT_UPDATE) — по ньому RiskManager рахує серію стопів
+                'close_order_type': close_order_type,
                 'order_id': position.get('order_id'),
                 'entry_price': position.get('entry_price'),
                 'quantity': position.get('quantity'),
                 'leverage': position.get('leverage'),
                 'strategy': strategy,
-                'positions_info_message': close_info_message
+                'positions_info_message': f"Стратегія: {strategy}" if strategy else None,
             }
         ))
-
-    async def _handle_account_update(self, event: Event) -> None:
-        """Ловить ручні дії на біржі, які не пройшли через ORDER_TRADE_UPDATE обробник (safety net)"""
-        positions_data = event.data.get('a', {}).get('P', [])
-        logger.info(f"[WS] Publishing HANDLE_ACCOUNT_INFO_UPDATE event: {event}")
-        logger.info(f"[WS] Publishing HANDLE_ACCOUNT_INFO_UPDATE positions_data: {positions_data}")
-
-        for pos in positions_data:
-            symbol = pos.get('s')
-            position_side = pos.get('ps')
-            pa = float(pos.get('pa', 0))
-
-            if not symbol or not position_side:
-                continue
-
-            position_key = f"{symbol}_{position_side}"
-            existing = self.open_positions.get(position_key)
-
-            if pa != 0 and not existing:
-                # Позиція відкрита вручну на біржі — бот про неї не знав
-                manual_order_id = f"manual-{symbol}-{position_side}-{int(time.time())}"
-                position_data = {
-                    'order_id': manual_order_id,
-                    'symbol': symbol,
-                    'side': position_side,
-                    'entry_price': float(pos.get('ep', 0)),
-                    'quantity': abs(pa),
-                    'opened_by': 'user',
-                    'sl_order_id': None,
-                    'tp_order_ids': [],
-                    'sl_client_order_id': None,
-                    'tp_client_order_ids': [],
-                    'strategy': None,
-                    'realized_pnl_accum': 0.0,
-                    # Позиція відкрита вручну на біржі — бот не бачив entry-ордер
-                    # і ніколи не побачить його комісію (немає order_id, яким
-                    # можна зіставити ORDER_TRADE_UPDATE), тому commission_open
-                    # тут чесно лишається 0.0 назавжди, це не баг.
-                    'commission_open_accum': 0.0,
-                    'commission_close_accum': 0.0,
-                    'funding_fee_accum': 0.0,
-                }
-                self.open_positions[position_key] = position_data
-                logger.info(f"Manual position detected and tracked: {symbol} {position_side}")
-
-                # Зберігаємо позицію в БД
-                try:
-                    self.db.insert_position(
-                        order_id=manual_order_id,
-                        symbol=symbol,
-                        side=position_side,
-                        status='OPEN',
-                        metadata=json.dumps(position_data)
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to save manual position to DB: {e}", exc_info=True)
-
-                margin_usdt = self._calc_margin_usdt(position_data)
-
-                try:
-                    self.db.insert_trade_analytics(
-                        order_id=manual_order_id,
-                        symbol=symbol,
-                        side=position_side,
-                        opened_by='user',
-                        entry_price=position_data['entry_price'],
-                        quantity=position_data['quantity'],
-                        margin_usdt=margin_usdt,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to insert trade_analytics for manual {symbol} {position_side}: {e}", exc_info=True)
-
-                # Публікуємо подію POSITION_OPENED
-                await self.event_bus.publish(Event(
-                    type=EventType.POSITION_OPENED,
-                    data={
-                        'symbol': symbol,
-                        'side': position_side,
-                        'entry_price': float(pos.get('ep', 0)),
-                        'quantity': abs(pa),
-                        'leverage': 0,
-                        'stop_loss_price': None,
-                        'margin_usdt': margin_usdt,
-                        'positions_info_message': "Позицію відкрито вручну."
-                    }
-                ))
-
-            elif pa == 0 and existing:
-                if existing.get('opened_by') != 'user':
-                    # эта позиция бота — закрытие уже (или вот-вот) обработает
-                    # _handle_order_update по ORDER_TRADE_UPDATE, не дублируем
-                    logger.debug(
-                        f"Skipping account-update close for bot position {symbol} {position_side} "
-                        f"— expecting ORDER_TRADE_UPDATE to handle it"
-                    )
-                    return
-
-                # Позиція закрита на біржі
-                del self.open_positions[position_key]
-
-                logger.info(f"Position closed (detected via account update): {symbol} {position_side}")
-
-                entry_price = existing.get('entry_price')
-                quantity = existing.get('quantity')
-
-                # Те, що вже накопичено з попередніх часткових закриттів (TP/SL),
-                # які пройшли через ORDER_TRADE_UPDATE (_handle_order_update).
-                # Раніше ці значення ігнорувались і realized_pnl рахувався
-                # "з нуля" по цьому останньому закриттю — через це підсумковий
-                # PnL губив прибуток/збиток від попередніх часткових TP/SL
-                # закриттів. Тепер просто додаємо PnL останнього закриття
-                # до вже накопиченого.
-                already_accumulated_pnl = existing.get('realized_pnl_accum', 0.0)
-                commission_open = existing.get('commission_open_accum', 0.0)
-                commission_close = existing.get('commission_close_accum', existing.get('commission_accum', 0.0))
-                funding_fee = existing.get('funding_fee_accum', 0.0)
-
-                # 'cr' в ACCOUNT_UPDATE — це PnL САМЕ цього (останнього) закриття,
-                # яке не пройшло через ORDER_TRADE_UPDATE (напр. ручне закриття
-                # залишку позиції на біржі)
-                last_fill_pnl = float(pos.get('cr', 0) or 0)
-                realized_pnl = already_accumulated_pnl + last_fill_pnl
-
-                commission_total = commission_open + commission_close
-                net_pnl = self._calc_net_pnl(realized_pnl, commission_open, commission_close, funding_fee)
-                margin_usdt = self._calc_margin_usdt(existing)
-                try:
-                    roe_percent = self._calc_roe_percent(existing, realized_pnl)
-                except Exception as e:
-                    logger.error(f"Failed to calc ROE% for {symbol} {position_side}: {e}", exc_info=True)
-                    roe_percent = None
-
-                # close_price виводимо математично з entry_price/quantity/сукупного realized_pnl,
-                # а не з поточної ціни тікера (яка на момент запиту вже може відрізнятись
-                # від фактичної ціни виконання закриваючого ордера)
-                close_price = 0.0
-                if entry_price and quantity and quantity > 0:
-                    if position_side == 'LONG':
-                        close_price = entry_price + (realized_pnl / quantity)
-                    else:
-                        close_price = entry_price - (realized_pnl / quantity)
-                else:
-                    try:
-                        close_price = await self.exchange.get_ticker_price(symbol)
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch close_price ticker for {symbol}: {e}")
-
-                # Оновлюємо статус в БД
-                try:
-                    self.db.update_position_status(
-                        order_id=existing['order_id'],
-                        status='CLOSED',
-                        closed_at=datetime.utcnow(),
-                        close_price=close_price,
-                        realized_pnl=realized_pnl,
-                        roe_percent=roe_percent,
-                        commission_usdt=commission_total,
-                        commission_open=commission_open,
-                        commission_close=commission_close,
-                        funding_fee=funding_fee,
-                        net_pnl=net_pnl,
-                        margin_usdt=margin_usdt,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to update manual position status in DB: {e}", exc_info=True)
-
-                try:
-                    self.db.close_trade_analytics(
-                        order_id=existing['order_id'],
-                        close_price=close_price,
-                        realized_pnl=realized_pnl,
-                        commission_open=commission_open,
-                        commission_close=commission_close,
-                        funding_fee=funding_fee,
-                        net_pnl=net_pnl,
-                        roe_percent=roe_percent,
-                        margin_usdt=margin_usdt,
-                        closed_by=existing.get('opened_by', 'user'),
-                        close_reason='manual',
-                        quantity=existing.get('quantity'),
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to close trade_analytics (manual) for {symbol} {position_side}: {e}", exc_info=True)
-
-                strategy = existing.get('strategy')
-                close_info_message = f"Стратегія: {strategy}" if strategy else None
-
-                await self.event_bus.publish(Event(
-                    type=EventType.POSITION_CLOSED,
-                    data={
-                        'symbol': symbol,
-                        'side': position_side,
-                        'close_price': close_price,
-                        'realized_pnl': realized_pnl,
-                        'commission_usdt': commission_total,
-                        'commission_open': commission_open,
-                        'commission_close': commission_close,
-                        'funding_fee': funding_fee,
-                        'net_pnl': net_pnl,
-                        'margin_usdt': margin_usdt,
-                        'roe_percent': roe_percent,
-                        'closed_by': existing.get('opened_by', 'user'),
-                        'order_id': existing.get('order_id'),
-                        'entry_price': existing.get('entry_price'),
-                        'quantity': existing.get('quantity'),
-                        'leverage': existing.get('leverage'),
-                        'strategy': strategy,
-                        'positions_info_message': close_info_message
-                    }
-                ))

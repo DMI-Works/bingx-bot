@@ -50,7 +50,7 @@ class StrategyManager:
                 self.logger.info(f"[OK] {name} enabled (params from DB)")
             else:
                 strategy.disable()
-                self.logger.info(f"[SKIP] {name} disabled (toggle in Telegram to enable)")
+                self.logger.info(f"[SKIP] {name} disabled (enable it in the mini app)")
 
         return list(self.instances.values())
 

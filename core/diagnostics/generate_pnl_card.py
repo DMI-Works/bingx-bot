@@ -1,59 +1,25 @@
 import io
-import os
 from datetime import datetime
 from typing import Optional
 
 import qrcode
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw
 
-
-FONT_PATH = os.path.join(os.path.dirname(__file__), "Inter-Regular.ttf")
-
-CARD_W = 720
-CARD_H = 780
-
-BG_COLOR = (14, 15, 18)
-CARD_RADIUS = 28
-
-TEXT_MUTED = (150, 154, 163)
-TEXT_WHITE = (255, 255, 255)
-RED = (246, 70, 93)
-GREEN = (14, 203, 129)
-BLUE = (59, 130, 246)
-DIVIDER = (40, 42, 48)
-LOGO_BLOCK_BG = (24, 26, 31)
-
-
-def _font(weight: int, size: int) -> ImageFont.FreeTypeFont:
-    f = ImageFont.truetype(FONT_PATH, size)
-    try:
-        f.set_variation_by_axes([weight])
-    except Exception:
-        pass
-    return f
-
-
-def _paste_logo_area(card: Image.Image, logo_path: Optional[str], box, crop_center=(0.5, 0.5)) -> None:
-    x0, y0, x1, y1 = box
-    w, h = x1 - x0, y1 - y0
-
-    if not logo_path or not os.path.exists(logo_path):
-        placeholder = Image.new("RGB", (w, h), LOGO_BLOCK_BG)
-        card.paste(placeholder, (x0, y0))
-        return
-
-    logo = Image.open(logo_path).convert("RGBA")
-    fitted = ImageOps.fit(logo, (w, h), method=Image.LANCZOS, centering=crop_center)
-
-    mask_layer = Image.new("RGBA", card.size, (0, 0, 0, 0))
-    mask_draw = ImageDraw.Draw(mask_layer)
-    mask_draw.rounded_rectangle(box, radius=18, fill=(255, 255, 255, 255))
-
-    layer = Image.new("RGBA", card.size, (0, 0, 0, 0))
-    layer.paste(fitted, (x0, y0))
-
-    card.paste(layer, (0, 0), mask_layer)
-
+from ..common.formatting import price_decimals as default_price_decimals
+from .card_common import (
+    BLUE,
+    CARD_H,
+    CARD_W,
+    DIVIDER,
+    GREEN,
+    RED,
+    TEXT_MUTED,
+    TEXT_WHITE,
+    font,
+    new_card,
+    paste_logo_area,
+    to_png_buffer,
+)
 
 def _draw_direction_arrow(
     card: Image.Image, x: float, cy: float, height: int, up: bool, color: tuple
@@ -84,18 +50,6 @@ def _draw_direction_arrow(
     return w
 
 
-def _price_decimals(*values: float) -> int:
-    ref = 0.0
-    for v in values:
-        if v:
-            ref = abs(v)
-            break
-    if ref >= 1:
-        return 4
-    elif ref >= 0.01:
-        return 6
-    return 8
-
 
 def generate_pnl_card(
     *,
@@ -122,7 +76,7 @@ def generate_pnl_card(
     ts = closed_at or datetime.now()
 
     if price_decimals is None:
-        price_decimals = _price_decimals(entry_price or 0.0, close_price or 0.0)
+        price_decimals = default_price_decimals(entry_price or 0.0, close_price or 0.0)
 
     if is_opened:
         accent = BLUE
@@ -133,24 +87,20 @@ def generate_pnl_card(
     side_label = "LONG" if is_long else "SHORT"
     side_color = GREEN if is_long else RED
 
-    card = Image.new("RGB", (CARD_W, CARD_H), (0, 0, 0))
-    mask = Image.new("L", (CARD_W, CARD_H), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, CARD_W, CARD_H], radius=CARD_RADIUS, fill=255)
-    bg = Image.new("RGB", (CARD_W, CARD_H), BG_COLOR)
-    card.paste(bg, (0, 0), mask)
+    card = new_card(CARD_H)
 
     draw = ImageDraw.Draw(card)
 
     pad = 40
     y = 36
 
-    f_label = _font(500, 22)
+    f_label = font(500, 22)
     top_label = "Позицію відкрито" if is_opened else "Позицію закрито"
     draw.text((pad, y), top_label, font=f_label, fill=TEXT_MUTED)
     y += 40
 
-    f_title = _font(800, 30)
-    f_side = _font(700, 30)
+    f_title = font(800, 30)
+    f_side = font(700, 30)
 
     title_x = pad
     symbol_disp = symbol.upper().replace("-", "")
@@ -176,18 +126,18 @@ def generate_pnl_card(
     y += 70
 
     logo_box = (pad, y, CARD_W - pad, y + 220)
-    _paste_logo_area(card, logo_path, logo_box, crop_center=logo_crop_center)
+    paste_logo_area(card, logo_path, logo_box, crop_center=logo_crop_center)
     y += 220 + 30
 
-    f_kv_label = _font(500, 20)
-    f_kv_val = _font(600, 20)
+    f_kv_label = font(500, 20)
+    f_kv_val = font(600, 20)
 
     if is_opened:
-        f_big_label = _font(500, 20)
+        f_big_label = font(500, 20)
         draw.text((pad, y), "МАРЖА", font=f_big_label, fill=TEXT_MUTED)
         y += 32
 
-        f_big = _font(800, 56)
+        f_big = font(800, 56)
         margin_text = f"${margin_usdt:,.2f}" if margin_usdt is not None else "—"
         draw.text((pad, y), margin_text, font=f_big, fill=accent)
         y += 78
@@ -210,17 +160,17 @@ def generate_pnl_card(
 
         y += 12
     else:
-        f_roi_label = _font(500, 20)
+        f_roi_label = font(500, 20)
         draw.text((pad, y), "ROI", font=f_roi_label, fill=TEXT_MUTED)
         y += 32
 
-        f_roi = _font(800, 56)
+        f_roi = font(800, 56)
         roi_text = f"{(roe_percent or 0.0):+.2f}%"
         draw.text((pad, y), roi_text, font=f_roi, fill=accent)
 
         if net_pnl is not None:
             roi_w = draw.textlength(roi_text, font=f_roi)
-            f_pnl = _font(700, 28)
+            f_pnl = font(700, 28)
             pnl_text = f"{net_pnl:+.2f} USDT"
             draw.text((pad + roi_w + 16, y + 22), pnl_text, font=f_pnl, fill=accent)
 
@@ -242,19 +192,19 @@ def generate_pnl_card(
     avatar_d = 44
     avatar_box = (pad, y, pad + avatar_d, y + avatar_d)
     draw.ellipse(avatar_box, fill=(45, 48, 56))
-    f_avatar_glyph = _font(700, 20)
+    f_avatar_glyph = font(700, 20)
     glyph = "B"
     gw = draw.textlength(glyph, font=f_avatar_glyph)
     draw.text((pad + avatar_d / 2 - gw / 2, y + 10), glyph, font=f_avatar_glyph, fill=TEXT_WHITE)
 
-    f_acc = _font(600, 18)
-    f_date = _font(400, 16)
+    f_acc = font(600, 18)
+    f_date = font(400, 16)
     draw.text((pad + avatar_d + 14, y + 2), account_label, font=f_acc, fill=TEXT_WHITE)
     draw.text((pad + avatar_d + 14, y + 24), ts.strftime("%m-%d %H:%M"), font=f_date, fill=TEXT_MUTED)
 
     if referral_code:
-        f_ref_label = _font(400, 15)
-        f_ref_val = _font(700, 20)
+        f_ref_label = font(400, 15)
+        f_ref_val = font(700, 20)
 
         qr_size = 64
         qr_x = CARD_W - pad - qr_size
@@ -273,49 +223,4 @@ def generate_pnl_card(
         draw.text((text_right_x - lw, y), ref_label, font=f_ref_label, fill=TEXT_MUTED)
         draw.text((text_right_x - vw, y + 20), ref_val, font=f_ref_val, fill=TEXT_WHITE)
 
-    if output_path:
-        card.save(output_path, "PNG")
-
-    buffer = io.BytesIO()
-    card.save(buffer, "PNG")
-    buffer.seek(0)
-    buffer.name = f"{symbol.replace('-', '')}_{card_type}.png"
-    return buffer
-
-
-# if __name__ == "__main__":
-#     buf_closed = generate_pnl_card(
-#         symbol="VINE-USDT",
-#         side="SHORT",
-#         leverage=20,
-#         card_type="closed",
-#         roe_percent=-2.36,
-#         net_pnl=-1.18,
-#         entry_price=0.008138,
-#         close_price=0.008148,
-#         account_label="mi***s@gmail...",
-#         closed_at=datetime(2026, 8, 7, 23, 13),
-#         referral_code="C2E79H",
-#         logo_path="/home/claude/user_logo.jpg",
-#         logo_crop_center=(0.5, 0.28),
-#         output_path="/home/claude/pnl_card_closed_preview.png",
-#     )
-#     print(f"closed: {len(buf_closed.getvalue())} bytes")
-
-#     buf_opened = generate_pnl_card(
-#         symbol="VINE-USDT",
-#         side="SHORT",
-#         leverage=20,
-#         card_type="opened",
-#         entry_price=0.008138,
-#         margin_usdt=4.99,
-#         stop_loss_price=0.008320,
-#         take_profit_summary="2 рівні",
-#         account_label="mi***s@gmail...",
-#         closed_at=datetime(2026, 8, 7, 23, 13),
-#         referral_code="C2E79H",
-#         logo_path="/home/claude/user_logo.jpg",
-#         logo_crop_center=(0.5, 0.28),
-#         output_path="/home/claude/pnl_card_opened_preview.png",
-#     )
-#     print(f"opened: {len(buf_opened.getvalue())} bytes")
+    return to_png_buffer(card, f"{symbol.replace('-', '')}_{card_type}.png", output_path)

@@ -1,6 +1,6 @@
 import logging
 import json
-from typing import Any, Optional
+from typing import Any
 
 from ..database import Database
 from ..events import EventBus, Event, EventType
@@ -8,43 +8,56 @@ from ..events import EventBus, Event, EventType
 
 logger = logging.getLogger(__name__)
 
+TRADING_ENABLED_KEY = 'trading.enabled'
+WHITELIST_KEY = 'trading.whitelist_symbols'
+BLACKLIST_KEY = 'trading.blacklist_symbols'
+EMERGENCY_KEY = 'emergency'
+
+_LEGACY_BOOLS = {'True': True, 'False': False}
+
 
 class SettingsManager:
+    """Runtime-налаштування в колекції settings (значення — JSON-рядки) з
+    кешем у пам'яті. Кожна зміна публікує SETTINGS_CHANGED."""
+
     def __init__(self, db: Database, event_bus: EventBus):
         self.db = db
         self.event_bus = event_bus
         self.cache = {}
-        self._load_settings()
         logger.info("SettingsManager initialized")
-
-    def _load_settings(self) -> None:
-        logger.info("Loading settings from database")
 
     def get(self, key: str, default: Any = None) -> Any:
         if key in self.cache:
             return self.cache[key]
 
         value = self.db.get_setting(key)
-
         if value is None:
             return default
 
+        parsed_value = self._decode(value)
+        self.cache[key] = parsed_value
+        return parsed_value
+
+    @staticmethod
+    def _decode(raw: str) -> Any:
+        # Раніше bool писався як str(value) -> "True"/"False", а json.loads їх
+        # не розуміє: після рестарту поверталась НЕпорожня строка "False",
+        # тобто вимкнений kill-switch читався як увімкнений. Старі записи
+        # мапимо явно; нові пишуться через json.dumps ("true"/"false").
+        if raw in _LEGACY_BOOLS:
+            return _LEGACY_BOOLS[raw]
         try:
-            parsed_value = json.loads(value)
-            self.cache[key] = parsed_value
-            return parsed_value
+            return json.loads(raw)
         except json.JSONDecodeError:
-            self.cache[key] = value
-            return value
+            return raw
 
     async def set(self, key: str, value: Any) -> None:
         logger.info(f"Setting updated: {key} = {value}")
 
-        if isinstance(value, (dict, list)):
+        try:
             value_str = json.dumps(value)
-        else:
+        except (TypeError, ValueError):
             value_str = str(value)
-
         self.db.save_setting(key, value_str)
         self.cache[key] = value
 
@@ -54,92 +67,52 @@ class SettingsManager:
             source="SettingsManager"
         ))
 
+    # ---------- глобальний kill-switch ----------
+
     def get_trading_enabled(self) -> bool:
-        return self.get('trading.enabled', False)
+        return self.get(TRADING_ENABLED_KEY, False)
 
     async def set_trading_enabled(self, enabled: bool) -> None:
-        await self.set('trading.enabled', enabled)
+        await self.set(TRADING_ENABLED_KEY, enabled)
 
-    def get_max_open_positions(self) -> int:
-        return self.get('risk.max_open_positions', 3)
+    # ---------- whitelist / blacklist монет (мініапп «Монети») ----------
 
-    async def set_max_open_positions(self, value: int) -> None:
-        await self.set('risk.max_open_positions', value)
+    async def _add_to_list(self, key: str, symbol: str) -> None:
+        symbols = list(self.get(key, []))
+        if symbol not in symbols:
+            await self.set(key, symbols + [symbol])
+
+    async def _remove_from_list(self, key: str, symbol: str) -> None:
+        symbols = list(self.get(key, []))
+        if symbol in symbols:
+            symbols.remove(symbol)
+            await self.set(key, symbols)
 
     def get_whitelist_symbols(self) -> list:
-        return self.get('trading.whitelist_symbols', [])
-
-    async def set_whitelist_symbols(self, symbols: list) -> None:
-        await self.set('trading.whitelist_symbols', symbols)
+        return self.get(WHITELIST_KEY, [])
 
     async def add_whitelist_symbol(self, symbol: str) -> None:
-        symbols = self.get_whitelist_symbols()
-        if symbol not in symbols:
-            symbols.append(symbol)
-            await self.set_whitelist_symbols(symbols)
+        await self._add_to_list(WHITELIST_KEY, symbol)
 
     async def remove_whitelist_symbol(self, symbol: str) -> None:
-        symbols = self.get_whitelist_symbols()
-        if symbol in symbols:
-            symbols.remove(symbol)
-            await self.set_whitelist_symbols(symbols)
+        await self._remove_from_list(WHITELIST_KEY, symbol)
 
     def get_blacklist_symbols(self) -> list:
-        return self.get('trading.blacklist_symbols', [])
-
-    async def set_blacklist_symbols(self, symbols: list) -> None:
-        await self.set('trading.blacklist_symbols', symbols)
+        return self.get(BLACKLIST_KEY, [])
 
     async def add_blacklist_symbol(self, symbol: str) -> None:
-        symbols = self.get_blacklist_symbols()
-        if symbol not in symbols:
-            symbols.append(symbol)
-            await self.set_blacklist_symbols(symbols)
+        await self._add_to_list(BLACKLIST_KEY, symbol)
 
     async def remove_blacklist_symbol(self, symbol: str) -> None:
-        symbols = self.get_blacklist_symbols()
-        if symbol in symbols:
-            symbols.remove(symbol)
-            await self.set_blacklist_symbols(symbols)
+        await self._remove_from_list(BLACKLIST_KEY, symbol)
 
-    def get_position_size_config(self) -> dict:
-        return self.get('trading.position_size', {'mode': 'fixed_usd', 'value': 100})
-
-    async def set_position_size_config(self, config: dict) -> None:
-        await self.set('trading.position_size', config)
-
-    def get_stop_loss_config(self) -> dict:
-        return self.get('trading.stop_loss', {'mode': 'fixed_percent', 'value': 2.0})
-
-    async def set_stop_loss_config(self, config: dict) -> None:
-        await self.set('trading.stop_loss', config)
-
-    def get_take_profit_config(self) -> dict:
-        return self.get('trading.take_profit', {
-            'enabled': True,
-            'levels': [
-                {'percent': 3.0, 'close_percent': 50},
-                {'percent': 5.0, 'close_percent': 50}
-            ]
-        })
-
-    async def set_take_profit_config(self, config: dict) -> None:
-        await self.set('trading.take_profit', config)
-
-    def get_leverage(self, symbol: str) -> int:
-        leverage_config = self.get('trading.leverage_by_symbol', {})
-        return leverage_config.get(symbol, self.get('trading.default_leverage', 10))
-
-    async def set_leverage(self, symbol: str, leverage: int) -> None:
-        leverage_config = self.get('trading.leverage_by_symbol', {})
-        leverage_config[symbol] = leverage
-        await self.set('trading.leverage_by_symbol', leverage_config)
+    # ---------- аварійна зупинка (Telegram /emergency) ----------
 
     def get_emergency_stop_status(self) -> dict:
-        return self.get('emergency', {'active': False, 'close_positions': False})
+        return self.get(EMERGENCY_KEY, {'active': False, 'close_positions': False})
 
     async def activate_emergency_stop(self, close_positions: bool = False) -> None:
-        await self.set('emergency', {'active': True, 'close_positions': close_positions})
+        await self.set(EMERGENCY_KEY, {'active': True, 'close_positions': close_positions})
 
         await self.event_bus.publish(Event(
             type=EventType.EMERGENCY_STOP_ACTIVATED,
@@ -148,15 +121,10 @@ class SettingsManager:
         ))
 
     async def deactivate_emergency_stop(self) -> None:
-        await self.set('emergency', {'active': False, 'close_positions': False})
+        await self.set(EMERGENCY_KEY, {'active': False, 'close_positions': False})
 
         await self.event_bus.publish(Event(
             type=EventType.EMERGENCY_STOP_DEACTIVATED,
             data={},
             source="SettingsManager"
         ))
-
-    def reload(self) -> None:
-        self.cache.clear()
-        self._load_settings()
-        logger.info("Settings reloaded")

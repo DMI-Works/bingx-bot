@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -34,8 +35,10 @@ def setup_logging(config: ConfigLoader) -> None:
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # File handler with UTF-8 encoding
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    # File handler with UTF-8 encoding, rotated by logging.max_bytes / backup_count
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8'
+    )
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
     # Console handler with UTF-8 encoding
@@ -154,10 +157,10 @@ async def main():
     logger.info("[OK] Symbol Selector initialized (signal-activity-aware rotation, notifies Telegram)")
 
     orderbook_config = config.get('trading.orderbook', {})
-    orderbook_analyzer = OrderBookAnalyzer(event_bus, orderbook_config)
+    OrderBookAnalyzer(event_bus, orderbook_config)  # живе через підписки на EventBus
     logger.info(
         "[OK] OrderBookAnalyzer initialized (detect+log+publish; "
-        "trading happens only if WallBreakoutStrategy is enabled via Telegram /settings)"
+        "trading happens only if WallBreakoutStrategy is enabled in the mini app)"
     )
 
 

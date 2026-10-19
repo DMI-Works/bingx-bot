@@ -15,9 +15,8 @@ import unittest.mock
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
 
 from core.analytics import ExcursionTracker  # noqa: E402
-from core.database.database import _entry_derived_fields, _exit_derived_fields  # noqa: E402
+from core.database.analytics_fields import entry_derived_fields, exit_derived_fields  # noqa: E402
 from core.events import Event, EventBus, EventType  # noqa: E402
-from core.exchange.bingx_client import BingXAPIError  # noqa: E402
 from core.risk import RiskManager, TrailingStopManager  # noqa: E402
 from core.strategies.indicators import (  # noqa: E402
     atr, ema, interval_to_ms, sma, supertrend,
@@ -604,7 +603,7 @@ class TestRiskSizingProtections(unittest.IsolatedAsyncioTestCase):
 class TestAnalyticsDerivedFields(unittest.TestCase):
     def test_entry_fields_for_oversized_tight_stop_trade(self):
         from datetime import datetime
-        out = _entry_derived_fields(
+        out = entry_derived_fields(
             side='SHORT', entry_price=1.318020, quantity=681_275.84, leverage=10, margin_usdt=89_793.5,
             stop_loss_price_initial=1.319423, reference_price=1.318710, equity_at_entry=95_600.0,
             opened_at=datetime(2026, 10, 8, 9, 15, 2),  # четвер
@@ -624,9 +623,9 @@ class TestAnalyticsDerivedFields(unittest.TestCase):
         now = datetime(2026, 1, 1)
         common = dict(quantity=1, leverage=10, margin_usdt=None, stop_loss_price_initial=None,
                       equity_at_entry=None, opened_at=now)
-        long_worse = _entry_derived_fields(side='LONG', entry_price=101, reference_price=100, **common)
-        short_worse = _entry_derived_fields(side='SHORT', entry_price=99, reference_price=100, **common)
-        long_better = _entry_derived_fields(side='LONG', entry_price=99, reference_price=100, **common)
+        long_worse = entry_derived_fields(side='LONG', entry_price=101, reference_price=100, **common)
+        short_worse = entry_derived_fields(side='SHORT', entry_price=99, reference_price=100, **common)
+        long_better = entry_derived_fields(side='LONG', entry_price=99, reference_price=100, **common)
         self.assertGreater(long_worse['entry_slippage_pct'], 0)
         self.assertGreater(short_worse['entry_slippage_pct'], 0)
         self.assertLess(long_better['entry_slippage_pct'], 0)
@@ -634,7 +633,7 @@ class TestAnalyticsDerivedFields(unittest.TestCase):
     def test_exit_fields_stop_slippage_and_r_multiple(self):
         row = {'side': 'LONG', 'entry_price': 100.0, 'stop_loss_price_initial': 98.0,
                'planned_risk_usdt': 1000.0, 'notional_usdt': 50_000.0, 'sl_moves': []}
-        out = _exit_derived_fields(row, close_price=96.0, net_pnl=-3000.0,
+        out = exit_derived_fields(row, close_price=96.0, net_pnl=-3000.0,
                                    commission_open=-25.0, commission_close=-25.0, close_reason='stop_loss')
         self.assertAlmostEqual(out['stop_slippage_pct'], 2.0)      # закрилось на 2% нижче стопу
         self.assertAlmostEqual(out['r_multiple'], -3.0)
@@ -646,7 +645,7 @@ class TestAnalyticsDerivedFields(unittest.TestCase):
     def test_exit_fields_use_last_moved_stop_and_short_side(self):
         row = {'side': 'SHORT', 'entry_price': 100.0, 'stop_loss_price_initial': 103.0,
                'planned_risk_usdt': 300.0, 'sl_moves': [{'new_stop_price': 99.9}, {'new_stop_price': 99.0}]}
-        out = _exit_derived_fields(row, close_price=99.5, net_pnl=-10.0,
+        out = exit_derived_fields(row, close_price=99.5, net_pnl=-10.0,
                                    commission_open=None, commission_close=None, close_reason='stop_loss')
         self.assertEqual(out['final_stop_price'], 99.0)
         self.assertEqual(out['sl_moves_count'], 2)
@@ -654,7 +653,7 @@ class TestAnalyticsDerivedFields(unittest.TestCase):
         self.assertNotIn('commission_pct_of_notional', out)
 
     def test_exit_fields_empty_row_is_safe(self):
-        self.assertEqual(_exit_derived_fields(None, 1.0, 1.0, 0.0, 0.0, 'manual'), {})
+        self.assertEqual(exit_derived_fields(None, 1.0, 1.0, 0.0, 0.0, 'manual'), {})
 
 
 class FakeExcursionDb:

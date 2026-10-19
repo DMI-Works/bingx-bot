@@ -10,26 +10,18 @@
 тест навмисно написаний на stdlib unittest, щоб не додавати нову залежність
 лише заради цього).
 
-ПРИМІТКА про MONGO_URI: core/database/database.py валідує змінну оточення
-MONGO_URI вже на рівні імпорту модуля (raise RuntimeError, якщо не задана).
-SimpleTrader імпортує Database транзитивно (через core.risk -> RiskManager),
-тож для самого імпорту core.trading.simple_trader потрібен хоч якийсь
-MONGO_URI в оточенні — реального з'єднання з Mongo тест НЕ відкриває
-(жоден метод Database не викликається, перевіряється лише статична
-математика _calc_net_pnl).
+Формула живе в core/common/position_math.py (calc_net_pnl) — чистий модуль
+без залежності від БД, тож MONGO_URI для цього тесту не потрібен.
 """
-import os
 import unittest
 
-os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
-
-from core.trading.simple_trader import SimpleTrader  # noqa: E402
+from core.common.position_math import calc_net_pnl
 
 
 class TestNetPnlFormula(unittest.TestCase):
     def test_acceptance_example_from_tz(self):
         """Приклад із ТЗ: реальна угода зі звірки бот/біржа."""
-        net_pnl = SimpleTrader._calc_net_pnl(
+        net_pnl = calc_net_pnl(
             realized_pnl=0.384118,
             commission_open=-0.0498,
             commission_close=-0.0498,
@@ -45,7 +37,7 @@ class TestNetPnlFormula(unittest.TestCase):
     def test_sign_convention_fees_are_negative(self):
         """Комісії та funding — від'ємні списання, формула додає їх (а не
         віднімає), тож збиткова по комісії угода коректно зменшує net_pnl."""
-        net_pnl = SimpleTrader._calc_net_pnl(
+        net_pnl = calc_net_pnl(
             realized_pnl=1.0,
             commission_open=-0.05,
             commission_close=-0.05,
@@ -56,7 +48,7 @@ class TestNetPnlFormula(unittest.TestCase):
     def test_positive_funding_increases_net_pnl(self):
         """Funding може бути і нарахуванням (позитивним) для шорт-позицій
         при від'ємній ставці фінансування — формула має це коректно додати."""
-        net_pnl = SimpleTrader._calc_net_pnl(
+        net_pnl = calc_net_pnl(
             realized_pnl=0.0,
             commission_open=-0.05,
             commission_close=-0.05,
@@ -67,7 +59,7 @@ class TestNetPnlFormula(unittest.TestCase):
     def test_missing_values_default_to_zero(self):
         """None на будь-якому з полів (напр. ще не заповнений funding_fee
         для старих позицій) не повинен ламати розрахунок — трактується як 0."""
-        net_pnl = SimpleTrader._calc_net_pnl(
+        net_pnl = calc_net_pnl(
             realized_pnl=0.5,
             commission_open=None,
             commission_close=-0.05,
@@ -76,7 +68,7 @@ class TestNetPnlFormula(unittest.TestCase):
         self.assertAlmostEqual(net_pnl, 0.45, places=4)
 
     def test_zero_commissions_net_pnl_equals_realized_pnl(self):
-        net_pnl = SimpleTrader._calc_net_pnl(realized_pnl=1.2345)
+        net_pnl = calc_net_pnl(realized_pnl=1.2345)
         self.assertAlmostEqual(net_pnl, 1.2345, places=4)
 
 

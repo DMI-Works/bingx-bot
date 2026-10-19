@@ -6,9 +6,11 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppI
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from typing import Optional
 
+from ..common.market_data import extract_account_balance, to_float
 from ..events import EventBus, Event, EventType
 from ..state import SettingsManager
 from ..diagnostics import generate_pnl_card
+from . import messages
 
 
 LOCAL_TZ = ZoneInfo("Europe/Kyiv")
@@ -18,12 +20,10 @@ logger = logging.getLogger(__name__)
 
 class TelegramBot:
     """
-    Панель бота звужена навмисно: єдина точка керування угодами тепер —
-    мініапп (кнопка "Профіль"). Тут лишається тільки те, що мусить бути
-    доступне миттєво з чату навіть якщо мініапп з якоїсь причини не
-    відкривається — аварійна зупинка — та проактивні алерти (відкриття/
-    закриття позицій, SL/TP, помилки), які продовжують прилітати самі,
-    без запиту користувача.
+    Панель бота звужена навмисно: єдина точка керування угодами — мініапп
+    (кнопка "Профіль"). Тут лишається те, що мусить бути доступне миттєво з
+    чату, навіть якщо мініапп не відкривається, — аварійна зупинка — та
+    проактивні алерти (відкриття/закриття позицій, SL/TP, помилки).
     """
 
     def __init__(
@@ -33,7 +33,7 @@ class TelegramBot:
         event_bus: EventBus,
         settings_manager: SettingsManager,
         exchange_client=None,
-        db=None,  
+        db=None,
     ):
         self.webapp_url = os.getenv('WEBAPP_URL', '')
         self.token = token
@@ -50,15 +50,19 @@ class TelegramBot:
         logger.info("TelegramBot initialized")
 
     def _subscribe_to_events(self) -> None:
-        self.event_bus.subscribe(EventType.POSITION_OPENED, self._on_position_opened)
-        self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
-        self.event_bus.subscribe(EventType.STOP_LOSS_TRIGGERED, self._on_stop_loss_triggered)
-        self.event_bus.subscribe(EventType.STOP_LOSS_MOVED, self._on_stop_loss_moved)
-        self.event_bus.subscribe(EventType.TAKE_PROFIT_TRIGGERED, self._on_take_profit_triggered)
-        self.event_bus.subscribe(EventType.ERROR, self._on_error)
-        self.event_bus.subscribe(EventType.CRITICAL_ERROR, self._on_critical_error)
-        self.event_bus.subscribe(EventType.SYMBOLS_ROTATED, self._on_symbols_rotated)
-        self.event_bus.subscribe(EventType.SYMBOL_BLACKLISTED, self._on_symbol_blacklisted)
+        handlers = {
+            EventType.POSITION_OPENED: self._on_position_opened,
+            EventType.POSITION_CLOSED: self._on_position_closed,
+            EventType.STOP_LOSS_TRIGGERED: self._on_stop_loss_triggered,
+            EventType.STOP_LOSS_MOVED: self._on_stop_loss_moved,
+            EventType.TAKE_PROFIT_TRIGGERED: self._on_take_profit_triggered,
+            EventType.ERROR: self._on_error,
+            EventType.CRITICAL_ERROR: self._on_critical_error,
+            EventType.SYMBOLS_ROTATED: self._on_symbols_rotated,
+            EventType.SYMBOL_BLACKLISTED: self._on_symbol_blacklisted,
+        }
+        for event_type, handler in handlers.items():
+            self.event_bus.subscribe(event_type, handler)
 
     async def start(self) -> None:
         self.application = Application.builder().token(self.token).build()
@@ -87,10 +91,17 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Failed to send Telegram message: {e}")
 
+    async def _send_photo(self, photo, caption: str) -> None:
+        await self.application.bot.send_photo(
+            chat_id=self.chat_id,
+            photo=photo,
+            caption=caption,
+            parse_mode='HTML'
+        )
+
     async def _reply(self, update: Update, text: str, **kwargs):
         if update.message:
             return await update.message.reply_text(text, **kwargs)
-
         if update.callback_query:
             return await update.callback_query.message.reply_text(text, **kwargs)
 
@@ -109,8 +120,7 @@ class TelegramBot:
         keyboard.append([InlineKeyboardButton("💾 Експорт бази", callback_data="export_db")])
         keyboard.append([InlineKeyboardButton("🚨 Аварійна зупинка", callback_data="emergency")])
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await self._reply(update, "Панель керування торговим ботом", reply_markup=reply_markup)
+        await self._reply(update, "Панель керування торговим ботом", reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def _cmd_emergency(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard = [
@@ -118,9 +128,7 @@ class TelegramBot:
             [InlineKeyboardButton("🚨 Зупинити і закрити позиції", callback_data="emergency_stop_close")],
             [InlineKeyboardButton("❌ Скасувати", callback_data="cancel")]
         ]
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await self._reply(update, "⚠️ Аварійна зупинка - Виберіть дію:", reply_markup=reply_markup)
+        await self._reply(update, "⚠️ Аварійна зупинка - Виберіть дію:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -144,14 +152,12 @@ class TelegramBot:
             await query.edit_message_text("🚨 Аварійна зупинка активована - Закриваємо всі позиції")
 
     async def _cmd_export_db(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Відправляє поточний файл SQLite-бази як документ у чат — швидкий
-        ручний бекап без доступу до сервера. Було прибрано під час
-        рефакторингу панелі під мініапп, повернено за запитом."""
-        if self.db is None:
-            await self._reply(update, "❌ База даних недоступна цьому боту")
+        """Відправляє файл бази як документ у чат. Працювало лише для SQLite:
+        у MongoDB-версії файлу бази немає (db_path відсутній)."""
+        db_path = getattr(self.db, 'db_path', None)
+        if not db_path:
+            await self._reply(update, "❌ Експорт файлу бази недоступний: дані зберігаються в MongoDB")
             return
-
-        db_path = self.db.db_path
 
         try:
             if not os.path.exists(db_path):
@@ -160,7 +166,6 @@ class TelegramBot:
 
             file_size = os.path.getsize(db_path)
             max_size = 50 * 1024 * 1024  # ліміт Telegram Bot API — 50 МБ
-
             if file_size > max_size:
                 await self._reply(
                     update,
@@ -186,29 +191,6 @@ class TelegramBot:
 
     async def _on_position_opened(self, event: Event) -> None:
         data = event.data
-
-        tp_levels = data.get('take_profit_levels') or []
-
-        lines = ["✅ <b>Позицію відкрито</b>", ""]
-
-        if tp_levels:
-            lines.append("Тейк:")
-            for i, tp in enumerate(tp_levels, start=1):
-                prefix = "└" if i == len(tp_levels) else "  ├"
-                lines.append(f"{prefix} {i}: 💰{tp['price']:.6f} ({tp.get('close_percent', 0)}%)")
-
-        if data.get('stop_loss_price'):
-            lines.append(f"Стоп: ${data['stop_loss_price']:.6f}")
-
-        lines.append("")
-        lines.append(f"[INFO]: {data.get('positions_info_message', 'N/A')}")
-
-        text = "\n".join(lines)
-
-        tp_summary = f"{len(tp_levels)} рівні" if len(tp_levels) > 1 else (
-            f"{tp_levels[0]['price']:.6f}" if tp_levels else None
-        )
-
         photo_buf = generate_pnl_card(
             symbol=data.get('symbol', 'N/A'),
             side=data.get('side', 'N/A'),
@@ -217,217 +199,73 @@ class TelegramBot:
             entry_price=data.get('entry_price') or 0.0,
             margin_usdt=data.get('margin_usdt'),
             stop_loss_price=data.get('stop_loss_price'),
-            take_profit_summary=tp_summary,
+            take_profit_summary=messages.take_profit_summary(data.get('take_profit_levels')),
             account_label="User Account",
             closed_at=datetime.now(LOCAL_TZ),
             logo_crop_center=(0.5, 0.28),
         )
-
-        await self.application.bot.send_photo(
-            chat_id=self.chat_id,
-            photo=photo_buf,
-            caption=text,
-            parse_mode='HTML'
-        )
+        await self._send_photo(photo_buf, messages.position_opened_caption(data))
 
     async def _on_position_closed(self, event: Event) -> None:
         data = event.data
-
-        symbol = data.get('symbol', 'N/A')
-        side = data.get('side', 'N/A')
-        leverage = data.get('leverage') or 1
-        roe = data.get('roe_percent') or 0.0
-        entry_price = data.get('entry_price') or 0.0
-        close_price = data.get('close_price') or 0.0
-        net_pnl = data.get('net_pnl')
-
-        caption = f"[INFO]: {data.get('positions_info_message', 'N/A')}"
-
         photo_buf = generate_pnl_card(
-            symbol=symbol,
-            side=side,
-            leverage=leverage,
+            symbol=data.get('symbol', 'N/A'),
+            side=data.get('side', 'N/A'),
+            leverage=data.get('leverage') or 1,
             card_type="closed",
-            roe_percent=roe,
-            net_pnl=net_pnl,
-            entry_price=entry_price,
-            close_price=close_price,
+            roe_percent=data.get('roe_percent') or 0.0,
+            net_pnl=data.get('net_pnl'),
+            entry_price=data.get('entry_price') or 0.0,
+            close_price=data.get('close_price') or 0.0,
             account_label="N/A",
             closed_at=datetime.now(LOCAL_TZ),
             logo_crop_center=(0.5, 0.28),
         )
-
-        await self.application.bot.send_photo(
-            chat_id=self.chat_id,
-            photo=photo_buf,
-            caption=caption,
-            parse_mode='HTML'
-        )
+        await self._send_photo(photo_buf, messages.info_caption(data))
 
     async def _on_stop_loss_triggered(self, event: Event) -> None:
-        text = f"""
-🛑 <b>Спрацював стоп-лосс</b>
+        await self.send_message(messages.stop_loss_triggered(event.data))
 
-Символ: {event.data.get('symbol')}
-Ціна: ${event.data.get('price', 0):.6f}
-[INFO]: {event.data.get('positions_info_message')}
-"""
+    async def _on_take_profit_triggered(self, event: Event) -> None:
+        await self.send_message(messages.take_profit_triggered(event.data))
+
+    async def _on_stop_loss_moved(self, event: Event) -> None:
+        text = messages.stop_loss_moved(event.data)
+        if text is None:
+            logger.warning(f"STOP_LOSS_MOVED event missing price data: {event.data}")
+            text = messages.stop_loss_moved_short(event.data)
         await self.send_message(text)
 
     async def _on_symbol_blacklisted(self, event: Event) -> None:
-        data = event.data
-        symbol = data.get('symbol', 'N/A')
-        text = f"""
-🚫 <b>{symbol} прибрано з торгівлі</b>
-
-{data.get('consecutive_losses')} збиткових угод поспіль по {symbol} (ліміт: {data.get('max_consecutive_losses')}).
-Монету додано до чорного списку й відписано від потоку даних — нові позиції по ній не відкриваються, доки ти не повернеш її вручну (міні-апп → Монети → чорний список).
-По інших символах бот торгує як звичайно.
-"""
-        await self.send_message(text)
-
-    async def _on_stop_loss_moved(self, event: Event) -> None:
-        data = event.data
-
-        symbol = data.get('symbol', 'N/A')
-        side = data.get('side', 'N/A')
-        stage = data.get('stage')
-        old_price = data.get('old_stop_price')
-        new_price = data.get('new_stop_price')
-        entry_price = data.get('entry_price')
-        leverage = data.get('leverage') or 1
-        strategy = data.get('strategy')
-
-        stage_label = {
-            'breakeven': '🟡 Перенесено в беззбиток',
-            'trailing': '🟢 Підтягнуто трейлінгом',
-        }.get(stage, '🔄 Стоп перенесено')
-
-        side_emoji = "🟢" if side == "LONG" else "🔴"
-
-        if old_price is None or new_price is None or entry_price is None:
-            logger.warning(f"STOP_LOSS_MOVED event missing price data: {data}")
-            await self.send_message(f"{stage_label}\n\n{side_emoji} <b>{symbol}</b> {side}")
-            return
-
-        try:
-            leverage = float(leverage)
-        except (TypeError, ValueError):
-            leverage = 1.0
-        if leverage <= 0:
-            leverage = 1.0
-
-        ref = abs(entry_price or 0)
-        decimals = 4 if ref >= 1 else (6 if ref >= 0.01 else 8)
-
-        def _roi_percent(stop_price: float) -> float:
-            fraction = (
-                (stop_price - entry_price) / entry_price if side == 'LONG'
-                else (entry_price - stop_price) / entry_price
-            )
-            return fraction * leverage * 100.0
-
-        old_roi = _roi_percent(old_price)
-        new_roi = _roi_percent(new_price)
-
-        text = f"""
-    {stage_label}
-
-    {side_emoji} <b>{symbol}</b> {side}
-    ├ Вхід: <code>${entry_price:.{decimals}f}</code>
-    ├ Старий стоп: <code>{old_roi:+.2f}% ROI</code>
-    └ Новий стоп: <code>{new_roi:+.2f}% ROI</code>
-    """
-        if strategy:
-            text += f"\n[INFO]: Стратегія: {strategy}"
-
-        await self.send_message(text)
-
-    async def _on_take_profit_triggered(self, event: Event) -> None:
-        text = f"""
-🎯 <b>Досягнуто тейк-профіт</b>
-
-Символ: {event.data.get('symbol')}
-Рівень: {event.data.get('level', 1)}
-Ціна: ${event.data.get('price', 0):.6f}
-[INFO]: {event.data.get('positions_info_message')}
-"""
-        await self.send_message(text)
-
-    async def _on_error(self, event: Event) -> None:
-        context = event.data.get('context')
-        error = event.data.get('error', 'Невідома помилка')
-        text = f"⚠️ <b>Помилка</b>: {context or error}"
-        if context and error:
-            text += f"\n<code>{error}</code>"
-        await self.send_message(text)
-
-    async def _on_critical_error(self, event: Event) -> None:
-        context = event.data.get('context')
-        error = event.data.get('error', 'Невідома критична помилка')
-        text = f"🚨 <b>КРИТИЧНА ПОМИЛКА</b>: {context or error}"
-        if context and error:
-            text += f"\n<code>{error}</code>"
-        await self.send_message(text)
+        await self.send_message(messages.symbol_blacklisted(event.data))
 
     async def _on_symbols_rotated(self, event: Event) -> None:
-        added = event.data.get('added') or []
-        removed = event.data.get('removed') or []
-        total = event.data.get('total_active')
+        await self.send_message(messages.symbols_rotated(event.data))
 
-        lines = ["🔄 <b>Ротація монет</b>"]
-        if added:
-            lines.append("├ Додано: " + ", ".join(f"<code>{s}</code>" for s in added))
-        if removed:
-            lines.append("├ Прибрано: " + ", ".join(f"<code>{s}</code>" for s in removed))
-        if total is not None:
-            lines.append(f"└ Активних символів: {total}")
+    async def _on_error(self, event: Event) -> None:
+        await self.send_message(messages.error(event.data, "⚠️ <b>Помилка</b>", "Невідома помилка"))
 
-        await self.send_message("\n".join(lines))
+    async def _on_critical_error(self, event: Event) -> None:
+        await self.send_message(
+            messages.error(event.data, "🚨 <b>КРИТИЧНА ПОМИЛКА</b>", "Невідома критична помилка")
+        )
 
-    async def notify_startup(
-        self,
-        *,
-        testnet: bool,
-        strategies: list,
-    ) -> None:
-        """
-        Відправляє одноразове вітальне повідомлення одразу після повного
-        старту бота (біржа, стратегії, символи вже готові). Викликається
-        явно з main.py в самому кінці ініціалізації — жодних побічних
-        ефектів на існуючу логіку не має, це чиста нотифікація.
-        """
-
-        mode_label = "🧪 Тестовий" if testnet else "🔴 LIVE (реальні кошти)"
-
-        enabled_names = [s.name for s in strategies if s.is_enabled()]
-        total_count = len(strategies)
-        enabled_count = len(enabled_names)
-
-        lines = [
-            "🚀 <b>Бот запущено та готовий до роботи</b>",
-            "",
-            f"Режим: {mode_label}",
-            f"Стратегій активно: {enabled_count}/{total_count}",
-        ]
-
-        if enabled_names:
-            lines.append("")
-            lines.append("Активні стратегії:")
-            for name in enabled_names:
-                lines.append(f"  • {name}")
-
+    async def notify_startup(self, *, testnet: bool, strategies: list) -> None:
+        """Одноразове повідомлення після повного старту бота (біржа, стратегії,
+        символи вже готові). Викликається з main.py наприкінці ініціалізації."""
+        balance = None
         if self.exchange_client:
             try:
-                balance_data = await self.exchange_client.get_account_balance()
-                if balance_data.get('code') == 0 and 'data' in balance_data:
-                    balance = balance_data['data'].get('balance', {})
-                    lines.append("")
-                    lines.append(f"💰 Баланс: ${float(balance.get('balance', 0)):.2f}")
+                account = extract_account_balance(await self.exchange_client.get_account_balance())
+                if account is not None:
+                    balance = to_float(account.get('balance', 0))
             except Exception as e:
                 logger.warning(f"notify_startup: не вдалось отримати баланс: {e}")
 
-        lines.append("")
-        lines.append(f"🕐 {datetime.now(LOCAL_TZ).strftime('%d.%m.%Y %H:%M:%S')}")
-
-        await self.send_message("\n".join(lines))
+        await self.send_message(messages.startup(
+            testnet=testnet,
+            enabled_strategies=messages.enabled_strategy_names(strategies),
+            total_strategies=len(strategies),
+            balance=balance,
+            now=datetime.now(LOCAL_TZ),
+        ))

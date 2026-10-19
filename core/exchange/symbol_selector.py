@@ -1,11 +1,29 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import List, Dict, Any, Set, Optional
 
 from .bingx_client import BingXClient
+from ..common.market_data import held_symbols, to_float
 from ..events import Event, EventBus, EventType
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TickerCheck:
+    """Результат перевірки 24h-тикера фільтрами trading.filters."""
+    symbol: str
+    quote_volume: float
+    last_price: float
+    change_pct: float
+    passes_volume: bool
+    passes_price: bool
+    passes_spread: bool
+
+    @property
+    def passes(self) -> bool:
+        return self.passes_volume and self.passes_price and self.passes_spread
 
 
 class SymbolSelector:
@@ -74,48 +92,20 @@ class SymbolSelector:
         # (вручную или автоматически после серии убытков), не должна
         # оставаться в подписке только потому, что она есть в whitelist.
         whitelist -= blacklist
-        min_volume_24h = self.filters.get('min_volume_24h', 0)
-        max_spread_percent = self.filters.get('max_spread_percent', None)
-        min_price = self.filters.get('min_price', {}) or {}
-        max_price = self.filters.get('max_price', {}) or {}
         max_symbols = self.filters.get('max_symbols', None)
         rotation_interval_seconds = self.filters.get('rotation_interval_seconds', 1800)
 
-        held_symbols = await self._get_held_symbols()
+        held = await self._get_held_symbols()
         tickers = await self._get_tickers()
 
         candidates = []
-
         for ticker in tickers:
             symbol = ticker.get('symbol')
             if not symbol or symbol in blacklist:
                 continue
-
-            try:
-                quote_volume = float(ticker.get('quoteVolume', 0))
-                last_price = float(ticker.get('lastPrice', 0))
-                bid_price = float(ticker.get('bidPrice', 0))
-                ask_price = float(ticker.get('askPrice', 0))
-            except (TypeError, ValueError):
-                continue
-
-            if quote_volume < min_volume_24h:
-                continue
-
-            symbol_min_price = min_price.get(symbol) if isinstance(min_price, dict) else None
-            symbol_max_price = max_price.get(symbol) if isinstance(max_price, dict) else None
-
-            if symbol_min_price is not None and last_price < symbol_min_price:
-                continue
-            if symbol_max_price is not None and last_price > symbol_max_price:
-                continue
-
-            if max_spread_percent is not None and bid_price > 0 and ask_price > 0:
-                spread_percent = (ask_price - bid_price) / bid_price * 100
-                if spread_percent > max_spread_percent:
-                    continue
-
-            candidates.append((symbol, quote_volume))
+            check = self.check_ticker(ticker)
+            if check is not None and check.passes:
+                candidates.append((symbol, check.quote_volume))
 
         candidates.sort(key=lambda c: c[1], reverse=True)
 
@@ -123,7 +113,7 @@ class SymbolSelector:
         # п.1: whitelist + held (відкриті позиції) — завжди захищені, незалежно
         # від об'єму/сигналів. Виняток — blacklist (див. вище): він вже вирахуваний
         # з whitelist, а held лишається, поки позиція відкрита (SL/TP/trailing).
-        protected = set(whitelist) | set(held_symbols)
+        protected = set(whitelist) | set(held)
 
         currently_subscribed = set(getattr(self.exchange, 'subscribed_symbols', set()) or set())
         quiet_unheld: Set[str] = set()
@@ -172,6 +162,43 @@ class SymbolSelector:
 
         return sorted(selected)
 
+    def check_ticker(self, ticker: Dict[str, Any]) -> Optional[TickerCheck]:
+        """Перевіряє тикер фільтрами об'єму / ціни / спреду з trading.filters.
+        Єдина реалізація для select() і webapp /api/symbols/candidates.
+        None — якщо цифри в тикері зіпсовані."""
+        symbol = ticker.get('symbol')
+        try:
+            quote_volume = float(ticker.get('quoteVolume', 0))
+            last_price = float(ticker.get('lastPrice', 0))
+            bid_price = float(ticker.get('bidPrice', 0))
+            ask_price = float(ticker.get('askPrice', 0))
+        except (TypeError, ValueError):
+            return None
+
+        min_price = self.filters.get('min_price', {}) or {}
+        max_price = self.filters.get('max_price', {}) or {}
+        symbol_min_price = min_price.get(symbol) if isinstance(min_price, dict) else None
+        symbol_max_price = max_price.get(symbol) if isinstance(max_price, dict) else None
+        passes_price = not (
+            (symbol_min_price is not None and last_price < symbol_min_price)
+            or (symbol_max_price is not None and last_price > symbol_max_price)
+        )
+
+        max_spread_percent = self.filters.get('max_spread_percent', None)
+        passes_spread = True
+        if max_spread_percent is not None and bid_price > 0 and ask_price > 0:
+            passes_spread = (ask_price - bid_price) / bid_price * 100 <= max_spread_percent
+
+        return TickerCheck(
+            symbol=symbol,
+            quote_volume=quote_volume,
+            last_price=last_price,
+            change_pct=to_float(ticker.get('priceChangePercent', 0)),
+            passes_volume=quote_volume >= self.filters.get('min_volume_24h', 0),
+            passes_price=passes_price,
+            passes_spread=passes_spread,
+        )
+
     async def apply(self) -> Set[str]:
         async with self._apply_lock:
             return await self._apply_unlocked()
@@ -188,7 +215,7 @@ class SymbolSelector:
         """Обчислює актуальний список символів, підписує нові, відписує зайві.
 
         Спільний пул: кожен символ у `selected` отримує ОБИДВІ підписки —
-        @trade (для SMA/RejectionBlock/TrailingStop) і @depth20 (для
+        @trade (для стратегій/TrailingStop/ExcursionTracker) і @depth20 (для
         OrderBookAnalyzer). Це свідоме архітектурне рішення — один список
         символів, одна ротація, замість двох незалежних пулів з різними
         лімітами/таймаутами."""
@@ -276,16 +303,11 @@ class SymbolSelector:
                 logger.error(f"[SYMBOLS] Error during refresh: {e}", exc_info=True)
 
     async def _get_held_symbols(self) -> Set[str]:
-        held_symbols = set()
         try:
-            positions = await self.exchange.get_positions()
-            for pos in positions:
-                amt = float(pos.get('positionAmt', 0))
-                if amt != 0:
-                    held_symbols.add(pos.get('symbol'))
+            return held_symbols(await self.exchange.get_positions())
         except Exception as e:
             logger.error(f"Failed to fetch held positions for symbol selection: {e}")
-        return held_symbols
+            return set()
 
     async def _get_tickers(self) -> List[Dict[str, Any]]:
         try:

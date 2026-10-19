@@ -1,9 +1,11 @@
 import logging
 import time
+from collections import Counter
 from typing import Optional
 
+from ..common.market_data import extract_account_balance, filter_open_positions, to_float
 from ..database import Database
-from ..events import EventBus, Event, EventType
+from ..events import EventBus, Event, EventType, publish_error
 
 
 logger = logging.getLogger(__name__)
@@ -136,18 +138,15 @@ class RiskManager:
                 f"{streak_len} stop-losses in a row within {self.stop_loss_streak_window_hours}h — "
                 f"NEW ENTRIES BLOCKED for {self.stop_loss_block_hours}h"
             )
-            await self.event_bus.publish(Event(
-                type=EventType.ERROR,
-                data={
-                    'context': (
-                        f"🛑 {streak_len} стоп-лоси підряд за {self.stop_loss_streak_window_hours}г — "
-                        f"нові входи заблоковано на {self.stop_loss_block_hours}г. "
-                        f"Відкриті позиції продовжують супроводжуватись."
-                    ),
-                    'error': '',
-                },
+            await publish_error(
+                self.event_bus,
+                context=(
+                    f"🛑 {streak_len} стоп-лоси підряд за {self.stop_loss_streak_window_hours}г — "
+                    f"нові входи заблоковано на {self.stop_loss_block_hours}г. "
+                    f"Відкриті позиції продовжують супроводжуватись."
+                ),
                 source='RiskManager',
-            ))
+            )
         else:
             await self._save_stop_loss_state()
 
@@ -183,16 +182,12 @@ class RiskManager:
             logger.error(f"RiskManager: failed to fetch account balance for sizing: {e}", exc_info=True)
             return None
 
-        if not balance_data or balance_data.get('code') != 0 or 'data' not in balance_data:
+        balance = extract_account_balance(balance_data)
+        if balance is None:
             logger.error(f"RiskManager: unexpected balance response for sizing: {balance_data}")
             return None
 
-        balance = balance_data['data'].get('balance', {})
-        try:
-            equity = float(balance.get('equity', 0))
-        except (TypeError, ValueError):
-            equity = 0.0
-
+        equity = to_float(balance.get('equity', 0))
         if equity <= 0:
             logger.error(f"RiskManager: got non-positive equity ({equity}) — cannot size position")
             return None
@@ -239,8 +234,8 @@ class RiskManager:
         distance = abs(entry_price - stop_loss_price)
         if distance <= 0:
             logger.warning(
-                f"RiskManager: cannot compute risk-based quantity — "
-                f"stop_loss_price equals entry_price (distance=0)"
+                "RiskManager: cannot compute risk-based quantity — "
+                "stop_loss_price equals entry_price (distance=0)"
             )
             return None
 
@@ -286,17 +281,11 @@ class RiskManager:
             # Fail-safe: если биржа недоступна — лучше НЕ разрешать открытие новых позиций,
             # чем открыть их вслепую при рассинхроне
             raise
+        return filter_open_positions(raw_positions)
 
-        open_positions = []
-        for pos in raw_positions:
-            try:
-                amt = float(pos.get('positionAmt', 0))
-            except (TypeError, ValueError):
-                amt = 0.0
-            if amt != 0:
-                open_positions.append(pos)
-
-        return open_positions
+    @staticmethod
+    def _count_by_symbol(positions: list[dict]) -> dict[str, int]:
+        return dict(Counter(p.get('symbol') for p in positions if p.get('symbol')))
 
     def _is_blacklisted(self, symbol: str) -> bool:
         if self.settings_manager is None:
@@ -327,11 +316,7 @@ class RiskManager:
             return False, reason
 
         current_open_positions = len(real_positions)
-        open_positions_by_symbol: dict[str, int] = {}
-        for pos in real_positions:
-            pos_symbol = pos.get('symbol')
-            if pos_symbol:
-                open_positions_by_symbol[pos_symbol] = open_positions_by_symbol.get(pos_symbol, 0) + 1
+        open_positions_by_symbol = self._count_by_symbol(real_positions)
 
         logger.info(
             f"Live positions from exchange: {current_open_positions} total, "
@@ -461,11 +446,7 @@ class RiskManager:
         try:
             real_positions = await self._get_real_open_positions()
             current_open_positions = len(real_positions)
-            open_positions_by_symbol: dict[str, int] = {}
-            for pos in real_positions:
-                pos_symbol = pos.get('symbol')
-                if pos_symbol:
-                    open_positions_by_symbol[pos_symbol] = open_positions_by_symbol.get(pos_symbol, 0) + 1
+            open_positions_by_symbol = self._count_by_symbol(real_positions)
         except Exception:
             current_open_positions = -1  # сигнал, что не удалось получить данные с биржи
             open_positions_by_symbol = {}

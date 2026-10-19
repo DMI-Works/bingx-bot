@@ -1,29 +1,20 @@
 """
 WallBreakoutStrategy — перетворює подію WALL_BREAKOUT від OrderBookAnalyzer
-на реальний торговий сигнал (SIGNAL_GENERATED), який підхоплює SimpleTrader
-і відкриває позицію.
+на торговий сигнал (SIGNAL_GENERATED), який підхоплює SimpleTrader і
+відкриває позицію.
 
-Раніше WALL_BREAKOUT вів лише в TelegramBot._on_wall_breakout (сповіщення,
-без угоди). Ця стратегія — окрема гілка, яка замикає той самий сигнал на
-торгівлю, за тим самим принципом, що й SimpleMovingAverageStrategy /
-RejectionBlockStrategy: формує TradeSignal (side/symbol/reference_price/
-stop_loss/take_profit) і публікує SIGNAL_GENERATED.
-
-Важлива відмінність від SMA/RejectionBlock: ті аналізують КОЖЕН тік ціни
-(PRICE_UPDATED) через analyze(). Ця стратегія натомість реагує виключно на
-вже готовий детект пробою від OrderBookAnalyzer — тому analyze() тут
-свідомо завжди повертає None, а вся логіка сигналу — в _on_wall_breakout(),
-підписаному напряму на WALL_BREAKOUT.
+На відміну від стратегій, що аналізують КОЖЕН тік ціни (PRICE_UPDATED)
+через analyze(), ця реагує виключно на вже готовий детект пробою від
+OrderBookAnalyzer — тому analyze() тут свідомо завжди повертає None, а вся
+логіка сигналу — в _on_wall_breakout(), підписаному напряму на WALL_BREAKOUT.
 
 Напрямок угоди:
   - пробій ASK-стіни (опору) вгору   -> LONG
   - пробій BID-стіни (підтримки) вниз -> SHORT
 
-За замовчуванням, як і всі інші стратегії в реєстрі, ця вимкнена
-(enabled=False), доки її явно не увімкнули через Telegram /settings —
-детект стін варто спершу перевірити на адекватність (спам/пропуски) через
-WALL_DETECTED/WALL_BREAKOUT сповіщення, перш ніж довіряти йому реальні
-гроші.
+За замовчуванням, як і всі стратегії в реєстрі, вимкнена (enabled=False),
+доки її не увімкнули в мініаппі — детект стін варто спершу перевірити на
+адекватність (спам/пропуски), перш ніж довіряти йому реальні гроші.
 """
 
 from __future__ import annotations
@@ -72,9 +63,8 @@ class WallBreakoutStrategy(BaseStrategy):
             f"SL={sl_roi_percent}% ROI -> {self._stop_loss_price_percent:.8f}% price"
         )
 
-        # той самий кулдаун-принцип, що й у SMA-стратегії — per symbol,
-        # щоб не відкривати кілька угод підряд на серії пробоїв одного й
-        # того ж рівня (шум/повторні detect)
+        # кулдаун per symbol, щоб не відкривати кілька угод підряд на серії
+        # пробоїв одного й того ж рівня (шум/повторні detect)
         self.last_trade_time: Dict[str, float] = {}
 
         # BaseStrategy.__init__ вже підписав нас на PRICE_UPDATED, але

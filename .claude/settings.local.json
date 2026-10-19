@@ -8,7 +8,13 @@
       "Bash(xargs grep -l \"class.*Strategy\\\\|def.*signal\\\\|SIGNAL_GENERATED\")",
       "Bash(sqlite3 *)",
       "Bash(awk '/2026-07-12 15:06:01/ {flag=1} flag' ./logs/trading_bot.log)",
-      "Bash(xargs grep -l \"create_order\\\\|SIGNAL_GENERATED\")"
+      "Bash(xargs grep -l \"create_order\\\\|SIGNAL_GENERATED\")",
+      "Bash(xargs wc -l)",
+      "Bash(python -m unittest discover tests)",
+      "Bash(python -c ' *)",
+      "Bash(git config *)",
+      "Bash(grep -c '\\\\\\\\r')",
+      "Bash(python -m pyflakes core webapp/backend main.py tests)"
     ]
   }
 }

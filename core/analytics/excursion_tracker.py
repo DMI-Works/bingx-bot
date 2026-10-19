@@ -24,6 +24,8 @@ import time
 from datetime import timezone
 from typing import Dict, Optional
 
+from ..common.market_data import parse_price_tick
+from ..common.position_math import parse_leverage, position_key, side_sign
 from ..database import Database
 from ..events import EventBus, Event, EventType
 
@@ -51,25 +53,14 @@ class ExcursionTracker:
     # ---------- тики ----------
 
     async def _on_price_update(self, event: Event) -> None:
-        raw = event.data
-        if not raw:
+        tick = parse_price_tick(event.data)
+        if tick is None:
             return
-        try:
-            tick = raw[0] if isinstance(raw, list) else raw
-        except (IndexError, TypeError):
-            return
-
-        symbol = tick.get('s')
-        try:
-            price = float(tick.get('p', 0))
-        except (TypeError, ValueError):
-            price = 0.0
-        if not symbol or price <= 0:
-            return
+        symbol, price = tick
 
         now = time.time()
         for side in ('LONG', 'SHORT'):
-            position = self.trader.open_positions.get(f"{symbol}_{side}")
+            position = self.trader.open_positions.get(position_key(symbol, side))
             if not position or not position.get('order_id') or not position.get('entry_price'):
                 continue
             state = self._get_state(position, now)
@@ -85,15 +76,11 @@ class ExcursionTracker:
             entry = float(position['entry_price'])
             meta = position.get('trail_meta')
             atr = meta.get('atr') if isinstance(meta, dict) else None
-            try:
-                leverage = float(position.get('leverage') or 0)
-            except (TypeError, ValueError):
-                leverage = 0.0
             state = {
                 'order_id': order_id,
                 'side': position['side'],
                 'entry': entry,
-                'leverage': leverage,
+                'leverage': parse_leverage(position.get('leverage')) or 0.0,
                 'atr': float(atr) if atr else None,
                 'opened_ts': now,
                 'high': entry, 'high_ts': now,
@@ -122,7 +109,7 @@ class ExcursionTracker:
         long_side = state['side'] == 'LONG'
         mfe_price, mfe_ts = (state['high'], state['high_ts']) if long_side else (state['low'], state['low_ts'])
         mae_price, mae_ts = (state['low'], state['low_ts']) if long_side else (state['high'], state['high_ts'])
-        sign = 1.0 if long_side else -1.0
+        sign = side_sign(state['side'])
 
         def pct(price: float) -> float:
             return sign * (price - entry) / entry * 100.0
@@ -215,8 +202,7 @@ class ExcursionTracker:
 
         extra = {'final': True}
         if close_price and close_price > 0:
-            sign = 1.0 if state['side'] == 'LONG' else -1.0
-            exit_pct = sign * (close_price - state['entry']) / state['entry'] * 100.0
+            exit_pct = side_sign(state['side']) * (close_price - state['entry']) / state['entry'] * 100.0
             mfe_pct = self._snapshot(state)['mfe_pct']
             extra['exit_pct'] = exit_pct
             # скільки від піка прибутку віддали до виходу (у п.п. руху ціни)

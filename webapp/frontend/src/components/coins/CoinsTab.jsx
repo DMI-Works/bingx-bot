@@ -2,19 +2,7 @@ import { useEffect, useState } from "react";
 import { Ban, RotateCcw, Plus, Radio, TrendingUp, Check } from "lucide-react";
 import { apiGet, apiPost, apiDelete } from "../../lib/api";
 import { Spinner, EmptyRow } from "../common";
-import { fmtDate } from "../../lib/format";
-
-function fmtVolume(v) {
-  if (v >= 1e9) return (v / 1e9).toFixed(2) + "B";
-  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
-  if (v >= 1e3) return (v / 1e3).toFixed(0) + "K";
-  return String(v);
-}
-
-function fmtPrice(p) {
-  if (p == null) return "—";
-  return p >= 1 ? p.toLocaleString("ru-RU", { maximumFractionDigits: 2 }) : p.toPrecision(3);
-}
+import { fmtDate, fmtPrice, fmtVolume } from "../../lib/format";
 
 export default function CoinsTab() {
   const [symbols, setSymbols] = useState(null);

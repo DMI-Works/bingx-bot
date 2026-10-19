@@ -6,6 +6,22 @@ export const fmtUsdPlain = (n) =>
 
 export const fmtPct = (n) => `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(2)}%`;
 
+// Profit factor: число, «∞» (убытков не было, но прибыль есть) или «—» (нет данных).
+export const fmtProfitFactor = (pf, hasProfit) => (pf != null ? pf.toFixed(2) : hasProfit ? "∞" : "—");
+
+// Объём за 24ч в коротком виде: 1.23B / 45.6M / 789K.
+export function fmtVolume(v) {
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(0) + "K";
+  return String(v);
+}
+
+export function fmtPrice(p) {
+  if (p == null) return "—";
+  return p >= 1 ? p.toLocaleString("ru-RU", { maximumFractionDigits: 2 }) : p.toPrecision(3);
+}
+
 // SL в % ROI (как на бирже и как считает TrailingStopManager):
 // сдвиг цены относительно входа × плечо, со знаком «в сторону позиции».
 //   < 0 — стоп ещё в зоне убытка (начальный SL, напр. −20%)

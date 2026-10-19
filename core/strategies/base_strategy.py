@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
+from ..common.market_data import parse_price_tick
 from ..events import EventBus, Event, EventType
 
 
@@ -26,17 +27,16 @@ class BaseStrategy(ABC):
     async def _on_price_update(self, event: Event) -> None:
         if not self.enabled:
             return
-        data = event.data[0]
-        symbol = data.get('s')
-        price = float(data.get('p', 0))
-        if symbol and price:
-            signal = await self.analyze(symbol, price)
-            if signal:
-                await self.event_bus.publish(Event(
-                    type=EventType.SIGNAL_GENERATED,
-                    data=signal,
-                    source=self.name
-                ))
+        tick = parse_price_tick(event.data)
+        if tick is None:
+            return
+        signal = await self.analyze(*tick)
+        if signal:
+            await self.event_bus.publish(Event(
+                type=EventType.SIGNAL_GENERATED,
+                data=signal,
+                source=self.name
+            ))
 
     def enable(self) -> None:
         self.enabled = True
@@ -50,7 +50,7 @@ class BaseStrategy(ABC):
     def update_config(self, new_config: dict) -> None:
         """
         Викликається StrategyManager, коли параметри стратегії змінюються
-        в рантаймі через Telegram-меню (без рестарту бота).
+        в рантаймі через мініапп (без рестарту бота).
 
         За замовчуванням просто підміняє self.config цілком. Якщо конкретна
         стратегія кешує окремі параметри в атрибутах (наприклад

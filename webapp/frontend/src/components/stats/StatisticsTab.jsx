@@ -4,7 +4,7 @@ import {
 } from "recharts";
 import { TrendingUp, TrendingDown } from "lucide-react";
 import { apiGet } from "../../lib/api";
-import { fmtUsd, fmtPct, slRoiPercent } from "../../lib/format";
+import { fmtUsd, fmtPct, fmtProfitFactor, slRoiPercent } from "../../lib/format";
 import { Spinner, EmptyRow, PnlTag, SideBadge } from "../common";
 import TradeHistoryList from "./TradeHistoryList";
 
@@ -105,7 +105,7 @@ export default function StatisticsTab() {
   const avgTrade = stats && stats.total_trades ? stats.total_net_pnl / stats.total_trades : 0;
 
   const pf = stats?.profit_factor;
-  const pfLabel = pf != null ? pf.toFixed(2) : stats?.gross_profit > 0 ? "∞" : "—";
+  const pfLabel = fmtProfitFactor(pf, stats?.gross_profit > 0);
   const pfClass = pf != null ? (pf >= 1 ? "text-profit" : "text-loss") : stats?.gross_profit > 0 ? "text-profit" : "";
   const winsHidingLoss = !!stats && pf != null && pf < 1 && stats.win_rate >= 50;
 
@@ -374,7 +374,7 @@ export default function StatisticsTab() {
                 <div className="row-main">
                   <span className="settings-title">{s.strategy}</span>
                   <div className="row-sub row-sub-faint">
-                    PF {s.profit_factor != null ? s.profit_factor.toFixed(2) : s.pnl > 0 ? "∞" : "—"}
+                    PF {fmtProfitFactor(s.profit_factor, s.pnl > 0)}
                   </div>
                 </div>
                 <div className="row-end">
