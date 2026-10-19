@@ -1,274 +1,224 @@
 # Ruflo Trading Bot
 
-Высоконадежный модульный торговый бот для криптобирж с поддержкой BingX, Binance, Bybit.
+Асинхронный торговый бот для бессрочных фьючерсов **BingX** (USDT-M perpetual) и Telegram Mini App для мониторинга и настройки бота.
 
-## Основные возможности
+## Возможности
 
-- ✅ Отказоустойчивая архитектура с восстановлением состояния
-- ✅ WebSocket соединение с автоматическим переключением на REST
-- ✅ Гарантированное исполнение ордеров с повторными попытками
-- ✅ Автоматическое создание Stop Loss для всех позиций
-- ✅ Поддержка нескольких Take Profit уровней
-- ✅ Управление рисками (макс позиции, серия убытков по монете)
-- ✅ Event-driven архитектура для всех операций
-- ✅ SQLite база данных для хранения состояния
-- ✅ Telegram бот для управления и уведомлений
-- ✅ Настройки изменяются без перезапуска
+- Event-driven архитектура: все компоненты общаются через общий `EventBus` в одном asyncio event loop.
+- Рыночные данные и события аккаунта (исполнения, SL/TP, PnL) приходят по WebSocket BingX.
+- Две встроенные стратегии: **WallBreakoutStrategy** (пробой «стен» в стакане) и **TrendSupertrendStrategy** (EMA-тренд + Supertrend + объём + ATR).
+- Stop Loss и несколько уровней Take Profit на каждую позицию; SL/TP пересчитываются под фактическую цену входа.
+- Трейлинг-стоп в двух режимах: лестница по ROI или `atr_3step` (безубыток с учётом комиссий → шаги по ATR → swing-стоп).
+- Риск-менеджмент на уровне аккаунта: лимиты позиций, сайзинг от риска с потолком маржи, блокировка входов после серии стопов, чёрный список монеты после серии убытков.
+- Автоматическая ротация пула монет (до 20) с белым и чёрным списками.
+- Аналитика сделок: MFE/MAE, история перестановок SL, снимок параметров стратегии на момент входа.
+- **MongoDB** для хранения состояния; testnet и live используют разные базы.
+- Telegram Mini App: статистика, позиции, аналитика, управление монетами, стратегиями и настройками без перезапуска.
 
-## Архитектура
+## Структура проекта
 
 ```
-ruflo-trading-bot/
-├── config/                 # Конфигурация
+BotBingx/
+├── config/
+│   └── config.yaml            # Настройки уровня аккаунта (риск, фильтры, стакан, трейлинг, telegram, webapp)
 ├── core/
-│   ├── exchange/          # Подключение к биржам
-│   ├── execution/         # Execution Engine и Order Manager
-│   ├── strategies/        # Торговые стратегии
-│   ├── events/            # Event Bus
-│   ├── risk/              # Risk Manager
-│   ├── state/             # Position Manager, Recovery Engine, Settings
-│   ├── database/          # SQLite база данных
-│   └── telegram/          # Telegram Bot
-└── main.py                # Точка входа
+│   ├── analytics/             # ExcursionTracker — MFE/MAE в trade_analytics
+│   ├── database/              # Database (MongoDB), StrategySettingsStore
+│   ├── diagnostics/           # Генерация карточек PnL и статистики
+│   ├── events/                # EventBus, EventType
+│   ├── exchange/              # BingXClient (REST + WS + user data stream), SymbolSelector
+│   ├── risk/                  # RiskManager, TrailingStopManager
+│   ├── state/                 # SettingsManager (runtime-настройки, kill switch)
+│   ├── strategies/            # Стратегии, реестр, индикаторы, OrderBookAnalyzer, StrategyManager
+│   ├── telegram/              # TelegramBot — уведомления и аварийная остановка
+│   └── trading/               # SimpleTrader — открытие и закрытие позиций, SL/TP
+├── webapp/
+│   ├── backend/               # FastAPI (api.py, auth.py), static/ — собранный фронтенд
+│   └── frontend/              # React 18 + Vite
+├── tests/                     # unittest
+├── Dockerfile
+└── main.py                    # Точка входа: собирает и связывает все компоненты
 ```
 
 ## Установка
 
-1. Клонировать репозиторий:
+Нужны Python 3.11, Node.js 20 (для сборки Mini App) и база MongoDB (например, MongoDB Atlas).
+
 ```bash
 git clone <repository-url>
-cd ruflo-trading-bot
-```
-
-2. Установить зависимости:
-```bash
+cd BotBingx
 pip install -r requirements.txt
-```
-
-3. Создать `.env` файл из примера:
-```bash
 cp .env.example .env
 ```
 
-4. Заполнить `.env` файл вашими API ключами:
+Заполните `.env`:
+
 ```env
-BINGX_API_KEY=your_api_key_here
-BINGX_API_SECRET=your_api_secret_here
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-TELEGRAM_CHAT_ID=your_telegram_chat_id
+BINGX_API_KEY=...
+BINGX_API_SECRET=...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+WEBAPP_URL=https://<домен Mini App>
+MONGO_URI=mongodb+srv://...
+MONGO_DB_NAME=...
 ```
 
-## Конфигурация
-
-Основная конфигурация находится в `config/config.yaml`:
-
-- **Exchange**: настройки API, WebSocket, REST
-- **Trading**: размер позиции, плечо, направление торговли
-- **Risk**: лимиты позиций, риск-менеджмент
-- **Stop Loss**: фиксированный %, ATR, структурный
-- **Take Profit**: несколько уровней, trailing
-- **Filters**: белый/черный список монет, фильтры по цене/объему
-- **Telegram**: уведомления и управление
+| Переменная | Назначение |
+|---|---|
+| `BINGX_API_KEY`, `BINGX_API_SECRET` | Ключи BingX. Без них бот не стартует |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Бот для уведомлений; токен также нужен для проверки `initData` в Mini App |
+| `WEBAPP_URL` | HTTPS-адрес Mini App; без него кнопка «Профіль» в `/start` скрыта |
+| `MONGO_URI` | **Обязательна.** Проверяется при импорте модуля базы данных |
+| `MONGO_DB_NAME` | Имя базы. В режиме testnet к нему добавляется суффикс `_testnet` |
+| `PORT` | Порт API и Mini App (задаёт Railway). По умолчанию `webapp.port` = 8000 |
 
 ## Запуск
 
-### Testnet (рекомендуется для тестирования)
 ```bash
 python main.py
 ```
 
-По умолчанию бот запускается в testnet режиме. Измените `testnet: false` в `config/config.yaml` для реальной торговли.
+В одном процессе запускаются бот, Telegram-бот и API Mini App (FastAPI через uvicorn, порт `$PORT` или 8000).
 
-### Production
-**⚠️ ВНИМАНИЕ: Реальная торговля с реальными деньгами!**
+По умолчанию бот работает в **testnet** (`exchange.testnet: true` в `config/config.yaml`). Для реальной торговли:
 
-1. Убедитесь, что API ключи для production
-2. Измените `testnet: false` в `config/config.yaml`
-3. Протестируйте все стратегии на testnet
-4. Запустите с малыми суммами
+> ⚠️ **Реальные деньги.** Сначала проверьте стратегии на testnet и начинайте с малых сумм.
+
+1. Укажите production-ключи BingX в `.env`.
+2. Поставьте `exchange.testnet: false`. Бот переключится на базу без суффикса `_testnet`.
+3. Запустите `python main.py`.
+
+### Docker / Railway
+
+Multi-stage `Dockerfile` собирает фронтенд (node:20-slim), затем запускает `python main.py` на python:3.11-slim. На Railway переменные окружения задаются в настройках сервиса, порт берётся из `PORT`.
+
+## Telegram Mini App
+
+Мини-апп — основной способ управлять ботом. Вкладки:
+
+- **Статистика** — баланс, PnL, открытые позиции, история сделок.
+- **Аналитика** — подробная история сделок (MFE/MAE, перестановки SL, исполнения TP, параметры на входе).
+- **Монети** — текущий пул символов, кандидаты, белый и чёрный списки.
+- **Налаштування** — глобальный переключатель торговли, включение и параметры стратегий, сброс к значениям по умолчанию.
+- **Профіль**.
+
+Изменяющие запросы к API проверяют Telegram `initData` (заголовок `X-Telegram-Init-Data`).
+
+### Разработка фронтенда
 
 ```bash
-python main.py
+cd webapp/frontend
+npm install
+npm run dev     # Vite на :5173, /api проксируется на http://localhost:8000
+npm run build   # сборка в webapp/backend/static, FastAPI отдаёт её по /
 ```
 
-## Использование
+Чтобы проверить приложение внутри Telegram, нужен HTTPS-туннель (cloudflared или ngrok) и кнопка меню в BotFather. Подробнее — в [webapp/INTEGRATION.md](webapp/INTEGRATION.md).
 
-### Telegram команды
+### Telegram-бот
 
-- `/start` - Главное меню
-- `/status` - Статус бота и позиций
-- `/positions` - Список открытых позиций
-- `/settings` - Настройки
-- `/emergency` - Аварийная остановка
+- `/start` — панель: открыть Mini App, экспорт базы, аварийная остановка.
+- `/emergency` — аварийная остановка: только запретить новые сделки или запретить и закрыть позиции.
 
-### Управление настройками
+Бот также присылает уведомления об открытии и закрытии позиций, срабатывании и переносе SL/TP, ротации монет, чёрном списке, стенах в стакане и ошибках.
 
-Все настройки можно изменять через:
-1. Telegram бот (рекомендуется)
-2. Прямое изменение `config/config.yaml` (требуется перезапуск)
-3. База данных SQLite (для продвинутых пользователей)
+## Конфигурация
 
-### Добавление монет в торговлю
+`config/config.yaml` содержит только настройки уровня аккаунта:
 
-В `config/config.yaml`:
-```yaml
-trading:
-  filters:
-    whitelist_symbols: ["BTC-USDT", "ETH-USDT"]
-```
+- `exchange` — `testnet`, `websocket.enabled`.
+- `trading.risk` — лимиты позиций и риска (см. ниже).
+- `trading.filters` — белый и чёрный списки, `max_symbols`, минимальный объём за 24 ч, максимальный спред, `rotation_interval_seconds`.
+- `trading.orderbook` — параметры детекта стен (`wall_multiplier`, `approach_threshold_pct`, `breakout_consumption_pct` и др.).
+- `trading.trailing_stop` — буферы трейлинга и `taker_fee_rate` для режима `atr_3step`. Блок должен быть вложен в `trading:`.
+- `logging`, `telegram`, `webapp`, `analytics`.
 
-Или через Telegram: Settings → Whitelist
+**Параметры стратегий в YAML не хранятся.** Значения по умолчанию берутся из `DEFAULT_PARAMS` каждой стратегии и при первом запуске записываются в MongoDB (коллекция `strategy_settings`). Дальше их меняют через Mini App, перезапуск не нужен.
+
+Глобальный переключатель торговли (`trading.enabled`) хранится в базе и блокирует **только новые входы**. Открытые позиции продолжают сопровождаться (SL, TP, трейлинг).
 
 ## Стратегии
 
-### Встроенная стратегия: Simple Moving Average
+- **WallBreakoutStrategy** — торгует пробои стен, которые находит `OrderBookAnalyzer` по стакану `@depth20`. Сам анализатор сделок не открывает, а только публикует `WALL_DETECTED` и `WALL_BREAKOUT`. Уровни трейлинга по ROI (`trail_levels_percent`) задаются параметрами этой стратегии.
+- **TrendSupertrendStrategy** — фильтр тренда по EMA, вход по Supertrend с подтверждением объёмом, стоп по ATR, размер позиции от `risk_percent`. Использует трейлинг `atr_3step`.
 
-Пример стратегии на основе SMA:
-- Long: когда цена > SMA
-- Short: когда цена < SMA
-- Автоматический Stop Loss и Take Profit
+Все зарегистрированные стратегии создаются при запуске; выключенные просто игнорируют тики. Стратегии не имеют доступа к торговле на бирже: они только генерируют сигналы, а позиции открывает `SimpleTrader`.
 
-### Создание собственной стратегии
+### Добавление своей стратегии
 
-1. Наследуйтесь от `BaseStrategy`
-2. Реализуйте метод `analyze()`
-3. Верните сигнал с `action`, `symbol`, `side`, `quantity`
-4. Стратегия **НЕ** имеет прямого доступа к API биржи
+1. Создайте класс-наследник `BaseStrategy` в `core/strategies/` и пометьте его `@register_strategy('MyStrategy')`.
+2. Определите `DEFAULT_PARAMS`, classmethod `build_config(cls, app_config)` (обычно `deepcopy(DEFAULT_PARAMS)`) и `async analyze(symbol, price) -> Optional[dict]`.
+3. Если параметры кешируются в атрибутах, переопределите `update_config()`: он вызывается при изменении параметров из Mini App.
+4. Импортируйте стратегию в `core/strategies/__init__.py`, иначе реестр её не увидит.
+5. Добавьте подписи и описания параметров в `core/strategies/param_catalog.py` для экрана настроек.
 
-Пример:
+Если в конструкторе есть параметр `bingx_client`, клиент биржи будет передан автоматически (например, для загрузки свечей).
+
+Пример сигнала:
+
 ```python
-from core.strategies import BaseStrategy
-
-class MyStrategy(BaseStrategy):
-    async def analyze(self, symbol: str, price: float):
-        # Ваша логика
-        if условие_для_входа:
-            return {
-                'action': 'OPEN',
-                'symbol': symbol,
-                'side': 'LONG',
-                'quantity': 0.01,
-                'stop_loss_price': price * 0.98,
-                'take_profit_levels': [
-                    {'price': price * 1.03, 'close_percent': 100}
-                ]
-            }
-        return None
+return {
+    'action': 'OPEN',
+    'symbol': symbol,
+    'side': 'LONG',                  # или 'SHORT'
+    'quantity': qty,
+    'leverage': 10,
+    'stop_loss_price': sl,
+    'take_profit_levels': [{'price': tp, 'close_percent': 100}],
+    'strategy': self.name,
+    'reference_price': price,        # SL/TP пересчитаются к фактической цене входа
+    # необязательно:
+    'risk_percent': 0.5,             # сайзинг от риска (с учётом max_margin_percent_per_trade)
+    'trail_meta': {'mode': 'atr_3step', ...},
+    'analytics_context': {...},      # попадёт в trade_analytics
+}
 ```
 
-## Критические требования
+## Риск-менеджмент
 
-- ✅ Ни один ордер не должен быть потерян
-- ✅ Ни один ордер не должен быть создан дважды (идемпотентность)
-- ✅ Любая открытая позиция обязана иметь Stop Loss
-- ✅ Все изменения состояния приходят через WebSocket
-- ✅ REST используется только как резерв
-- ✅ После любого сбоя состояние полностью восстанавливается
+`RiskManager` (`trading.risk`) действует для всего аккаунта и всех стратегий:
+
+- `max_open_positions`, `max_positions_per_symbol`, `max_total_risk_percent` — лимиты позиций и общего риска.
+- `use_risk_based_sizing` + `risk_per_trade_percent` — размер позиции = `equity × risk% / |entry − stop|` (по умолчанию выключено).
+- `max_margin_percent_per_trade` — потолок маржи одной сделки для сигналов с `risk_percent`, чтобы узкий стоп не раздувал позицию.
+- `taker_fee_rate` — в сайзинг закладывается комиссия за вход и выход.
+- `stop_loss_streak_limit` / `stop_loss_streak_window_hours` / `stop_loss_block_hours` — после N убыточных стопов подряд за окно новые входы блокируются на заданное время.
+- `max_consecutive_losses` — после N убытков подряд по одной монете она попадает в **чёрный список** (это не пауза по таймеру). Вернуть монету можно вручную в Mini App: «Монети» → чёрный список.
 
 ## База данных
 
-SQLite база хранит:
-- Ордера (история и статусы)
-- Позиции (открытые и закрытые)
-- Сделки
-- Баланс
-- Комиссии
-- PnL и ROI
-- Логи ошибок и событий
-- Настройки
+MongoDB, коллекции:
 
-База находится в `data/trading_bot.db`
+| Коллекция | Содержимое |
+|---|---|
+| `positions` | Открытые и закрытые позиции. Состояние позиции хранится JSON-строкой в поле `metadata` и восстанавливается при перезапуске |
+| `balance` | Снимки баланса |
+| `settings` | Runtime-настройки (`trading.enabled`, списки монет и др.) |
+| `strategy_settings` | Параметры по умолчанию и текущие параметры стратегий, флаг включения |
+| `trade_analytics` | Полная история сделки: MFE/MAE, перестановки SL, исполнения TP, снимок параметров, режим (`testnet`/`live`) |
 
-## Recovery Engine
+Чистый PnL сделки: `realized_pnl + commission_open + commission_close + funding_fee` (комиссии хранятся отрицательными числами).
 
-При каждом запуске бот:
-1. Получает открытые позиции с биржи
-2. Получает открытые ордера
-3. Получает баланс
-4. Сверяет с локальной БД
-5. Восстанавливает состояние
-6. Проверяет наличие Stop Loss для всех позиций
+## Тесты
 
-## Risk Manager
+```bash
+python -m unittest discover tests -v
+python -m unittest tests.test_trend_supertrend -v
+python -m unittest tests.test_trend_supertrend.TestIndicators.test_atr_wilder -v
+```
 
-Контролирует:
-- Максимум открытых позиций
-- Максимум позиций на монету
-- Максимальный общий риск
-- Серию убыточных сделок по монете (`max_consecutive_losses`) — монета убирается из торговли (чёрный список), а не ставится на паузу
-
-## Emergency Stop
-
-Аварийная остановка через Telegram:
-- Запрещает новые сделки
-- Отменяет ожидающие ордера
-- Опционально закрывает все позиции
-- Отключает стратегии
+Тесты не подключаются к реальной базе, но `MONGO_URI` должна быть задана: тесты сами выставляют фиктивное значение через `os.environ.setdefault`.
 
 ## Логирование
 
-Логи сохраняются в `logs/trading_bot.log`:
-- Все операции с ордерами
-- Открытие/закрытие позиций
-- Ошибки и исключения
-- WebSocket события
-- Recovery процесс
-
-## Мониторинг
-
-Через Telegram бот:
-- Реальное время открытие/закрытие позиций
-- Stop Loss и Take Profit события
-- Ошибки и критические события
-- WebSocket переподключения
-- Статистика торговли
-
-## Разработка
-
-### Структура Event Bus
-
-Все модули взаимодействуют через события:
-```
-PriceUpdated → Strategy → SignalGenerated → ExecutionEngine 
-→ OrderFilled → PositionOpened → Telegram
-```
-
-### Добавление нового события
-
-1. Добавьте тип в `EventType` (`core/events/event_types.py`)
-2. Публикуйте событие через `event_bus.publish()`
-3. Подписывайтесь через `event_bus.subscribe()`
-
-## Поддержка бирж
-
-### Текущая поддержка:
-- ✅ BingX (полная поддержка)
-
-### Планируется:
-- 🔄 Binance
-- 🔄 Bybit
+Логи пишутся в консоль и в `logs/trading_bot.log` (уровень и путь задаются в разделе `logging`).
 
 ## Безопасность
 
-- Используйте API ключи только с правами на торговлю (без вывода)
-- IP whitelist на бирже
-- Testnet для тестирования
-- Начинайте с малых сумм
-- Мониторьте через Telegram
-
-## FAQ
-
-**Q: Бот потерял соединение, что с позициями?**  
-A: Recovery Engine при следующем запуске восстановит все позиции и ордера с биржи.
-
-**Q: Позиция открылась без Stop Loss?**  
-A: Это невозможно - Execution Engine создает SL с повторными попытками до подтверждения.
-
-**Q: Можно ли изменить настройки без перезапуска?**  
-A: Да, через Telegram бот или изменением в БД через SettingsManager.
-
-**Q: Что если WebSocket отключится?**  
-A: Автоматическое переключение на REST API, попытки переподключения.
+- Давайте API-ключам только права на торговлю, без вывода средств.
+- Включите IP whitelist на бирже.
+- Проверяйте изменения на testnet и начинайте с малых сумм.
+- Не коммитьте `.env`.
 
 ## Лицензия
 
