@@ -96,11 +96,13 @@ class _WinLoss:
 
 def summarize_closed_trades(rows_newest_first: list, cutoff: Optional[datetime]) -> dict:
     """Зведення закритих угод (рядки positions, як віддає
-    get_all_closed_positions — від нових до старих). Кумулятивна крива
-    рахується від першої угоди за весь час, а в період потрапляють лише
-    точки після cutoff."""
+    get_all_closed_positions — від нових до старих). Усе, крім
+    cumulative_pnl_raw (весь час), — лише за період. Крива equity —
+    накопичений PnL усередині періоду: стартує з 0 на початку періоду, тож
+    остання точка = total_net_pnl, а графік видно навіть з однією угодою."""
     equity = []
     running = 0.0
+    period_running = 0.0
     total = _WinLoss()
     by_strategy: dict = defaultdict(_WinLoss)
     symbol_pnl: dict = defaultdict(float)
@@ -114,7 +116,10 @@ def summarize_closed_trades(rows_newest_first: list, cutoff: Optional[datetime])
         if not in_period(row, cutoff):
             continue
 
-        equity.append({"t": str(row["closed_at"]), "v": round(running, 2)})
+        if not equity:
+            equity.append({"t": str(cutoff) if cutoff is not None else None, "v": 0.0})
+        period_running += net
+        equity.append({"t": str(row["closed_at"]), "v": round(period_running, 2)})
         strategy_name = load_metadata(row["metadata"]).get("strategy") or "Невідомо"
         by_strategy[strategy_name].add(net)
         symbol_pnl[row["symbol"]] += net

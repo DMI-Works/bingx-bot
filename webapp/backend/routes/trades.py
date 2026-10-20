@@ -65,20 +65,19 @@ async def get_stats(request: Request, period: str = Query("1W")):
 
     summary = summarize_closed_trades(db.get_all_closed_positions(), cutoff)
     running = summary.pop("cumulative_pnl_raw")
-    equity = summary["equity"]
 
     open_unrealized, account_equity, funding_total, funding_period = await _fetch_live_snapshot(
         request.app.state.exchange_client, cutoff
     )
 
     total_pnl = round(running + open_unrealized + funding_total, 2)
-    period_change_usd = round(
-        ((equity[-1]["v"] - equity[0]["v"]) if len(equity) >= 2 else 0.0) + funding_period, 2
-    )
+    # закриті угоди періоду + фандинг періоду (раніше рахувалось як
+    # остання - перша точка кривої і губило першу угоду періоду)
+    period_change_usd = round(summary["total_net_pnl"] + funding_period, 2)
 
     return {
         **summary,
-        # equity — кумулятивний net PnL закритих угод, не повний баланс акаунта
+        # equity — накопичений net PnL закритих угод за період (від 0), не баланс акаунта
         "cumulative_pnl": round(running, 2),  # all-time, від period не залежить
         "open_unrealized_pnl": round(open_unrealized, 2),  # знімок "зараз"
         "funding_fees_total": round(funding_total, 2),  # all-time, від'ємне = сплачено біржі
@@ -88,6 +87,7 @@ async def get_stats(request: Request, period: str = Query("1W")):
         "total_pnl_pct": _pct_of(total_pnl, account_equity),
         "period_change_usd": period_change_usd,
         "period_change_pct": _pct_of(period_change_usd, account_equity),
+        "period_pnl_pct": _pct_of(summary["total_net_pnl"], account_equity),
     }
 
 

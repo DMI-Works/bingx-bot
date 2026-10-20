@@ -93,9 +93,10 @@ export default function StatisticsTab() {
     [stats]
   );
 
-  const changeUsd = stats?.period_change_usd ?? 0;
-  const changePct = stats?.period_change_pct;
-  const up = changeUsd >= 0;
+  const periodPnl = stats?.total_net_pnl ?? 0;
+  const up = periodPnl >= 0;
+  const fundingPeriod = stats?.funding_fees_period ?? 0;
+  const changePct = stats?.period_pnl_pct;
 
   const openPnl = stats?.open_unrealized_pnl ?? 0;
   const fundingTotal = stats?.funding_fees_total ?? 0;
@@ -113,7 +114,7 @@ export default function StatisticsTab() {
     <div className="tab-pane">
       {error && <div className="error-banner">Не удалось загрузить данные: {error}</div>}
 
-      {/* Hero — реализованный PnL закрытых сделок (всё время), не баланс биржи */}
+      {/* Hero — реализованный PnL закрытых сделок за выбранный период, не баланс биржи */}
       <div className="hero">
         <div className="hero-top">
           <span className="hero-label">PnL закрытых сделок</span>
@@ -134,12 +135,14 @@ export default function StatisticsTab() {
           <div className="hero-figure hero-loading"><Spinner /></div>
         ) : (
           <>
-            <div className="hero-figure">{fmtUsd(stats.cumulative_pnl)}</div>
+            <div className="hero-figure">{fmtUsd(periodPnl)}</div>
             <div className={`hero-change ${up ? "text-profit" : "text-loss"}`}>
               {up ? <TrendingUp size={15} /> : <TrendingDown size={15} />}
-              <span>{fmtUsd(changeUsd)}</span>
-              {changePct != null && <span className="hero-change-pct">({fmtPct(changePct)})</span>}
-              <span className="hero-change-period">за период</span>
+              {changePct != null && <span className="hero-change-pct">{fmtPct(changePct)} от баланса</span>}
+              <span className="hero-change-period">
+                за {period === "ALL" ? "всё время" : period}
+                {fundingPeriod !== 0 && <> · с фандингом {fmtUsd(stats.period_change_usd)}</>}
+              </span>
             </div>
           </>
         )}
