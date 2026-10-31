@@ -36,7 +36,7 @@ import asyncio
 import copy
 import logging
 import time
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from .registry import register_strategy
 from .base_strategy import BaseStrategy
@@ -133,6 +133,10 @@ class TrendSupertrendStrategy(BaseStrategy):
         self._tasks: Set[asyncio.Task] = set()
         self._klines_semaphore = asyncio.Semaphore(3)
         self._warned_no_client = False
+        # Повертає набір символів ВЛАСНОГО (трендового) пулу цієї стратегії.
+        # Якщо заданий — стратегія діє лише по цих символах, ігноруючи тики
+        # волатильного wall-пулу (див. main.py / SymbolSelector(trade_only=True)).
+        self._symbol_pool_provider: Optional[Callable[[], Set[str]]] = None
 
         logger.info(
             f"TrendSupertrendStrategy: entry_tf={self._params['entry_timeframe']}, "
@@ -204,10 +208,26 @@ class TrendSupertrendStrategy(BaseStrategy):
             x.strip().upper() for x in str(self._params['excluded_symbol_prefixes']).split(',') if x.strip()
         )
 
+    def set_symbol_pool_provider(self, provider: Optional[Callable[[], Set[str]]]) -> None:
+        """Прив'язує стратегію до власного (трендового) пулу символів: після
+        цього analyze() реагує лише на символи, що зараз у цьому пулі."""
+        self._symbol_pool_provider = provider
+
     # ---------- тригер: нова свічка робочого ТФ ----------
 
     async def analyze(self, symbol: str, price: float) -> Optional[dict]:
         self._last_price[symbol] = price
+
+        # Гейт по власному пулу: якщо стратегія прив'язана до трендового пулу,
+        # тики волатильного wall-пулу ігноруємо (інакше вхід на "пилі" повертає
+        # сюди whipsaw-сигнали і дарма ходимо за свічками по REST).
+        if self._symbol_pool_provider is not None:
+            try:
+                if symbol not in self._symbol_pool_provider():
+                    return None
+            except Exception:
+                logger.error("TrendSupertrend: symbol_pool_provider failed", exc_info=True)
+                return None
 
         if self._excluded_prefixes and symbol.upper().startswith(self._excluded_prefixes):
             return None  # не-крипто контракт (форекс/сировина/акції/індекси) — не торгуємо

@@ -94,6 +94,37 @@ trading:
     # - і він же — поріг "без сигналу X секунд" для визначення "тихої" монети
     rotation_interval_seconds: 1800
 
+  # ОКРЕМИЙ пул символів для TrendSupertrendStrategy (main.py читає як
+  # config.get('trading.trend_filters')). Технічно той самий SymbolSelector,
+  # але з trade_only=True: ці монети підписуються ЛИШЕ на @trade, без @depth20,
+  # тому OrderBookAnalyzer їх не бачить і WallBreakout по них не торгує — пули
+  # повністю ізольовані. Якщо блок відсутній/порожній — трендовий пул не
+  # піднімається, і стратегія (якщо увімкнена) працює на спільному filters-пулі.
+  trend_filters:
+    # Тренд чистіше йде на ліквідних мейджорах, а не на топі за волатильністю
+    # (той дає "пилу", де Supertrend постійно розвертається проти EMA200).
+    rank_by: volume
+    # Костяк мейджорів завжди в пулі (whitelist обходить фільтри обігу/спреду).
+    whitelist_symbols:
+      - "BTC-USDT"
+      - "ETH-USDT"
+      - "SOL-USDT"
+      - "BNB-USDT"
+      - "XRP-USDT"
+      - "DOGE-USDT"
+    blacklist_symbols: []
+    max_symbols: 15
+    min_price: {}
+    max_price: {}
+    min_volume_24h: 50000000
+    max_spread_percent: 0.2
+    excluded_symbol_prefixes: "NCFX,NCCO,NCSK,NCSI"
+    # Рідша ротація, ніж у wall-пулу (30 хв): тренд повільний, а стратегії
+    # потрібно, щоб символ дожив у пулі до закриття 15m-свічки (перехід
+    # previous_bucket -> bucket на живому символі, trend_supertrend_strategy.py).
+    quiet_cooldown_seconds: 7200
+    rotation_interval_seconds: 3600
+
   # OrderBookAnalyzer (core/orderbook_analyzer.py) — детект "стін" і їх
   # пробою по partial book depth (@depth20). Сам по собі лише детектить +
   # логує + публікує WALL_DETECTED/WALL_BREAKOUT в EventBus (TelegramBot

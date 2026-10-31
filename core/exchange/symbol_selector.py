@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import List, Dict, Any, Set, Optional
+from typing import Callable, List, Dict, Any, Set, Optional
 
 from .bingx_client import BingXClient
 from ..common.market_data import held_symbols, to_float
@@ -60,6 +60,9 @@ class SymbolSelector:
         signal_tracker=None,
         event_bus: Optional[EventBus] = None,
         settings_manager=None,
+        trade_only: bool = False,
+        pool_label: str = "SYMBOLS",
+        reserved_symbols_provider: Optional[Callable[[], Set[str]]] = None,
     ):
         self.exchange = exchange
         self.filters = filters
@@ -69,6 +72,16 @@ class SymbolSelector:
         # (зберігається в БД, керується користувачем в реальному часі)
         # об'єднується з blacklist_symbols із config.yaml при кожному select().
         self.settings_manager = settings_manager
+        # trade_only=True — цей селектор веде ОКРЕМИЙ пул (напр. для
+        # TrendSupertrendStrategy) і підписує символи ЛИШЕ на @trade
+        # (PRICE_UPDATED), без @depth20. Так OrderBookAnalyzer їх не бачить і
+        # WallBreakout по них не торгує — повна ізоляція пулів (див. main.py).
+        self.trade_only = trade_only
+        # мітка для логів/SYMBOLS_ROTATED, щоб розрізняти пули ("SYMBOLS" vs "TREND-SYMBOLS")
+        self.pool_label = pool_label
+        # повертає набір символів ІНШОГО пулу (+ held у нього): @trade-підписку
+        # такого символу цей селектор НЕ знімає, бо вона потрібна іншому пулу.
+        self.reserved_symbols_provider = reserved_symbols_provider
         self._refresh_task: Optional[asyncio.Task] = None
         self.current_symbols: Set[str] = set()
 
@@ -173,7 +186,10 @@ class SymbolSelector:
         # з whitelist, а held лишається, поки позиція відкрита (SL/TP/trailing).
         protected = set(whitelist) | set(held)
 
-        currently_subscribed = set(getattr(self.exchange, 'subscribed_symbols', set()) or set())
+        # ВЛАСНИЙ пул цього селектора, а не глобальний exchange.subscribed_symbols:
+        # останній тепер є об'єднанням обох пулів (wall + trend), і трендовий
+        # селектор не повинен вважати wall-символи "своїми" підписками (і навпаки).
+        currently_subscribed = set(self.current_symbols)
         quiet_unheld: Set[str] = set()
 
         if self.signal_tracker is not None:
@@ -299,13 +315,31 @@ class SymbolSelector:
     async def _apply_unlocked(self) -> Set[str]:
         """Обчислює актуальний список символів, підписує нові, відписує зайві.
 
-        Спільний пул: кожен символ у `selected` отримує ОБИДВІ підписки —
-        @trade (для стратегій/TrailingStop/ExcursionTracker) і @depth20 (для
-        OrderBookAnalyzer). Це свідоме архітектурне рішення — один список
-        символів, одна ротація, замість двох незалежних пулів з різними
-        лімітами/таймаутами."""
+        Два режими:
+        - Основний (wall) пул, trade_only=False: кожен символ у `selected`
+          отримує ОБИДВІ підписки — @trade (стратегії/TrailingStop/Excursion)
+          і @depth20 (OrderBookAnalyzer).
+        - Трендовий пул, trade_only=True: ЛИШЕ @trade. @depth20 не чіпає взагалі
+          (ним володіє тільки основний пул) — тож OrderBookAnalyzer не бачить ці
+          монети і WallBreakout по них не торгує.
+
+        Координація пулів (модель володіння):
+        - @depth20 — виключно основний пул.
+        - @trade — спільний: підписку знімаємо, лише якщо символ не потрібен
+          цьому пулу І не зарезервований іншим пулом (reserved_symbols_provider).
+        Дифимо проти ВЛАСНого self.current_symbols (а не глобального
+        exchange.subscribed_symbols, який тепер є об'єднанням обох пулів).
+        held-символи завжди в `selected` (select() їх захищає), тому в
+        to_unsubscribe не потрапляють — окремий guard по held не потрібен."""
         selected = set(await self.select())
-        current = set(self.exchange.subscribed_symbols)
+        current = set(self.current_symbols)
+
+        reserved: Set[str] = set()
+        if self.reserved_symbols_provider is not None:
+            try:
+                reserved = set(self.reserved_symbols_provider() or set())
+            except Exception as e:
+                logger.error(f"[{self.pool_label}] reserved_symbols_provider failed: {e}")
 
         to_subscribe = selected - current
         to_unsubscribe = current - selected
@@ -315,36 +349,46 @@ class SymbolSelector:
 
         for symbol in to_subscribe:
             try:
-                await self.exchange.subscribe_trades(symbol)
+                # @trade може вже стояти від іншого пулу — не шлемо дубль-підписку
+                if symbol not in self.exchange.subscribed_symbols:
+                    await self.exchange.subscribe_trades(symbol)
+                self._subscribed_at.setdefault(symbol, time.time())
                 subscribed_ok.add(symbol)
-                self._subscribed_at[symbol] = time.time()
             except Exception as e:
-                logger.error(f"Failed to subscribe {symbol}: {e}")
-            try:
-                await self.exchange.subscribe_depth(symbol)
-            except Exception as e:
-                logger.error(f"Failed to subscribe depth for {symbol}: {e}")
+                logger.error(f"[{self.pool_label}] Failed to subscribe {symbol}: {e}")
+            if not self.trade_only:
+                try:
+                    if symbol not in self.exchange.depth_subscribed_symbols:
+                        await self.exchange.subscribe_depth(symbol)
+                except Exception as e:
+                    logger.error(f"[{self.pool_label}] Failed to subscribe depth for {symbol}: {e}")
 
         for symbol in to_unsubscribe:
-            try:
-                await self.exchange.unsubscribe_trades(symbol)
-                logger.info(f"[SYMBOLS] Unsubscribed: {symbol}")
-                unsubscribed_ok.add(symbol)
+            # @trade знімаємо лише якщо символ не тримає інший пул
+            if symbol in reserved:
                 self._subscribed_at.pop(symbol, None)
-            except Exception as e:
-                logger.error(f"Failed to unsubscribe {symbol}: {e}")
-            try:
-                await self.exchange.unsubscribe_depth(symbol)
-            except Exception as e:
-                logger.error(f"Failed to unsubscribe depth for {symbol}: {e}")
+            else:
+                try:
+                    await self.exchange.unsubscribe_trades(symbol)
+                    logger.info(f"[{self.pool_label}] Unsubscribed: {symbol}")
+                    unsubscribed_ok.add(symbol)
+                    self._subscribed_at.pop(symbol, None)
+                except Exception as e:
+                    logger.error(f"[{self.pool_label}] Failed to unsubscribe {symbol}: {e}")
+            if not self.trade_only:
+                try:
+                    await self.exchange.unsubscribe_depth(symbol)
+                except Exception as e:
+                    logger.error(f"[{self.pool_label}] Failed to unsubscribe depth for {symbol}: {e}")
 
         if not to_subscribe and not to_unsubscribe:
-            logger.info(f"[SYMBOLS] No changes, {len(selected)} symbols active")
+            logger.info(f"[{self.pool_label}] No changes, {len(selected)} symbols active")
         elif self.event_bus is not None and (subscribed_ok or unsubscribed_ok):
             try:
                 await self.event_bus.publish(Event(
                     type=EventType.SYMBOLS_ROTATED,
                     data={
+                        'pool': self.pool_label,
                         'added': sorted(subscribed_ok),
                         'removed': sorted(unsubscribed_ok),
                         'total_active': len(selected),
@@ -352,7 +396,7 @@ class SymbolSelector:
                     source="SymbolSelector",
                 ))
             except Exception as e:
-                logger.error(f"[SYMBOLS] Failed to publish SYMBOLS_ROTATED event: {e}")
+                logger.error(f"[{self.pool_label}] Failed to publish SYMBOLS_ROTATED event: {e}")
 
         self.current_symbols = selected
         return selected

@@ -162,6 +162,28 @@ async def main():
     # 24h-знімок монети (об'єм, зміна, діапазон, спред) -> trade_analytics.market_context
     trader.market_context_provider = symbol_selector.market_context
 
+    # ОКРЕМИЙ пул для TrendSupertrendStrategy: підписує монети ЛИШЕ на @trade
+    # (trade_only=True), тому OrderBookAnalyzer їх не бачить і WallBreakout по
+    # них не торгує. Піднімається, лише якщо є непорожній trading.trend_filters.
+    # Два селектори координуються через reserved_symbols_provider: @trade-підписку
+    # спільного символу знімає лише той пул, для якого він зайвий, і лише якщо
+    # його не тримає інший пул.
+    trend_filters_config = config.get('trading.trend_filters', {}) or {}
+    trend_symbol_selector = None
+    if trend_filters_config:
+        trend_symbol_selector = SymbolSelector(
+            exchange,
+            trend_filters_config,
+            signal_tracker=signal_activity_tracker,
+            event_bus=event_bus,
+            settings_manager=settings_manager,
+            trade_only=True,
+            pool_label="TREND-SYMBOLS",
+            reserved_symbols_provider=lambda: symbol_selector.current_symbols,
+        )
+        symbol_selector.reserved_symbols_provider = lambda: trend_symbol_selector.current_symbols
+        logger.info("[OK] Trend Symbol Selector initialized (@trade-only pool for TrendSupertrendStrategy)")
+
     orderbook_config = config.get('trading.orderbook', {})
     OrderBookAnalyzer(event_bus, orderbook_config)  # живе через підписки на EventBus
     logger.info(
@@ -178,6 +200,14 @@ async def main():
         'WallBreakoutStrategy',
         lambda params: trailing_stop_manager.set_levels(params.get('trail_levels_percent')),
     )
+
+    # Прив'язуємо TrendSupertrendStrategy до її власного трендового пулу: після
+    # цього вона реагує лише на тики цих символів, ігноруючи волатильний wall-пул.
+    if trend_symbol_selector is not None:
+        trend_strategy = strategy_manager.get('TrendSupertrendStrategy')
+        if trend_strategy is not None and hasattr(trend_strategy, 'set_symbol_pool_provider'):
+            trend_strategy.set_symbol_pool_provider(lambda: trend_symbol_selector.current_symbols)
+            logger.info("[OK] TrendSupertrendStrategy bound to its trend symbol pool")
 
     telegram_enabled = config.get('telegram.enabled', False)
     telegram_bot = None
@@ -212,6 +242,12 @@ async def main():
         logger.info(f"[OK] Initial symbol selection: {sorted(selected_symbols)}")
 
         await symbol_selector.start_refresh_loop(refresh_interval)
+
+        if trend_symbol_selector is not None:
+            trend_symbols = await trend_symbol_selector.apply()
+            logger.info(f"[OK] Initial trend symbol selection (@trade-only): {sorted(trend_symbols)}")
+            trend_refresh_interval = trend_filters_config.get('rotation_interval_seconds', 3600)
+            await trend_symbol_selector.start_refresh_loop(trend_refresh_interval)
 
     # --- Mini App (webapp) ---
     # Поднимаем FastAPI как фоновую задачу того же event loop — отдельный
@@ -280,6 +316,10 @@ async def main():
 
     await symbol_selector.stop_refresh_loop()
     logger.info("[OK] Symbol selector stopped")
+
+    if trend_symbol_selector is not None:
+        await trend_symbol_selector.stop_refresh_loop()
+        logger.info("[OK] Trend symbol selector stopped")
 
     await exchange.stop_websocket()
     logger.info("[OK] WebSocket stopped")

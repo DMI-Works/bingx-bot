@@ -135,6 +135,7 @@ npm run build   # сборка в webapp/backend/static, FastAPI отдаёт е
   - `excluded_symbol_prefixes` — не-крипто контракты BingX (форекс, сырьё, акции, индексы), которые не попадают в пул;
   - `rank_by` — порядок отбора: `volatility` (по 24h-диапазону, по умолчанию) или `volume`;
   - `quiet_cooldown_seconds` — монета, убранная из пула за отсутствие сигналов, на это время уходит в конец очереди, и ротация пробует другие монеты.
+- `trading.trend_filters` — **отдельный** пул символов для `TrendSupertrendStrategy` (те же ключи, что у `trading.filters`). Технически это второй `SymbolSelector`, который подписывает монеты только на `@trade` (без `@depth20`), поэтому `OrderBookAnalyzer` их не видит и `WallBreakoutStrategy` по ним не торгует — пулы полностью изолированы. По умолчанию ранжирование по `volume`, реже ротация и whitelist мейджоров (BTC/ETH/SOL/…), т.к. тренд чище идёт на ликвидных монетах, а не на топе по волатильности. Если блок пуст или отсутствует — трендовый пул не поднимается, и стратегия (если включена) работает на общем пуле `trading.filters`.
 - `trading.orderbook` — параметры детекта стен (`wall_multiplier`, `approach_threshold_pct`, `breakout_consumption_pct` и др.).
 - `trading.trailing_stop` — буферы трейлинга и `taker_fee_rate` для режима `atr_3step`. Блок должен быть вложен в `trading:`.
 - `logging`, `telegram`, `webapp`, `analytics` (`path_step_pct` и `path_max_points` — детализация траектории сделки).
@@ -146,7 +147,7 @@ npm run build   # сборка в webapp/backend/static, FastAPI отдаёт е
 ## Стратегии
 
 - **WallBreakoutStrategy** — торгует пробои стен, которые находит `OrderBookAnalyzer` по стакану `@depth20`. Сам анализатор сделок не открывает, а только публикует `WALL_DETECTED` и `WALL_BREAKOUT`. Уровни трейлинга по ROI (`trail_levels_percent`) задаются параметрами этой стратегии. `reentry_cooldown_seconds` (по умолчанию 900) запрещает новый вход в монету после закрытия сделки по ней: повторные входы в «пилу» дали большую часть убытка на тестнете.
-- **TrendSupertrendStrategy** — фильтр тренда по EMA, вход по Supertrend с подтверждением объёмом, стоп по ATR, размер позиции от `risk_percent`. Использует трейлинг `atr_3step`.
+- **TrendSupertrendStrategy** — фильтр тренда по EMA, вход по Supertrend с подтверждением объёмом, стоп по ATR, размер позиции от `risk_percent`. Использует трейлинг `atr_3step`. Работает на собственном пуле символов (`trading.trend_filters`), изолированном от пула WallBreakout.
 
 Все зарегистрированные стратегии создаются при запуске; выключенные просто игнорируют тики. Стратегии не имеют доступа к торговле на бирже: они только генерируют сигналы, а позиции открывает `SimpleTrader`.
 
