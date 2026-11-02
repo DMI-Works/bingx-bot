@@ -7,7 +7,7 @@ exchange:
   # перемкнути з Mini App (вкладка Профіль): він пишеться в Mongo (control.mode
   # у БАЗОВІЙ базі) і має пріоритет над цим значенням. Якщо override у Mongo
   # немає — використовується це. testnet=true -> база trading_bot_testnet + VST-API.
-  testnet: false
+  testnet: true
 
   websocket:
     enabled: true
