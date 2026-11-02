@@ -36,6 +36,15 @@ def require_symbol_selector(request: Request):
     return _require_state(request, "symbol_selector", "Symbol selector not ready yet")
 
 
+def require_trader(request: Request):
+    return _require_state(request, "trader", "Trader not ready yet")
+
+
+def require_restart_event(request: Request):
+    # Подія штатного перезапуску (зміна режиму). Є лише коли бот піднятий main.py.
+    return _require_state(request, "restart_event", "Bot supervisor not running")
+
+
 def require_telegram_user(x_telegram_init_data: str = Header(default="")) -> dict:
     user = validate_init_data(x_telegram_init_data)
     if user is None:

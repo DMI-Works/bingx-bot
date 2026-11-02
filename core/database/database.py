@@ -7,7 +7,7 @@ import certifi
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.database import Database as MongoDatabase
 
-from .mongo_config import IS_TESTNET, MONGO_DB_NAME, MONGO_URI
+from .mongo_config import IS_TESTNET, MONGO_URI, db_name_for, mode_str
 from .positions_repository import PositionsRepository
 from .trade_analytics_repository import TradeAnalyticsRepository
 
@@ -18,11 +18,17 @@ logger = logging.getLogger(__name__)
 class Database(PositionsRepository, TradeAnalyticsRepository):
     """Єдина точка доступу до MongoDB. Методи колекцій positions і
     trade_analytics — у відповідних репозиторіях; тут — підключення,
-    індекси і key-value колекція settings."""
+    індекси і key-value колекція settings.
 
-    def __init__(self):
+    Режим (testnet/live) передається явно — від нього залежать і назва робочої
+    бази, і поле trade_analytics.mode. Якщо не заданий — береться дефолт із
+    config.yaml (IS_TESTNET), як було раніше."""
+
+    def __init__(self, testnet: Optional[bool] = None):
+        self.testnet = IS_TESTNET if testnet is None else bool(testnet)
         self.uri = MONGO_URI
-        self.db_name = MONGO_DB_NAME
+        self.db_name = db_name_for(self.testnet)
+        self.trade_mode = mode_str(self.testnet)
         self.client: Optional[MongoClient] = None
         self.db: Optional[MongoDatabase] = None
 
@@ -33,7 +39,7 @@ class Database(PositionsRepository, TradeAnalyticsRepository):
         self.client = MongoClient(self.uri, tlsCAFile=certifi.where())
         self.db = self.client[self.db_name]
         self._create_indexes()
-        logger.info(f"Database initialized: db={self.db_name} (testnet={IS_TESTNET})")
+        logger.info(f"Database initialized: db={self.db_name} (testnet={self.testnet})")
 
     def _create_indexes(self) -> None:
         self.db.positions.create_index("order_id", unique=True, sparse=True)

@@ -1,12 +1,25 @@
 import { useState, useEffect } from "react";
-import { LogOut } from "lucide-react";
-import { apiGet, tg } from "../../lib/api";
+import { LogOut, Repeat } from "lucide-react";
+import { apiGet, apiPost, tg } from "../../lib/api";
 import { fmtUsd, fmtUsdPlain, initialsOf } from "../../lib/format";
 import { Spinner } from "../common";
+
+// Подтверждение: в Telegram — нативное окно, вне его (локальная разработка) — window.confirm.
+function confirmAsync(message) {
+  if (tg?.showConfirm) {
+    return new Promise((resolve) => tg.showConfirm(message, resolve));
+  }
+  return Promise.resolve(window.confirm(message));
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export default function ProfileTab() {
   const [profile, setProfile] = useState(null);
   const [error, setError] = useState(null);
+  // Состояние смены режима: idle | switching; switchMsg — что показать пользователю.
+  const [switching, setSwitching] = useState(false);
+  const [switchMsg, setSwitchMsg] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -15,6 +28,64 @@ export default function ProfileTab() {
       .catch((e) => !cancelled && setError(e.message));
     return () => { cancelled = true; };
   }, []);
+
+  // Отправляет смену режима. force=true — после подтверждения при открытых позициях.
+  async function postMode(target, force) {
+    const res = await apiPost("/settings/mode", { testnet: target, force });
+    if (!res.restarting) return; // уже в этом режиме
+    // Бот штатно перезапускается в этом же процессе (~10-20с): /api/* на это
+    // время могут отвечать 503. Опрашиваем /profile, пока режим не сменится.
+    setSwitchMsg(`Перезапуск бота в режим ${target ? "Testnet" : "Live"}…`);
+    for (let i = 0; i < 40; i++) {
+      await sleep(1500);
+      try {
+        const p = await apiGet("/profile");
+        if (p.testnet === target) {
+          setProfile(p);
+          setSwitchMsg(null);
+          setSwitching(false);
+          return;
+        }
+      } catch { /* бэкенд ещё перезапускается — продолжаем опрос */ }
+    }
+    // Не дождались — перезагрузим страницу, пусть подтянет актуальное состояние.
+    window.location.reload();
+  }
+
+  async function handleSwitchMode() {
+    if (!profile || switching) return;
+    const target = !profile.testnet; // куда переключаемся
+    const warn = target
+      ? "Переключить в TESTNET? Бот перезапустится и начнёт торговать на тестовой бирже (виртуальные средства)."
+      : "⚠️ Переключить в LIVE (РЕАЛЬНЫЕ ДЕНЬГИ)? Бот перезапустится и начнёт торговать на реальном счёте.";
+    if (!(await confirmAsync(warn))) return;
+
+    setSwitching(true);
+    setError(null);
+    setSwitchMsg("Переключение режима…");
+    try {
+      await postMode(target, false);
+    } catch (e) {
+      if (e.status === 409) {
+        const n = e.detail?.open_positions ?? "?";
+        const ok = await confirmAsync(
+          `Есть ${n} открытых позиций. Они останутся в текущей базе без сопровождения SL/TP до возврата в этот режим. Переключить принудительно?`
+        );
+        if (ok) {
+          try {
+            await postMode(target, true);
+            return;
+          } catch (e2) {
+            setError(e2.message);
+          }
+        }
+      } else {
+        setError(e.message);
+      }
+      setSwitchMsg(null);
+      setSwitching(false);
+    }
+  }
 
   // Данные о самом пользователе даёт сам Telegram (initData) — не то, что
   // отдаёт наш бэкенд про биржевой аккаунт. Вне Telegram (например, при
@@ -63,6 +134,21 @@ export default function ProfileTab() {
             </div>
           </div>
         </div>
+        {profile && (
+          <>
+            <button
+              className="secondary-btn"
+              onClick={handleSwitchMode}
+              disabled={switching}
+            >
+              {switching ? <Spinner /> : <Repeat size={16} />}
+              {switching
+                ? "Переключение…"
+                : `Переключить в ${profile.testnet ? "Live" : "Testnet"}`}
+            </button>
+            {switchMsg && <div className="row-sub" style={{ marginTop: 8 }}>{switchMsg}</div>}
+          </>
+        )}
       </div>
 
       <div className="section">

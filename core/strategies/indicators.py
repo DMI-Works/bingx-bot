@@ -91,6 +91,29 @@ def atr(
     return result
 
 
+def pct_return(values: List[float], lookback: int) -> Optional[float]:
+    """Доходність за lookback періодів: values[-1]/values[-1-lookback] - 1.
+    None, якщо історії менше ніж lookback+1 або база <= 0. Для TSMOM-сигналу."""
+    if lookback <= 0 or len(values) <= lookback:
+        return None
+    base = values[-1 - lookback]
+    if base <= 0:
+        return None
+    return values[-1] / base - 1.0
+
+
+def realized_vol(returns: List[Optional[float]], window: int) -> Optional[float]:
+    """Стандартне відхилення останніх `window` (популяційне) по-денних
+    доходностей. None, якщо валідних точок менше половини вікна. Для
+    vol-таргет сайзингу TSMOM."""
+    seg = [r for r in returns[-window:] if r is not None]
+    if len(seg) < max(2, window // 2):
+        return None
+    mean_r = sum(seg) / len(seg)
+    var = sum((r - mean_r) ** 2 for r in seg) / len(seg)
+    return var ** 0.5
+
+
 def supertrend(
     highs: List[float],
     lows: List[float],

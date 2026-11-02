@@ -19,8 +19,15 @@ async function request(method, path, body) {
   });
   if (!res.ok) {
     let detail = "";
-    try { detail = (await res.json()).detail || ""; } catch { /* noop */ }
-    throw new Error(detail || `API ${path} -> ${res.status}`);
+    try { detail = (await res.json()).detail ?? ""; } catch { /* noop */ }
+    // detail может быть объектом (напр. 409 при смене режима: {message, open_positions}).
+    const msg = typeof detail === "object" && detail
+      ? (detail.message || `API ${path} -> ${res.status}`)
+      : (detail || `API ${path} -> ${res.status}`);
+    const err = new Error(msg);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
   }
   return res.json();
 }

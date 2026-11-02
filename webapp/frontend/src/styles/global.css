@@ -359,6 +359,25 @@
   border-color: rgba(241,73,91,0.3);
 }
 
+/* Нейтральна кнопка-дія (напр. перемикання режиму testnet/live у профілі) */
+.secondary-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 12px;
+}
+.secondary-btn:disabled { opacity: 0.6; cursor: default; }
+
 /* Small round icon button (row actions, e.g. blacklist/restore a coin) */
 .icon-btn {
   width: 32px;

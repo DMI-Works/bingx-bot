@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 from pymongo import DESCENDING
 
 from .analytics_fields import entry_derived_fields, exit_derived_fields
-from .mongo_config import TRADE_MODE
 
 
 class TradeAnalyticsRepository:
@@ -54,7 +53,8 @@ class TradeAnalyticsRepository:
             "order_id": order_id,
             "symbol": symbol,
             "side": side,
-            "mode": TRADE_MODE,
+            # self.trade_mode — режим цього інстансу Database (testnet/live)
+            "mode": self.trade_mode,
             "status": "OPEN",
             "opened_by": opened_by,
             "strategy": strategy,

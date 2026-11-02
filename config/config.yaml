@@ -3,6 +3,10 @@
 # Exchange Configuration
 
 exchange:
+  # ДЕФОЛТ режиму (запечений в образ на Railway). Реальний режим рантайму можна
+  # перемкнути з Mini App (вкладка Профіль): він пишеться в Mongo (control.mode
+  # у БАЗОВІЙ базі) і має пріоритет над цим значенням. Якщо override у Mongo
+  # немає — використовується це. testnet=true -> база trading_bot_testnet + VST-API.
   testnet: false
 
   websocket:
@@ -124,6 +128,44 @@ trading:
     # previous_bucket -> bucket на живому символі, trend_supertrend_strategy.py).
     quiet_cooldown_seconds: 7200
     rotation_interval_seconds: 3600
+
+  # ОКРЕМИЙ СТАБІЛЬНИЙ пул для TsMomentumStrategy (main.py читає як
+  # config.get('trading.tsmom_filters')). Технічно той самий SymbolSelector з
+  # trade_only=True (підписка лише на @trade, без @depth20 — ізоляція від
+  # OrderBookAnalyzer/WallBreakout), АЛЕ з довгою ротацією: денний моментум
+  # тримає позицію тижнями, тому пул НЕ має ротуватись — інакше символ вийде з
+  # підписки, і стратегія не зможе закрити позицію по розвороту сигналу.
+  # Через це universe задається whitelist'ом ліквідних монет, а не ранжуванням.
+  # Якщо блок відсутній/порожній — пул не піднімається, стратегія (якщо
+  # увімкнена) працює на спільному filters-пулі.
+  tsmom_filters:
+    # Денний моментум чистіший на ліквідних монетах; whitelist обходить фільтри.
+    rank_by: volume
+    whitelist_symbols:
+      - "BTC-USDT"
+      - "ETH-USDT"
+      - "SOL-USDT"
+      - "BNB-USDT"
+      - "XRP-USDT"
+      - "DOGE-USDT"
+      - "LTC-USDT"
+      - "LINK-USDT"
+      - "AVAX-USDT"
+      - "AAVE-USDT"
+      - "UNI-USDT"
+      - "ENA-USDT"
+      - "ONDO-USDT"
+      - "FIL-USDT"
+    blacklist_symbols: []
+    max_symbols: 14
+    min_price: {}
+    max_price: {}
+    min_volume_24h: 50000000
+    max_spread_percent: 0.3
+    excluded_symbol_prefixes: "NCFX,NCCO,NCSK,NCSI"
+    # Ротація РІДКА (раз на добу) — пул має бути стабільним (див. коментар вище).
+    quiet_cooldown_seconds: 86400
+    rotation_interval_seconds: 86400
 
   # OrderBookAnalyzer (core/orderbook_analyzer.py) — детект "стін" і їх
   # пробою по partial book depth (@depth20). Сам по собі лише детектить +

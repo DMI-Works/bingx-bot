@@ -509,7 +509,9 @@ class SimpleTrader:
             close_price=to_float(order_data.get('ap', 0)),
             realized_pnl=position.get('realized_pnl_accum', 0.0),
             closed_by=closed_by,
-            close_reason=_CLOSE_REASON_BY_ORDER_TYPE.get(order_type, 'manual'),
+            close_reason=_CLOSE_REASON_BY_ORDER_TYPE.get(
+                order_type, position.get('close_reason_override', 'manual')
+            ),
             close_order_type=order_type,
         )
 
@@ -521,7 +523,68 @@ class SimpleTrader:
             known_client_ids.add(position['sl_client_order_id'])
         if position.get('sl_order_id'):
             known_order_ids.add(position['sl_order_id'])
+        # програмне закриття ботом (close_position — напр. розворот сигналу TSMOM)
+        if position.get('manual_close_client_order_id'):
+            known_client_ids.add(position['manual_close_client_order_id'])
         return (bool(client_order_id) and client_order_id in known_client_ids) or exchange_order_id in known_order_ids
+
+    async def close_position(self, symbol: str, side: str, reason: str = 'signal_flip') -> bool:
+        """Програмно закриває позицію бота reduce-only MARKET-ордером (напр.
+        розворот сигналу TSMOM — вихід не по ціновому стопу, а по зміні сигналу).
+
+        Висячі SL/TP скасовуємо, щоб вони не спрацювали на залишку. Фіналізацію
+        (realized_pnl, trade_analytics, видалення з open_positions) робить штатний
+        обробник ORDER_TRADE_UPDATE -> _finalize_close; тут лише ініціюємо
+        закриття й помічаємо його як closed_by=bot з потрібним close_reason."""
+        key = position_key(symbol, side)
+        position = self.open_positions.get(key)
+        if not position:
+            logger.info(f"close_position: немає відкритої {symbol} {side} — пропускаю")
+            return False
+        quantity = position.get('remaining_quantity') or position.get('quantity')
+        if not quantity or quantity <= 0:
+            logger.warning(f"close_position: {symbol} {side} без quantity — не можу закрити")
+            return False
+
+        # 1) скасувати захисні ордери (інакше спрацюють на нульовому залишку)
+        order_ids = list(position.get('tp_order_ids') or [])
+        if position.get('sl_order_id'):
+            order_ids.append(position['sl_order_id'])
+        for oid in order_ids:
+            try:
+                await self.exchange.cancel_order(symbol, oid)
+            except BingXAPIError as e:
+                logger.info(f"close_position: ордер {oid} ({symbol}) вже неактивний: {e.code} {e.msg}")
+            except Exception as e:
+                logger.warning(f"close_position: не вдалося скасувати {oid} ({symbol}): {e}")
+
+        # 2) позначки, щоб закриття залічилось як бот-flip (для trade_analytics)
+        from ..exchange.orders import new_client_order_id
+        cid = new_client_order_id("flip")
+        position['manual_close_client_order_id'] = cid
+        position['close_reason_override'] = reason
+
+        # 3) reduce-only MARKET на закриття (hedge-mode: positionSide = бік позиції)
+        try:
+            await self.exchange.create_order(
+                symbol=symbol,
+                side=close_order_side(side),
+                order_type='MARKET',
+                quantity=quantity,
+                reduce_only=True,
+                position_side=side,
+                client_order_id=cid,
+            )
+        except BingXAPIError as e:
+            logger.error(f"close_position: біржа відхилила закриття {symbol} {side}: {e.code} {e.msg}")
+            await self._notify_error(
+                error=f"{e.code} {e.msg}",
+                context=f"Не вдалося закрити {symbol} {side} ({reason})",
+            )
+            return False
+
+        logger.info(f"close_position: {symbol} {side} закрито reduce-only MARKET (reason={reason}, qty={quantity})")
+        return True
 
     def _capture_opening_commission(self, position: dict, order_data: dict, exchange_order_id: str) -> None:
         commission_open = to_float(order_data.get('n', 0))

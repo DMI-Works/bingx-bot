@@ -19,7 +19,16 @@ from core.strategies.param_catalog import (
     infer_param_kind,
 )
 
-from ..deps import require_settings_manager, require_strategy_settings, require_telegram_user
+from core.database.mongo_config import read_mode_override, save_mode_override
+
+from ..deps import (
+    require_db,
+    require_restart_event,
+    require_settings_manager,
+    require_strategy_settings,
+    require_telegram_user,
+    require_trader,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +87,62 @@ def _apply_params_live(request: Request, name: str, params: Dict[str, Any]) -> N
 def get_settings(request: Request):
     settings_manager = require_settings_manager(request)
     store = require_strategy_settings(request)
+    # Режим: testnet — поточний активний (з яким піднятий бот); mode_override —
+    # що записано в Mongo (None => працюємо на дефолті з config.yaml).
+    db = require_db(request)
+    try:
+        mode_override = read_mode_override(db.client)
+    except Exception:
+        mode_override = None
     return {
         "trading_enabled": settings_manager.get_trading_enabled(),
+        "testnet": bool(getattr(request.app.state, "testnet", True)),
+        "mode_override": mode_override,
         "strategies": [_serialize_strategy(entry, store) for entry in store.list_strategies()],
     }
+
+
+@router.post("/mode")
+async def set_mode(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(require_telegram_user),
+):
+    """Перемикання testnet <-> live з Mini App. Пише режим у mode-незалежну
+    базу (control.mode) і сигналить супервізору main.py на штатний перезапуск
+    у тому ж процесі (без редеплою). Guard: не перемикати з відкритими
+    позиціями, якщо немає явного force=true (позиції лишилися б у старій базі
+    без супроводу SL/TP до повернення в той режим)."""
+    testnet = payload.get("testnet")
+    if not isinstance(testnet, bool):
+        raise HTTPException(status_code=422, detail="'testnet' must be a boolean")
+    force = bool(payload.get("force", False))
+
+    current = bool(getattr(request.app.state, "testnet", True))
+    if testnet == current:
+        return {"testnet": current, "restarting": False, "detail": "already in this mode"}
+
+    trader = require_trader(request)
+    open_count = len(getattr(trader, "open_positions", {}) or {})
+    if open_count > 0 and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Є відкриті позиції — зміна режиму заблокована",
+                "open_positions": open_count,
+            },
+        )
+
+    restart_event = require_restart_event(request)
+    db = require_db(request)
+    save_mode_override(db.client, testnet)
+    restart_event.set()
+
+    logger.info(
+        f"Mode switch requested via mini app: {'testnet' if testnet else 'live'} "
+        f"(force={force}, open_positions={open_count}, user={user})"
+    )
+    return {"testnet": testnet, "restarting": True}
 
 
 @router.post("/trading")

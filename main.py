@@ -9,10 +9,14 @@ from dotenv import load_dotenv
 load_dotenv()  # ВАЖНО: до импорта webapp.backend.api — auth.py читает
                 # TELEGRAM_BOT_TOKEN из окружения на уровне модуля, при импорте
 
+import certifi
 import uvicorn
+from pymongo import MongoClient
 
 from config import ConfigLoader
+from core.common.position_math import position_key
 from core.database import Database, StrategySettingsStore
+from core.database.mongo_config import MONGO_URI, read_mode_override, resolve_testnet
 from core.events import EventBus
 from core.exchange import BingXClient
 from core.exchange import SymbolSelector
@@ -63,29 +67,79 @@ def setup_logging(config: ConfigLoader) -> None:
     logger.info("Logging initialized")
 
 
+def _resolve_testnet(config: ConfigLoader, logger: logging.Logger) -> bool:
+    """Визначає режим рантайму ДО вибору робочої бази: override із Mini App
+    (control.mode у БАЗОВІЙ БД) важливіший за дефолт exchange.testnet із
+    config.yaml. Одне коротке підключення лише заради прапорця."""
+    config_default = config.get('exchange.testnet', True)
+    override = None
+    try:
+        probe = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+        try:
+            override = read_mode_override(probe)
+        finally:
+            probe.close()
+    except Exception as e:
+        logger.warning(f"Не вдалось прочитати override режиму ({e}) — дефолт із config.yaml")
+    testnet = resolve_testnet(config_default, override)
+    src = "config.yaml" if override is None else "Mini App (control.mode)"
+    logger.info(f"Режим: {'testnet' if testnet else 'LIVE'} (джерело: {src})")
+    return testnet
+
+
 async def main():
+    """Супервізор: будує й запускає бота; якщо з Mini App прийшов запит на зміну
+    режиму (restart_event) — штатно зупиняється й перезбирає все з новим режимом,
+    без редеплою. KeyboardInterrupt виходить остаточно."""
     config = ConfigLoader()
     setup_logging(config)
+    logger = logging.getLogger(__name__)
 
+    while True:
+        restart_event = asyncio.Event()
+        should_restart = await run_bot(ConfigLoader(), restart_event)
+        if not should_restart:
+            break
+        logger.info("=" * 60)
+        logger.info("Зміна режиму торгівлі — перезапуск бота в цьому ж процесі")
+        logger.info("=" * 60)
+
+
+async def run_bot(config: ConfigLoader, restart_event: asyncio.Event) -> bool:
+    """Одна «життєва сесія» бота. Повертає True, якщо був запит на перезапуск
+    (зміна режиму), False — якщо звичайний вихід (Ctrl+C)."""
     logger = logging.getLogger(__name__)
     logger.info("=" * 60)
     logger.info("Starting Ruflo Trading Bot")
     logger.info("=" * 60)
 
-    db = Database()
+    testnet = _resolve_testnet(config, logger)
+
+    db = Database(testnet=testnet)
     logger.info("[OK] Database initialized")
 
     event_bus = EventBus()
     await event_bus.start()
     logger.info("[OK] Event Bus started")
 
-    api_key = os.getenv('BINGX_API_KEY')
-    api_secret = os.getenv('BINGX_API_SECRET')
-    testnet = config.get('exchange.testnet', True)
+    # Ключі за режимом: testnet (VST) і live — РІЗНІ ключі. У testnet беремо
+    # BINGX_API_KEY_TESTNET/_SECRET_TESTNET; якщо їх немає — відкат на live-ключі
+    # з попередженням (VST-ендпоінти їх не приймуть — запити до біржі падатимуть).
+    if testnet:
+        api_key = os.getenv('BINGX_API_KEY_TESTNET') or os.getenv('BINGX_API_KEY')
+        api_secret = os.getenv('BINGX_API_SECRET_TESTNET') or os.getenv('BINGX_API_SECRET')
+        if not os.getenv('BINGX_API_KEY_TESTNET'):
+            logger.warning(
+                "testnet-режим, але BINGX_API_KEY_TESTNET не задано — використовую live-ключі. "
+                "VST-ендпоінти їх, найімовірніше, відхилять. Додай окремі testnet-ключі у .env."
+            )
+    else:
+        api_key = os.getenv('BINGX_API_KEY')
+        api_secret = os.getenv('BINGX_API_SECRET')
 
     if not api_key or not api_secret:
         logger.error("BingX API credentials not found in environment variables")
-        return
+        return False
 
     exchange = BingXClient(
         api_key=api_key,
@@ -179,10 +233,42 @@ async def main():
             settings_manager=settings_manager,
             trade_only=True,
             pool_label="TREND-SYMBOLS",
-            reserved_symbols_provider=lambda: symbol_selector.current_symbols,
         )
-        symbol_selector.reserved_symbols_provider = lambda: trend_symbol_selector.current_symbols
         logger.info("[OK] Trend Symbol Selector initialized (@trade-only pool for TrendSupertrendStrategy)")
+
+    # ОКРЕМИЙ СТАБІЛЬНИЙ пул для TsMomentumStrategy (денний моментум тримає
+    # позицію тижнями — ротація майже вимкнена, universe по whitelist).
+    # Теж @trade-only, тому ізольований від OrderBookAnalyzer/WallBreakout.
+    tsmom_filters_config = config.get('trading.tsmom_filters', {}) or {}
+    tsmom_symbol_selector = None
+    if tsmom_filters_config:
+        tsmom_symbol_selector = SymbolSelector(
+            exchange,
+            tsmom_filters_config,
+            signal_tracker=signal_activity_tracker,
+            event_bus=event_bus,
+            settings_manager=settings_manager,
+            trade_only=True,
+            pool_label="TSMOM-SYMBOLS",
+        )
+        logger.info("[OK] TSMOM Symbol Selector initialized (@trade-only stable pool for TsMomentumStrategy)")
+
+    # Координація @trade-підписок між пулами: кожен пул НЕ знімає @trade символу,
+    # який тримає БУДЬ-ЯКИЙ інший пул (union). @depth чіпає лише wall-пул.
+    def _others_union(*selectors):
+        def provider():
+            union = set()
+            for sel in selectors:
+                if sel is not None:
+                    union |= set(sel.current_symbols)
+            return union
+        return provider
+
+    symbol_selector.reserved_symbols_provider = _others_union(trend_symbol_selector, tsmom_symbol_selector)
+    if trend_symbol_selector is not None:
+        trend_symbol_selector.reserved_symbols_provider = _others_union(symbol_selector, tsmom_symbol_selector)
+    if tsmom_symbol_selector is not None:
+        tsmom_symbol_selector.reserved_symbols_provider = _others_union(symbol_selector, trend_symbol_selector)
 
     orderbook_config = config.get('trading.orderbook', {})
     OrderBookAnalyzer(event_bus, orderbook_config)  # живе через підписки на EventBus
@@ -208,6 +294,18 @@ async def main():
         if trend_strategy is not None and hasattr(trend_strategy, 'set_symbol_pool_provider'):
             trend_strategy.set_symbol_pool_provider(lambda: trend_symbol_selector.current_symbols)
             logger.info("[OK] TrendSupertrendStrategy bound to its trend symbol pool")
+
+    # TsMomentumStrategy: власний стабільний пул + доступ до відкритих позицій
+    # (для сверки сигнал/позиція) + колбек закриття по розвороту сигналу.
+    if tsmom_symbol_selector is not None:
+        tsmom_strategy = strategy_manager.get('TsMomentumStrategy')
+        if tsmom_strategy is not None and hasattr(tsmom_strategy, 'set_symbol_pool_provider'):
+            tsmom_strategy.set_symbol_pool_provider(lambda: tsmom_symbol_selector.current_symbols)
+            tsmom_strategy.set_position_provider(
+                lambda symbol, side: trader.open_positions.get(position_key(symbol, side))
+            )
+            tsmom_strategy.set_close_callback(trader.close_position)
+            logger.info("[OK] TsMomentumStrategy bound to its stable pool (+ position provider & close callback)")
 
     telegram_enabled = config.get('telegram.enabled', False)
     telegram_bot = None
@@ -249,6 +347,12 @@ async def main():
             trend_refresh_interval = trend_filters_config.get('rotation_interval_seconds', 3600)
             await trend_symbol_selector.start_refresh_loop(trend_refresh_interval)
 
+        if tsmom_symbol_selector is not None:
+            tsmom_symbols = await tsmom_symbol_selector.apply()
+            logger.info(f"[OK] Initial TSMOM symbol selection (@trade-only, stable): {sorted(tsmom_symbols)}")
+            tsmom_refresh_interval = tsmom_filters_config.get('rotation_interval_seconds', 86400)
+            await tsmom_symbol_selector.start_refresh_loop(tsmom_refresh_interval)
+
     # --- Mini App (webapp) ---
     # Поднимаем FastAPI как фоновую задачу того же event loop — отдельный
     # процесс/сервис на Railway не нужен, порт берём из PORT (его подставляет
@@ -266,6 +370,12 @@ async def main():
         webapp_app.state.strategy_manager = strategy_manager
         webapp_app.state.symbol_selector = symbol_selector
         webapp_app.state.signal_tracker = signal_activity_tracker
+        # Для перемикача режиму з Mini App: поточний режим, джерело відкритих
+        # позицій (guard від зміни режиму з відкритими угодами) і подія-сигнал
+        # штатного перезапуску супервізору (див. main()).
+        webapp_app.state.testnet = testnet
+        webapp_app.state.trader = trader
+        webapp_app.state.restart_event = restart_event
 
         port = int(os.getenv('PORT', config.get('webapp.port', 8000)))
         uvicorn_config = uvicorn.Config(
@@ -296,9 +406,15 @@ async def main():
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 60)
 
+    # restart_event ставиться з вебапа при зміні режиму (/api/settings/mode):
+    # тоді цей цикл завершується, бот штатно вимикається і супервізор main()
+    # перезбирає все з новим режимом. Ctrl+C — остаточний вихід.
+    should_restart = False
     try:
-        while True:
+        while not restart_event.is_set():
             await asyncio.sleep(1)
+        should_restart = True
+        logger.info("Restart requested (mode change) — shutting down to rebuild")
 
     except KeyboardInterrupt:
         logger.info("Shutdown signal received")
@@ -321,6 +437,10 @@ async def main():
         await trend_symbol_selector.stop_refresh_loop()
         logger.info("[OK] Trend symbol selector stopped")
 
+    if tsmom_symbol_selector is not None:
+        await tsmom_symbol_selector.stop_refresh_loop()
+        logger.info("[OK] TSMOM symbol selector stopped")
+
     await exchange.stop_websocket()
     logger.info("[OK] WebSocket stopped")
 
@@ -337,6 +457,8 @@ async def main():
     logger.info("[OK] Database closed")
 
     logger.info("Ruflo Trading Bot stopped successfully")
+
+    return should_restart
 
 
 if __name__ == "__main__":
