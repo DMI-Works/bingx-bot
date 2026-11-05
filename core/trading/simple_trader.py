@@ -219,34 +219,35 @@ class SimpleTrader:
             )
         return quantity
 
-    # Стоп має спрацьовувати не далі, ніж ця частка відстані до ліквідації
-    # (~1/leverage; запас — на maintenance margin і проскальзування).
-    _STOP_TO_LIQUIDATION_MAX = 0.75
-
-    def _safe_leverage_for_stop(
+    def _clamp_stop_to_max_roi(
         self,
         symbol: str,
         side: str,
         leverage: int,
         stop_loss_price: Optional[float],
         reference_price: Optional[float],
-    ) -> int:
-        """Знижує плече, якщо стоп стоїть далі за ціну ліквідації. Інакше
-        (05.11: TsMomentum, плече 10x, аварійний стоп 12-18%) позицію
-        ліквідує на ~9.5% руху раніше стопу — стоп марний, втрачається вся маржа."""
+    ) -> Optional[float]:
+        """Підтягує стоп, якщо збиток на ньому більший за trading.max_stop_roi_percent
+        (% ROI від маржі, мініапп). Плече лишається тим, що задав користувач.
+        Без цього (05.11: TsMomentum, 10x, аварійний стоп 12-18% = 120-180% ROI)
+        позицію ліквідувало б на ~10% руху раніше стопу — втрачається вся маржа."""
         if not leverage or not stop_loss_price or not reference_price or reference_price <= 0:
-            return leverage
+            return stop_loss_price
+        getter = getattr(self.settings_manager, 'get_max_stop_roi_percent', None)
+        max_roi = getter() if callable(getter) else None
+        if not isinstance(max_roi, (int, float)) or max_roi <= 0:
+            return stop_loss_price
         stop_fraction = abs(reference_price - stop_loss_price) / reference_price
-        if stop_fraction <= 0:
-            return leverage
-        max_leverage = max(1, int(self._STOP_TO_LIQUIDATION_MAX / stop_fraction))
-        if leverage <= max_leverage:
-            return leverage
+        max_fraction = max_roi / 100.0 / leverage
+        if stop_fraction <= max_fraction:
+            return stop_loss_price
+        sign = -1 if side == 'LONG' else 1
+        new_stop = reference_price * (1 + sign * max_fraction)
         logger.warning(
-            f"Leverage for {symbol} {side} lowered {leverage}x -> {max_leverage}x: "
-            f"stop {stop_fraction * 100:.2f}% away would sit beyond liquidation (~{100 / leverage:.1f}%)"
+            f"Stop for {symbol} {side} tightened: {stop_loss_price:.6f} ({stop_fraction * leverage * 100:.0f}% ROI) "
+            f"-> {new_stop:.6f} ({max_roi:g}% ROI) at {leverage}x"
         )
-        return max_leverage
+        return new_stop
 
     def _apply_min_margin(
         self,
@@ -342,7 +343,7 @@ class SimpleTrader:
             if strategy:
                 positions_info_message = f"{positions_info_message} | Стратегія: {strategy}"
 
-            leverage = self._safe_leverage_for_stop(symbol, side, leverage, stop_loss_price, reference_price)
+            stop_loss_price = self._clamp_stop_to_max_roi(symbol, side, leverage, stop_loss_price, reference_price)
 
             quantity = await self._resolve_quantity(
                 symbol, side, quantity, leverage, stop_loss_price, reference_price, risk_percent

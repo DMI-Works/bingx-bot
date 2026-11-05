@@ -21,6 +21,7 @@ from core.strategies.param_catalog import (
 
 from core.database.mongo_config import read_mode_override, save_mode_override
 from core.strategies.registry import STRATEGY_REGISTRY
+from core.state.settings_manager import MAX_STOP_ROI_LIMIT
 
 from ..deps import (
     require_db,
@@ -98,6 +99,7 @@ def get_settings(request: Request):
     return {
         "trading_enabled": settings_manager.get_trading_enabled(),
         "min_margin_usdt": settings_manager.get_min_margin_usdt(),
+        "max_stop_roi_percent": settings_manager.get_max_stop_roi_percent(),
         "testnet": bool(getattr(request.app.state, "testnet", True)),
         "mode_override": mode_override,
         "strategies": [_serialize_strategy(entry, store) for entry in store.list_strategies()],
@@ -166,15 +168,37 @@ async def set_risk_settings(
     payload: Dict[str, Any] = Body(...),
     user: dict = Depends(require_telegram_user),
 ):
-    """Мінімальна маржа однієї угоди в USDT (0 = вимкнено). Застосовується
-    до наступних входів одразу, без рестарту."""
+    """Глобальні ризик-налаштування угод (застосовуються до наступних входів
+    без рестарту): min_margin_usdt — мінімальна маржа (0 = вимкнено);
+    max_stop_roi_percent — найбільший збиток на стопі в % ROI (1..90)."""
     settings_manager = require_settings_manager(request)
-    value = payload.get("min_margin_usdt")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-        raise HTTPException(status_code=422, detail="'min_margin_usdt' must be a number >= 0")
-    await settings_manager.set_min_margin_usdt(value)
-    logger.info(f"Min margin per trade set to {value} USDT via mini app (user={user})")
-    return {"min_margin_usdt": settings_manager.get_min_margin_usdt()}
+
+    def _number(key):
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise HTTPException(status_code=422, detail=f"'{key}' must be a number")
+        return float(value)
+
+    if "min_margin_usdt" not in payload and "max_stop_roi_percent" not in payload:
+        raise HTTPException(status_code=422, detail="nothing to update")
+    if "min_margin_usdt" in payload:
+        value = _number("min_margin_usdt")
+        if value < 0:
+            raise HTTPException(status_code=422, detail="'min_margin_usdt' must be >= 0")
+        await settings_manager.set_min_margin_usdt(value)
+    if "max_stop_roi_percent" in payload:
+        value = _number("max_stop_roi_percent")
+        if not 1 <= value <= MAX_STOP_ROI_LIMIT:
+            raise HTTPException(
+                status_code=422,
+                detail=f"'max_stop_roi_percent' must be between 1 and {MAX_STOP_ROI_LIMIT:g} (ликвидация ~100%)",
+            )
+        await settings_manager.set_max_stop_roi_percent(value)
+    logger.info(f"Risk settings updated via mini app: {payload} (user={user})")
+    return {
+        "min_margin_usdt": settings_manager.get_min_margin_usdt(),
+        "max_stop_roi_percent": settings_manager.get_max_stop_roi_percent(),
+    }
 
 
 def _validate_strategy_params(name: str, params: Dict[str, Any]) -> None:

@@ -3,7 +3,7 @@ import { Bell, Power, KeyRound } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api";
 import { Spinner, EmptyRow, ToggleRow, LinkRow } from "../common";
 import StrategyCard from "./StrategyCard";
-import MinMarginRow from "./MinMarginRow";
+import RiskNumberRow from "./RiskNumberRow";
 
 export default function SettingsTab() {
   const [settings, setSettings] = useState(null);
@@ -37,6 +37,8 @@ export default function SettingsTab() {
     }
   };
 
+  const saveRisk = (risk) => setSettings((prev) => (prev ? { ...prev, ...risk } : prev));
+
   const updateStrategy = (updated) => {
     setSettings((prev) => prev && {
       ...prev,
@@ -61,9 +63,21 @@ export default function SettingsTab() {
             disabled={!settings || tradingBusy}
             onToggle={toggleTrading}
           />
-          <MinMarginRow
+          <RiskNumberRow
+            field="min_margin_usdt"
+            title="Минимальная маржа сделки, USDT"
+            sub="Если стратегия посчитала маржу меньше — объём увеличивается до этой суммы (для всех стратегий). Реальный риск сделки может быть выше risk% стратегии. 0 — выключено."
             value={settings?.min_margin_usdt}
-            onSaved={(v) => setSettings((prev) => (prev ? { ...prev, min_margin_usdt: v } : prev))}
+            format={(v) => `$${v}`}
+            onSaved={saveRisk}
+          />
+          <RiskNumberRow
+            field="max_stop_roi_percent"
+            title="Максимальный стоп, % ROI"
+            sub="Если стоп стратегии дальше — бот подтягивает его ближе, плечо не меняется. Ликвидация наступает примерно на 100% ROI, поэтому максимум 90. При 10x: 70% ROI = 7% от цены."
+            value={settings?.max_stop_roi_percent}
+            format={(v) => `−${v}%`}
+            onSaved={saveRisk}
           />
         </div>
       </div>

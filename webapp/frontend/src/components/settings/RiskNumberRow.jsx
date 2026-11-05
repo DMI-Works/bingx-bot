@@ -2,9 +2,9 @@ import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { apiPost } from "../../lib/api";
 
-// Минимальная маржа одной сделки (USDT). Если стратегия посчитала меньше —
-// SimpleTrader увеличивает объём до этой маржи. 0 = выключено.
-export default function MinMarginRow({ value, onSaved }) {
+// Числовая риск-настройка из /api/settings/risk (min_margin_usdt,
+// max_stop_roi_percent). Бэкенд валидирует диапазон и возвращает все значения.
+export default function RiskNumberRow({ field, title, sub, value, format, onSaved }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -22,8 +22,8 @@ export default function MinMarginRow({ value, onSaved }) {
     setSaving(true);
     setErr(null);
     try {
-      const res = await apiPost("/settings/risk", { min_margin_usdt: n });
-      onSaved(res.min_margin_usdt);
+      const res = await apiPost("/settings/risk", { [field]: n });
+      onSaved(res);
       setEditing(false);
     } catch (e) {
       setErr(e.message);
@@ -31,9 +31,6 @@ export default function MinMarginRow({ value, onSaved }) {
       setSaving(false);
     }
   };
-
-  const title = "Минимальная маржа сделки, USDT";
-  const sub = "Если стратегия посчитала маржу меньше — объём увеличивается до этой суммы (для всех стратегий). Реальный риск сделки может быть выше risk% стратегии. 0 — выключено.";
 
   if (!editing) {
     const ready = value !== undefined && value !== null;
@@ -43,7 +40,7 @@ export default function MinMarginRow({ value, onSaved }) {
           <span className="settings-title">{title}</span>
           <div className="row-sub">{sub}</div>
         </div>
-        <span className="row-value">{ready ? `$${value}` : "—"}</span>
+        <span className="row-value">{ready ? format(value) : "—"}</span>
         <ChevronRight size={16} className="chev" />
       </div>
     );

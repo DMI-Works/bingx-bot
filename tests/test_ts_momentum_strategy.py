@@ -252,19 +252,28 @@ class TestPendingOpenNotManual(unittest.IsolatedAsyncioTestCase):
         trader._track_manual_position.assert_not_awaited()
 
 
-class TestLeverageVsStop(unittest.TestCase):
-    def _trader(self):
+class TestStopClampedToMaxRoi(unittest.TestCase):
+    # регресія 05.11: TsMomentum 10x з аварійним стопом 16% (= 160% ROI)
+    # ліквідувало б раніше стопу; плече лишається, стоп підтягується
+    def _trader(self, max_roi=70.0):
         import core.trading.simple_trader as st
-        return st.SimpleTrader.__new__(st.SimpleTrader)
+        trader = st.SimpleTrader.__new__(st.SimpleTrader)
+        trader.settings_manager = mock.MagicMock()
+        trader.settings_manager.get_max_stop_roi_percent.return_value = max_roi
+        return trader
 
-    def test_leverage_lowered_when_stop_beyond_liquidation(self):
-        # стоп 16% при 10x (ліквідація ~10%) -> плече 0.75/0.16 = 4
-        lev = self._trader()._safe_leverage_for_stop('ETH-USDT', 'SHORT', 10, 116.0, 100.0)
-        self.assertEqual(lev, 4)
+    def test_short_stop_tightened(self):
+        # 70% ROI / 10x = 7% від ціни -> SHORT стоп 107
+        stop = self._trader()._clamp_stop_to_max_roi('ETH-USDT', 'SHORT', 10, 116.0, 100.0)
+        self.assertAlmostEqual(stop, 107.0)
 
-    def test_leverage_kept_when_stop_is_close(self):
-        lev = self._trader()._safe_leverage_for_stop('ETH-USDT', 'LONG', 10, 99.0, 100.0)
-        self.assertEqual(lev, 10)
+    def test_long_stop_tightened(self):
+        stop = self._trader()._clamp_stop_to_max_roi('BTC-USDT', 'LONG', 10, 88.0, 100.0)
+        self.assertAlmostEqual(stop, 93.0)
+
+    def test_close_stop_untouched(self):
+        stop = self._trader()._clamp_stop_to_max_roi('ETH-USDT', 'LONG', 10, 99.0, 100.0)
+        self.assertEqual(stop, 99.0)
 
 
 class TestClosePosition(unittest.IsolatedAsyncioTestCase):

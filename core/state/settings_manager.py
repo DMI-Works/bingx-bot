@@ -13,9 +13,14 @@ WHITELIST_KEY = 'trading.whitelist_symbols'
 BLACKLIST_KEY = 'trading.blacklist_symbols'
 EMERGENCY_KEY = 'emergency'
 MIN_MARGIN_KEY = 'trading.min_margin_usdt'
+MAX_STOP_ROI_KEY = 'trading.max_stop_roi_percent'
 
 # Мінімальна маржа однієї угоди (USDT), якщо в Mongo ще нічого не записано.
 DEFAULT_MIN_MARGIN_USDT = 10.0
+# Максимальний збиток на стопі, % ROI від маржі. Ліквідація — близько 100%
+# мінус maintenance margin, тож стоп має стояти помітно раніше.
+DEFAULT_MAX_STOP_ROI_PERCENT = 70.0
+MAX_STOP_ROI_LIMIT = 90.0
 
 _LEGACY_BOOLS = {'True': True, 'False': False}
 
@@ -89,6 +94,16 @@ class SettingsManager:
 
     async def set_min_margin_usdt(self, value: float) -> None:
         await self.set(MIN_MARGIN_KEY, float(value))
+
+    def get_max_stop_roi_percent(self) -> float:
+        try:
+            value = float(self.get(MAX_STOP_ROI_KEY, DEFAULT_MAX_STOP_ROI_PERCENT))
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_STOP_ROI_PERCENT
+        return min(max(value, 0.0), MAX_STOP_ROI_LIMIT)
+
+    async def set_max_stop_roi_percent(self, value: float) -> None:
+        await self.set(MAX_STOP_ROI_KEY, float(value))
 
     # ---------- whitelist / blacklist монет (мініапп «Монети») ----------
 
