@@ -180,14 +180,45 @@ class TestMinMargin(unittest.TestCase):
         self.assertEqual(qty, 0.01)
 
 
-class TestNoTrailingForTsMomentum(unittest.IsolatedAsyncioTestCase):
-    # регресія 05.11: ROI-лестница WallBreakout підтягувала SL позицій TSMOM
-    # і вибивала їх через хвилини
-    async def test_signal_disables_trailing(self):
+class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
+    META = {'mode': 'roi_gap', 'breakeven_roi': 10.0, 'start_roi': 30.0, 'gap_roi': 20.0}
+
+    def test_target_levels(self):
+        from core.risk.trailing_roi_gap import roi_gap_target
+        self.assertIsNone(roi_gap_target(self.META, 8.0, 1.0))        # рано
+        self.assertEqual(roi_gap_target(self.META, 12.0, 1.0), 1.0)    # безубиток
+        self.assertEqual(roi_gap_target(self.META, 50.0, 1.0), 30.0)   # пік 50 - 20
+
+    async def test_signal_uses_roi_gap(self):
         closes = [100 + i for i in range(40)]
         s = _strategy(closes, position_for=lambda sym, side: None)
         sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
-        self.assertEqual(sig['trail_meta'], {'mode': 'none'})
+        self.assertEqual(sig['trail_meta'], self.META)
+
+    async def test_hold_upgrades_old_position_meta(self):
+        # позиція, відкрита з trail_meta={'mode':'none'}, отримує roi_gap на звірці
+        pos = {'strategy': 'TsMomentumStrategy', 'trail_meta': {'mode': 'none'}}
+        closes = [100 + i for i in range(40)]
+        s = _strategy(closes, position_for=lambda sym, side: pos if side == 'LONG' else None)
+        await s._reconcile('BTC-USDT', _bucket_now(), DAY)
+        self.assertEqual(pos['trail_meta'], self.META)
+
+    async def test_manager_moves_stop_to_peak_minus_gap(self):
+        from core.risk.trailing_stop_manager import TrailingStopManager
+        from core.risk.trailing_state import TrailState
+        tsm = TrailingStopManager.__new__(TrailingStopManager)
+        tsm.taker_fee_rate = 0.0005
+        tsm._retry_after = {}
+        tsm.move_retry_cooldown_seconds = 10
+        position = {'symbol': 'BTC-USDT', 'side': 'LONG', 'entry_price': 100.0, 'leverage': 10,
+                    'stop_loss_price': 88.0, 'sl_order_id': 'sl1', 'trail_meta': dict(self.META)}
+        tsm.trader = mock.MagicMock()
+        tsm.trader.open_positions = {'k': position}
+        tsm._move_stop_loss = mock.AsyncMock(return_value=1)
+        # ціна 105 при 10x = +50% ROI -> стоп на +30% ROI = 103
+        await tsm._process_roi_gap_position('k', position, TrailState(), 105.0, 10.0)
+        candidates = tsm._move_stop_loss.call_args.args[3]
+        self.assertAlmostEqual(candidates[0][2], 103.0)
 
     async def test_trailing_manager_skips_mode_none(self):
         from core.events import Event, EventType

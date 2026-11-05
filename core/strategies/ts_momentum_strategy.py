@@ -69,6 +69,13 @@ class TsMomentumStrategy(BaseStrategy):
         # фильтры монеты (как в TrendSupertrendStrategy)
         'min_quote_volume_24h_usdt': 20_000_000,
         'excluded_symbol_prefixes': 'NCFX,NCCO,NCSK,NCSI',
+        # --- фиксация прибыли (TrailingStopManager, режим roi_gap), всё в % ROI
+        # от маржи; 0 = шаг выключен ---
+        # ROI >= N -> стоп на безубыток с комиссиями
+        'trail_breakeven_roi': 10.0,
+        # ROI >= N -> стоп тянется за пиком ROI с отступом trail_gap_roi
+        'trail_start_roi': 30.0,
+        'trail_gap_roi': 20.0,
         # сигнал живёт N секунд после закрытия дневной свечи. Для 60-дневного
         # моментума вход через несколько часов ничего не меняет, поэтому сутки:
         # иначе рестарт после 01:00 UTC пропускал целый день (было 3600).
@@ -137,6 +144,16 @@ class TsMomentumStrategy(BaseStrategy):
                 raise ValueError(f"{key} must be > 0, got {p[key]!r}")
             p[key] = float(p[key])
 
+        for key in ('trail_breakeven_roi', 'trail_start_roi', 'trail_gap_roi'):
+            if isinstance(p[key], bool) or not isinstance(p[key], (int, float)) or float(p[key]) < 0:
+                raise ValueError(f"{key} must be >= 0, got {p[key]!r}")
+            p[key] = float(p[key])
+        if p['trail_start_roi'] > 0 and p['trail_gap_roi'] >= p['trail_start_roi']:
+            raise ValueError(
+                f"trail_gap_roi ({p['trail_gap_roi']:g}) must be < trail_start_roi ({p['trail_start_roi']:g}), "
+                f"иначе стоп на старте окажется в минусе"
+            )
+
         if p['risk_per_trade_percent'] > 10:
             raise ValueError(f"risk_per_trade_percent={p['risk_per_trade_percent']} looks unsafe (> 10)")
 
@@ -162,6 +179,37 @@ class TsMomentumStrategy(BaseStrategy):
         self.config = new_config
         self._params = params
         self._refresh_derived_params()
+        self._refresh_open_trail_meta()
+
+    def _trail_meta(self) -> dict:
+        p = self._params
+        return {
+            'mode': 'roi_gap',
+            'breakeven_roi': p['trail_breakeven_roi'],
+            'start_roi': p['trail_start_roi'],
+            'gap_roi': p['trail_gap_roi'],
+        }
+
+    def _refresh_open_trail_meta(self) -> None:
+        """Новые параметры фиксации прибыли — и для уже открытых позиций
+        стратегии (иначе действовали бы только на следующие входы)."""
+        if self._position_provider is None or self._symbol_pool_provider is None:
+            return
+        try:
+            symbols = set(self._symbol_pool_provider())
+        except Exception:
+            logger.error("TsMomentum: symbol_pool_provider failed", exc_info=True)
+            return
+        meta = self._trail_meta()
+        for symbol in symbols:
+            for side in ('LONG', 'SHORT'):
+                try:
+                    pos = self._position_provider(symbol, side)
+                except Exception:
+                    continue
+                if pos and pos.get('strategy') == self.name and pos.get('trail_meta') != meta:
+                    pos['trail_meta'] = dict(meta)
+                    logger.info(f"[{symbol}] TsMomentum: trail_meta {side} обновлён -> {meta}")
 
     def _refresh_derived_params(self) -> None:
         self._excluded_prefixes = tuple(
@@ -340,6 +388,8 @@ class TsMomentumStrategy(BaseStrategy):
             return None  # противоположную откроем на следующей дневной сверке
 
         # 2) уже в нужной стороне или нет сигнала -> ничего
+        if current is not None and current == desired:
+            self._sync_trail_meta(symbol, current)
         if desired is None or current == desired:
             logger.info(
                 f"[{symbol}] TsMomentum HOLD: mom({p['lookback_days']}d)={mom*100:+.2f}%, "
@@ -387,9 +437,10 @@ class TsMomentumStrategy(BaseStrategy):
             'risk_percent': p['risk_per_trade_percent'],
             'leverage': p['leverage'],
             'stop_loss_price': stop_loss_price,
-            # трейлинг выключен: иначе ROI-лестница WallBreakout подтягивала SL
-            # к цене при +5.5% ROI и выбивала позицию через минуты (05.11)
-            'trail_meta': {'mode': 'none'},
+            # своя фиксация прибыли (roi_gap): безубыток, потом стоп за пиком
+            # с отступом. Не ROI-лестница WallBreakout — та ставила SL впритык
+            # к цене (+5.5% ROI) и выбивала позицию через минуты (05.11)
+            'trail_meta': self._trail_meta(),
             # take_profit_levels НЕТ: выход — по развороту сигнала (close_callback),
             # дизастер-стоп лишь страхует от гэпа
             'strategy': self.name,
@@ -399,6 +450,18 @@ class TsMomentumStrategy(BaseStrategy):
                 f"(mode={p['mode']}), размер по vol-target, дизастер-SL {p['disaster_stop_atr']:g}*ATR"
             ),
         }
+
+    def _sync_trail_meta(self, symbol: str, side: str) -> None:
+        """Позиция, открытая до появления roi_gap (trail_meta={'mode':'none'})
+        или с другими параметрами, получает актуальную фиксацию прибыли."""
+        try:
+            pos = self._position_provider(symbol, side) if self._position_provider else None
+        except Exception:
+            return
+        meta = self._trail_meta()
+        if pos and pos.get('strategy') == self.name and pos.get('trail_meta') != meta:
+            pos['trail_meta'] = dict(meta)
+            logger.info(f"[{symbol}] TsMomentum: trail_meta {side} обновлён -> {meta}")
 
     async def _passes_liquidity_filter(self, symbol: str) -> bool:
         min_volume = self._params['min_quote_volume_24h_usdt']

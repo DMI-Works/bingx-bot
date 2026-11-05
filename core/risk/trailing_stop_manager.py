@@ -30,13 +30,14 @@ from ..exchange.errors import (
 )
 from ..exchange.orders import new_client_order_id, place_stop_market
 from .trailing_atr import AtrThreeStepMixin, is_atr_mode
+from .trailing_roi_gap import RoiGapTrailMixin, is_roi_gap_mode
 from .trailing_fallback import StopFallbackMixin
 from .trailing_state import TrailState
 
 logger = logging.getLogger(__name__)
 
 
-class TrailingStopManager(AtrThreeStepMixin, StopFallbackMixin):
+class TrailingStopManager(AtrThreeStepMixin, RoiGapTrailMixin, StopFallbackMixin):
     def __init__(
         self,
         event_bus: EventBus,
@@ -127,7 +128,7 @@ class TrailingStopManager(AtrThreeStepMixin, StopFallbackMixin):
                 continue
             # ladder-позиції без заданих рівнів не чіпаємо;
             # atr_3step рівнів trail_levels_percent не потребує
-            if not self.trail_levels_percent and not is_atr_mode(position):
+            if not self.trail_levels_percent and not is_atr_mode(position) and not is_roi_gap_mode(position):
                 continue
             await self._process_position(position_key, position, price)
 
@@ -250,6 +251,9 @@ class TrailingStopManager(AtrThreeStepMixin, StopFallbackMixin):
 
         if is_atr_mode(position):
             await self._process_atr_position(position_key, position, state, price)
+            return
+        if is_roi_gap_mode(position):
+            await self._process_roi_gap_position(position_key, position, state, price, leverage)
             return
 
         self._log_ladder_status(position_key, position, state, favorable_fraction, leverage)

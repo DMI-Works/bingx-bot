@@ -19,6 +19,8 @@ class TrailState:
     atr_refresh_retry_after: float = 0.0
     atr_not_ready_count: int = 0
     atr_invalid_notice: bool = False
+    # --- режим roi_gap: найкращий досягнутий ROI позиції (%) ---
+    peak_roi_percent: Optional[float] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def reset_notices(self) -> None:
