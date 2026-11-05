@@ -69,8 +69,10 @@ class TsMomentumStrategy(BaseStrategy):
         # фильтры монеты (как в TrendSupertrendStrategy)
         'min_quote_volume_24h_usdt': 20_000_000,
         'excluded_symbol_prefixes': 'NCFX,NCCO,NCSK,NCSI',
-        # сигнал живёт N секунд после закрытия дневной свечи
-        'max_signal_age_seconds': 3600,
+        # сигнал живёт N секунд после закрытия дневной свечи. Для 60-дневного
+        # моментума вход через несколько часов ничего не меняет, поэтому сутки:
+        # иначе рестарт после 01:00 UTC пропускал целый день (было 3600).
+        'max_signal_age_seconds': 86400,
     }
 
     def __init__(self, event_bus: EventBus, config: dict, bingx_client=None):
@@ -208,11 +210,12 @@ class TsMomentumStrategy(BaseStrategy):
         if time.time() < self._retry_after.get(symbol, 0.0):
             return None
 
+        # Первый тик после старта/ротации (previous_bucket=None) тоже сверяем
+        # сразу: раньше он лишь запоминал свечу, и после каждого рестарта
+        # стратегия ждала следующих суток (а с часовым окном сигнала — могла
+        # не сработать вовсе). Сверка идемпотентна: позиция в нужной стороне
+        # уже есть -> HOLD, так что повторная проверка ничего не открывает.
         self._last_bucket[symbol] = bucket
-        if previous_bucket is None:
-            # первый тик после старта/ротации: только запоминаем текущую свечу,
-            # сверку делаем начиная со следующего дневного бакета
-            return None
 
         self._inflight.add(symbol)
         task = asyncio.create_task(self._evaluate(symbol, bucket, previous_bucket, tf_ms))
@@ -261,7 +264,10 @@ class TsMomentumStrategy(BaseStrategy):
                 if self._signal_age_exceeded(bucket, tf_ms):
                     logger.info(f"[{symbol}] TsMomentum: повтор отменён — сигнал устарел")
                 else:
-                    self._last_bucket[symbol] = previous_bucket
+                    if previous_bucket is None:
+                        self._last_bucket.pop(symbol, None)
+                    else:
+                        self._last_bucket[symbol] = previous_bucket
                     self._retry_after[symbol] = time.time() + retry_seconds
             self._inflight.discard(symbol)
 

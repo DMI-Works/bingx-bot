@@ -12,6 +12,10 @@ TRADING_ENABLED_KEY = 'trading.enabled'
 WHITELIST_KEY = 'trading.whitelist_symbols'
 BLACKLIST_KEY = 'trading.blacklist_symbols'
 EMERGENCY_KEY = 'emergency'
+MIN_MARGIN_KEY = 'trading.min_margin_usdt'
+
+# Мінімальна маржа однієї угоди (USDT), якщо в Mongo ще нічого не записано.
+DEFAULT_MIN_MARGIN_USDT = 10.0
 
 _LEGACY_BOOLS = {'True': True, 'False': False}
 
@@ -74,6 +78,17 @@ class SettingsManager:
 
     async def set_trading_enabled(self, enabled: bool) -> None:
         await self.set(TRADING_ENABLED_KEY, enabled)
+
+    # ---------- мінімальна маржа угоди (мініапп «Налаштування» -> «Ризик») ----------
+
+    def get_min_margin_usdt(self) -> float:
+        try:
+            return max(0.0, float(self.get(MIN_MARGIN_KEY, DEFAULT_MIN_MARGIN_USDT)))
+        except (TypeError, ValueError):
+            return DEFAULT_MIN_MARGIN_USDT
+
+    async def set_min_margin_usdt(self, value: float) -> None:
+        await self.set(MIN_MARGIN_KEY, float(value))
 
     # ---------- whitelist / blacklist монет (мініапп «Монети») ----------
 

@@ -88,6 +88,19 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('BTC-USDT', s._last_bucket)
         self.assertEqual(s.bingx_client.klines_calls, 0)
 
+    async def test_first_tick_after_start_reconciles_immediately(self):
+        # регресія: перший тік після старту лише запам'ятовував свічку, і
+        # після кожного рестарту стратегія чекала наступної доби
+        import asyncio
+        closes = [100 + i for i in range(40)]
+        s = _strategy(closes, position_for=lambda sym, side: None)
+        self.assertIsNone(await s.analyze('BTC-USDT', 139.0))
+        await asyncio.gather(*list(s._tasks))
+        self.assertEqual(s.bingx_client.klines_calls, 1)
+        # EventBus.publish лише кладе подію в чергу (шина в тесті не запущена)
+        event = s.event_bus._queue.get_nowait()
+        self.assertEqual(event.data['side'], 'LONG')
+
     async def test_open_long_on_positive_momentum(self):
         # зростаючий ряд -> mom>0 -> LONG; позиції немає -> OPEN
         closes = [100 + i for i in range(40)]
@@ -143,6 +156,28 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
 def _bucket_now():
     import time
     return int(time.time() * 1000) // DAY
+
+
+class TestMinMargin(unittest.TestCase):
+    def _trader(self, min_margin):
+        import core.trading.simple_trader as st
+        trader = st.SimpleTrader.__new__(st.SimpleTrader)
+        trader.settings_manager = mock.MagicMock()
+        trader.settings_manager.get_min_margin_usdt.return_value = min_margin
+        return trader
+
+    def test_small_margin_raised_to_minimum(self):
+        # 0.01 * 100 / 10 = 0.1 USDT маржі -> до 10 USDT: 10 * 10 / 100 = 1.0
+        qty = self._trader(10.0)._apply_min_margin('X-USDT', 'LONG', 0.01, 10, 100.0)
+        self.assertAlmostEqual(qty, 1.0)
+
+    def test_bigger_margin_untouched(self):
+        qty = self._trader(10.0)._apply_min_margin('X-USDT', 'LONG', 5.0, 10, 100.0)
+        self.assertEqual(qty, 5.0)
+
+    def test_zero_disables(self):
+        qty = self._trader(0.0)._apply_min_margin('X-USDT', 'LONG', 0.01, 10, 100.0)
+        self.assertEqual(qty, 0.01)
 
 
 class TestClosePosition(unittest.IsolatedAsyncioTestCase):

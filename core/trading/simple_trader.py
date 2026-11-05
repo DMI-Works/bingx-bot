@@ -213,6 +213,36 @@ class SimpleTrader:
             )
         return quantity
 
+    def _apply_min_margin(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Optional[float],
+        leverage: int,
+        reference_price: Optional[float],
+    ) -> Optional[float]:
+        """Підлога маржі (trading.min_margin_usdt, мініапп): якщо маржа угоди
+        менша за мінімум — збільшуємо quantity до min_margin * leverage / ціна.
+        Діє для всіх стратегій і має пріоритет над стелею
+        max_margin_percent_per_trade: на малому депозиті стеля в % давала
+        угоди по ~$1 маржі, менші за мінімальний ордер біржі. Реальний ризик
+        при цьому може бути більшим за risk_percent стратегії."""
+        if not quantity or quantity <= 0 or not reference_price or reference_price <= 0 or not leverage:
+            return quantity
+        getter = getattr(self.settings_manager, 'get_min_margin_usdt', None)
+        min_margin = getter() if callable(getter) else 0.0
+        if not isinstance(min_margin, (int, float)) or min_margin <= 0:
+            return quantity
+        margin = quantity * reference_price / leverage
+        if margin >= min_margin:
+            return quantity
+        new_quantity = min_margin * leverage / reference_price
+        logger.info(
+            f"Min margin for {symbol} {side}: margin {margin:.2f} USDT < {min_margin:.2f} USDT -> "
+            f"quantity {quantity:.8f} -> {new_quantity:.8f} (leverage={leverage})"
+        )
+        return new_quantity
+
     async def _place_entry_order(self, symbol: str, side: str, quantity: float, leverage: int):
         """Плече + MARKET-ордер. Повертає (order_id, response) або (None, None)."""
         try:
@@ -282,6 +312,7 @@ class SimpleTrader:
             )
             if risk_percent and quantity is None:
                 return False
+            quantity = self._apply_min_margin(symbol, side, quantity, leverage, reference_price)
 
             logger.info(f"Opening position: {symbol} {side} {quantity} (strategy={strategy})")
 

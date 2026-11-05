@@ -3,6 +3,7 @@ import { Bell, Power, KeyRound } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api";
 import { Spinner, EmptyRow, ToggleRow, LinkRow } from "../common";
 import StrategyCard from "./StrategyCard";
+import MinMarginRow from "./MinMarginRow";
 
 export default function SettingsTab() {
   const [settings, setSettings] = useState(null);
@@ -59,6 +60,10 @@ export default function SettingsTab() {
             checked={settings ? settings.trading_enabled : false}
             disabled={!settings || tradingBusy}
             onToggle={toggleTrading}
+          />
+          <MinMarginRow
+            value={settings?.min_margin_usdt}
+            onSaved={(v) => setSettings((prev) => (prev ? { ...prev, min_margin_usdt: v } : prev))}
           />
         </div>
       </div>

@@ -20,6 +20,7 @@ from core.strategies.param_catalog import (
 )
 
 from core.database.mongo_config import read_mode_override, save_mode_override
+from core.strategies.registry import STRATEGY_REGISTRY
 
 from ..deps import (
     require_db,
@@ -96,6 +97,7 @@ def get_settings(request: Request):
         mode_override = None
     return {
         "trading_enabled": settings_manager.get_trading_enabled(),
+        "min_margin_usdt": settings_manager.get_min_margin_usdt(),
         "testnet": bool(getattr(request.app.state, "testnet", True)),
         "mode_override": mode_override,
         "strategies": [_serialize_strategy(entry, store) for entry in store.list_strategies()],
@@ -158,6 +160,37 @@ async def set_trading_enabled(
     return {"trading_enabled": enabled}
 
 
+@router.post("/risk")
+async def set_risk_settings(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(require_telegram_user),
+):
+    """Мінімальна маржа однієї угоди в USDT (0 = вимкнено). Застосовується
+    до наступних входів одразу, без рестарту."""
+    settings_manager = require_settings_manager(request)
+    value = payload.get("min_margin_usdt")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise HTTPException(status_code=422, detail="'min_margin_usdt' must be a number >= 0")
+    await settings_manager.set_min_margin_usdt(value)
+    logger.info(f"Min margin per trade set to {value} USDT via mini app (user={user})")
+    return {"min_margin_usdt": settings_manager.get_min_margin_usdt()}
+
+
+def _validate_strategy_params(name: str, params: Dict[str, Any]) -> None:
+    """Стратегії з _parse_params мовчки відкидають некоректні параметри
+    (лишаються на старих) — без цієї перевірки мініапп показував би значення,
+    з яким бот насправді не торгує (напр. risk_per_trade_percent=50 > 10)."""
+    cls = STRATEGY_REGISTRY.get(name)
+    parse = getattr(cls, "_parse_params", None)
+    if parse is None:
+        return
+    try:
+        parse(params)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Недопустимое значение: {e}")
+
+
 @router.post("/strategies/{name}/enabled")
 async def set_strategy_enabled(
     name: str,
@@ -199,6 +232,7 @@ async def update_strategy_param(
         current[key] = coerce_param_value(current[key], payload["value"])
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    _validate_strategy_params(name, current)
     store.update_params(name, current)
     _apply_params_live(request, name, current)
 
