@@ -1,14 +1,15 @@
 """/api/stats, /api/positions, /api/trades — зведення, відкриті позиції, історія."""
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from core.common.market_data import extract_account_balance, filter_open_positions, to_float
+from core.common.position_math import position_key
 from core.common.position_metadata import load_metadata
 
-from ..deps import require_db
+from ..deps import require_db, require_telegram_user, require_trader
 from ..services.trade_stats import (
     closed_row_to_trade,
     in_period,
@@ -134,6 +135,54 @@ async def get_positions(request: Request):
         })
 
     return result
+
+
+@router.post("/api/positions/close")
+async def close_position(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(require_telegram_user),
+):
+    """Швидке закриття позиції з Mini App (reduce-only MARKET через
+    SimpleTrader.close_position). Якщо на біржі позиції вже немає (закриття
+    бот пропустив) — запис просто прибирається з відкритих (STALE)."""
+    db = require_db(request)
+    trader = require_trader(request)
+    exchange = request.app.state.exchange_client
+
+    order_id = payload.get("order_id")
+    if not isinstance(order_id, str) or not order_id:
+        raise HTTPException(status_code=422, detail="'order_id' is required")
+    row = next((r for r in db.get_active_positions() if r["order_id"] == order_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Позиция не найдена среди открытых")
+    symbol, side = row["symbol"], row["side"]
+
+    if exchange is None:
+        raise HTTPException(status_code=503, detail="Биржа недоступна")
+    try:
+        live = filter_open_positions(await exchange.get_positions())
+    except Exception as e:
+        logger.error(f"close_position: failed to fetch live positions: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="Не удалось получить позиции с биржи")
+    is_live = any(p.get("symbol") == symbol and p.get("positionSide") == side for p in live)
+
+    key = position_key(symbol, side)
+    tracked = trader.open_positions.get(key)
+
+    if not is_live:
+        db.mark_position_stale(order_id)
+        if tracked is not None and tracked.get("order_id") == order_id:
+            trader.open_positions.pop(key, None)
+        logger.info(f"Stale position {symbol} {side} ({order_id}) removed via mini app (user={user})")
+        return {"status": "removed"}
+
+    if tracked is None:
+        raise HTTPException(status_code=409, detail="Бот не ведёт эту позицию — закройте её на бирже")
+    if not await trader.close_position(symbol, side, "manual_app"):
+        raise HTTPException(status_code=502, detail="Биржа не приняла ордер на закрытие")
+    logger.info(f"Position {symbol} {side} close requested via mini app (user={user})")
+    return {"status": "closing"}
 
 
 @router.get("/api/trades")

@@ -61,6 +61,11 @@ class SimpleTrader:
         self.orders = ProtectiveOrderPlacer(exchange, event_bus)
 
         self.open_positions = {}
+        # Ключі позицій, які бот саме зараз відкриває (ордер відправлено, але
+        # позиція ще не зареєстрована). ACCOUNT_UPDATE про цей вхід часто
+        # приходить раніше — без цього набору його записувало як «ручну»
+        # позицію-дубль, яка після закриття угоди ботом висіла у відкритих.
+        self._pending_opens: set = set()
 
         self.event_bus.subscribe(EventType.SIGNAL_GENERATED, self._handle_signal)
         self.event_bus.subscribe(EventType.ORDER_FILLED, self._handle_order_update)
@@ -316,13 +321,18 @@ class SimpleTrader:
 
             logger.info(f"Opening position: {symbol} {side} {quantity} (strategy={strategy})")
 
-            order_id, response = await self._place_entry_order(symbol, side, quantity, leverage)
-            if not order_id:
-                return False
+            key = position_key(symbol, side)
+            self._pending_opens.add(key)
+            try:
+                order_id, response = await self._place_entry_order(symbol, side, quantity, leverage)
+                if not order_id:
+                    return False
 
-            entry_price, executed_qty = await resolve_entry_fill(
-                self.exchange, symbol, side, order_id, response, quantity
-            )
+                entry_price, executed_qty = await resolve_entry_fill(
+                    self.exchange, symbol, side, order_id, response, quantity
+                )
+            finally:
+                self._pending_opens.discard(key)
             if executed_qty != quantity:
                 logger.info(
                     f"Using executedQty={executed_qty} instead of requested quantity={quantity} "
@@ -350,7 +360,16 @@ class SimpleTrader:
                 strategy=strategy,
                 trail_meta=trail_meta,
             )
-            self.open_positions[position_key(symbol, side)] = position
+            phantom = self.open_positions.get(key)
+            if phantom is not None and phantom.get('opened_by') == 'user':
+                # ACCOUNT_UPDATE встиг проскочити до/після pending-вікна —
+                # прибираємо «ручний» дубль цієї ж угоди
+                logger.info(f"Discarding phantom manual record {phantom.get('order_id')} for bot entry {symbol} {side}")
+                try:
+                    self.db.discard_phantom_position(phantom['order_id'])
+                except Exception as e:
+                    logger.error(f"Failed to discard phantom position {phantom.get('order_id')}: {e}", exc_info=True)
+            self.open_positions[key] = position
             logger.info(f"Position tracked: orderId={order_id}, {symbol} {side}, strategy={strategy}")
 
             self._insert_position_record(position)
@@ -649,6 +668,9 @@ class SimpleTrader:
             existing = self.open_positions.get(key)
 
             if amount != 0 and not existing:
+                if key in self._pending_opens:
+                    logger.debug(f"Account update for pending bot entry {symbol} {position_side} — not a manual position")
+                    continue
                 await self._track_manual_position(symbol, position_side, to_float(pos.get('ep', 0)), abs(amount))
 
             elif amount == 0 and existing:
@@ -659,7 +681,7 @@ class SimpleTrader:
                         f"Skipping account-update close for bot position {symbol} {position_side} "
                         f"— expecting ORDER_TRADE_UPDATE to handle it"
                     )
-                    return
+                    continue  # було return: губило решту позицій цієї події
 
                 del self.open_positions[key]
                 logger.info(f"Position closed (detected via account update): {symbol} {position_side}")

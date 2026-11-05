@@ -84,6 +84,30 @@ class PositionsRepository:
         with self._lock:
             self.db.positions.update_one({"order_id": order_id}, {"$set": {"metadata": metadata}})
 
+    def discard_phantom_position(self, order_id: str) -> None:
+        """Видаляє фантомний запис (positions + trade_analytics), створений
+        гонкою: ACCOUNT_UPDATE про власний вхід бота прийшов раніше, ніж бот
+        зареєстрував позицію, і її записало як «ручну». Реальна угода одна —
+        її веде запис бота."""
+        with self._lock:
+            self.db.positions.delete_one({"order_id": order_id, "status": "OPEN"})
+            self.db.trade_analytics.delete_one({"order_id": order_id, "status": "OPEN"})
+
+    def mark_position_stale(self, order_id: str) -> None:
+        """Запис OPEN, якого на біржі вже немає (закриття бот пропустив).
+        Статус STALE: зникає з відкритих, але не потрапляє в статистику
+        закритих угод (PnL невідомий)."""
+        now = datetime.utcnow()
+        with self._lock:
+            self.db.positions.update_one(
+                {"order_id": order_id, "status": "OPEN"},
+                {"$set": {"status": "STALE", "closed_at": now}},
+            )
+            self.db.trade_analytics.update_one(
+                {"order_id": order_id, "status": "OPEN"},
+                {"$set": {"status": "STALE", "closed_at": now, "close_reason": "stale"}},
+            )
+
     def get_active_positions(self) -> List[dict]:
         with self._lock:
             return list(self.db.positions.find({"status": "OPEN"}).sort("created_at", DESCENDING))

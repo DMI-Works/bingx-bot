@@ -2,8 +2,8 @@ import { useState, useMemo, useEffect } from "react";
 import {
   AreaChart, Area, XAxis, Tooltip, ResponsiveContainer,
 } from "recharts";
-import { TrendingUp, TrendingDown } from "lucide-react";
-import { apiGet } from "../../lib/api";
+import { TrendingUp, TrendingDown, X } from "lucide-react";
+import { apiGet, apiPost, tg } from "../../lib/api";
 import { fmtUsd, fmtUsdPlain, fmtPct, fmtProfitFactor, slRoiPercent } from "../../lib/format";
 import { Spinner, EmptyRow, PnlTag, SideBadge } from "../common";
 import TradeHistoryList from "./TradeHistoryList";
@@ -29,6 +29,16 @@ const plural = (n, one, few, many) => {
   return many;
 };
 
+// Подтверждение: в Telegram — нативное окно, вне его — window.confirm.
+function confirmAsync(message) {
+  if (tg?.showConfirm) {
+    return new Promise((resolve) => tg.showConfirm(message, resolve));
+  }
+  return Promise.resolve(window.confirm(message));
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 export default function StatisticsTab() {
   const [period, setPeriod] = useState("1W");
   const [stats, setStats] = useState(null);
@@ -49,6 +59,8 @@ export default function StatisticsTab() {
     return () => { cancelled = true; };
   }, [period]);
 
+  const [closingId, setClosingId] = useState(null);
+
   useEffect(() => {
     let cancelled = false;
     apiGet("/positions")
@@ -56,6 +68,28 @@ export default function StatisticsTab() {
       .catch((e) => !cancelled && setError(e.message));
     return () => { cancelled = true; };
   }, []);
+
+  // Быстрое закрытие: reduce-only MARKET. Если на бирже позиции уже нет —
+  // бэкенд просто убирает зависшую запись из открытых.
+  const closePosition = async (p) => {
+    const stale = p.mark_price == null;
+    const question = stale
+      ? `Позиции ${p.symbol} ${p.side} нет на бирже. Убрать её из открытых?`
+      : `Закрыть ${p.symbol} ${p.side} по рынку?`;
+    if (!(await confirmAsync(question))) return;
+    setClosingId(p.order_id);
+    setError(null);
+    try {
+      const res = await apiPost("/positions/close", { order_id: p.order_id });
+      // закрытие финализируется событием биржи — даём ему пару секунд
+      if (res.status === "closing") await sleep(2500);
+      setPositions(await apiGet("/positions"));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setClosingId(null);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -344,6 +378,15 @@ export default function StatisticsTab() {
                     )}
                     <PnlTag value={p.pnl_usd ?? 0} pct={p.pnl_pct} />
                   </div>
+                  <button
+                    className="icon-btn icon-btn-danger"
+                    style={{ marginLeft: 8 }}
+                    title={p.mark_price == null ? "Убрать зависшую позицию" : "Закрыть по рынку"}
+                    disabled={closingId === p.order_id}
+                    onClick={() => closePosition(p)}
+                  >
+                    {closingId === p.order_id ? <Spinner /> : <X size={16} />}
+                  </button>
                 </div>
               );
             })

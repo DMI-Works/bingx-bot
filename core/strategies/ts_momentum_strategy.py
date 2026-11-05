@@ -387,6 +387,9 @@ class TsMomentumStrategy(BaseStrategy):
             'risk_percent': p['risk_per_trade_percent'],
             'leverage': p['leverage'],
             'stop_loss_price': stop_loss_price,
+            # трейлинг выключен: иначе ROI-лестница WallBreakout подтягивала SL
+            # к цене при +5.5% ROI и выбивала позицию через минуты (05.11)
+            'trail_meta': {'mode': 'none'},
             # take_profit_levels НЕТ: выход — по развороту сигнала (close_callback),
             # дизастер-стоп лишь страхует от гэпа
             'strategy': self.name,

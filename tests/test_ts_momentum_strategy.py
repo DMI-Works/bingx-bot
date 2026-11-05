@@ -180,6 +180,54 @@ class TestMinMargin(unittest.TestCase):
         self.assertEqual(qty, 0.01)
 
 
+class TestNoTrailingForTsMomentum(unittest.IsolatedAsyncioTestCase):
+    # регресія 05.11: ROI-лестница WallBreakout підтягувала SL позицій TSMOM
+    # і вибивала їх через хвилини
+    async def test_signal_disables_trailing(self):
+        closes = [100 + i for i in range(40)]
+        s = _strategy(closes, position_for=lambda sym, side: None)
+        sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
+        self.assertEqual(sig['trail_meta'], {'mode': 'none'})
+
+    async def test_trailing_manager_skips_mode_none(self):
+        from core.events import Event, EventType
+        from core.risk.trailing_stop_manager import TrailingStopManager
+        from core.common.position_math import position_key
+        tsm = TrailingStopManager.__new__(TrailingStopManager)
+        tsm.enabled = True
+        tsm.trail_levels_percent = [6.0]
+        tsm.trader = mock.MagicMock()
+        tsm.trader.open_positions = {
+            position_key('BTC-USDT', 'SHORT'): {'symbol': 'BTC-USDT', 'side': 'SHORT', 'trail_meta': {'mode': 'none'}},
+            position_key('BTC-USDT', 'LONG'): {'symbol': 'BTC-USDT', 'side': 'LONG', 'trail_meta': None},
+        }
+        tsm._process_position = mock.AsyncMock()
+        await tsm._on_price_update(Event(type=EventType.PRICE_UPDATED, data={'s': 'BTC-USDT', 'p': '100'}))
+        # обробляється лише LONG (звичайна лестница), SHORT з mode=none — ні
+        self.assertEqual(tsm._process_position.await_count, 1)
+        self.assertEqual(tsm._process_position.call_args.args[0], position_key('BTC-USDT', 'LONG'))
+
+
+class TestPendingOpenNotManual(unittest.IsolatedAsyncioTestCase):
+    # регресія 05.11: ACCOUNT_UPDATE про власний вхід бота приходив раніше,
+    # ніж позиція реєструвалась, і створював «ручний» дубль, що висів у відкритих
+    async def test_account_update_for_pending_entry_is_ignored(self):
+        import core.trading.simple_trader as st
+        from core.events import Event, EventType
+        from core.common.position_math import position_key
+        trader = st.SimpleTrader.__new__(st.SimpleTrader)
+        trader.open_positions = {}
+        trader._pending_opens = {position_key('XRP-USDT', 'SHORT')}
+        trader._track_manual_position = mock.AsyncMock()
+        event = Event(type=EventType.HANDLE_ACCOUNT_INFO_UPDATE, data={'a': {'P': [
+            {'s': 'XRP-USDT', 'ps': 'SHORT', 'pa': '-22', 'ep': '1.3189'},
+            {'s': 'ETH-USDT', 'ps': 'LONG', 'pa': '0.01', 'ep': '2400'},
+        ]}})
+        await trader._handle_account_update(event)
+        # XRP (pending вхід бота) пропущено, ETH (справді ручна) — записано
+        trader._track_manual_position.assert_awaited_once_with('ETH-USDT', 'LONG', 2400.0, 0.01)
+
+
 class TestClosePosition(unittest.IsolatedAsyncioTestCase):
     async def _trader(self):
         # мінімальний SimpleTrader без реальних залежностей

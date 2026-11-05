@@ -120,6 +120,11 @@ class TrailingStopManager(AtrThreeStepMixin, StopFallbackMixin):
             position = self.trader.open_positions.get(position_key)
             if not position:
                 continue
+            # trail_meta.mode == 'none' — стратегія сама керує виходом
+            # (TsMomentum тримає до розвороту сигналу, SL лише аварійний)
+            meta = position.get('trail_meta')
+            if isinstance(meta, dict) and meta.get('mode') == 'none':
+                continue
             # ladder-позиції без заданих рівнів не чіпаємо;
             # atr_3step рівнів trail_levels_percent не потребує
             if not self.trail_levels_percent and not is_atr_mode(position):
