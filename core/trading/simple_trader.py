@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from datetime import datetime
@@ -218,6 +219,35 @@ class SimpleTrader:
             )
         return quantity
 
+    # Стоп має спрацьовувати не далі, ніж ця частка відстані до ліквідації
+    # (~1/leverage; запас — на maintenance margin і проскальзування).
+    _STOP_TO_LIQUIDATION_MAX = 0.75
+
+    def _safe_leverage_for_stop(
+        self,
+        symbol: str,
+        side: str,
+        leverage: int,
+        stop_loss_price: Optional[float],
+        reference_price: Optional[float],
+    ) -> int:
+        """Знижує плече, якщо стоп стоїть далі за ціну ліквідації. Інакше
+        (05.11: TsMomentum, плече 10x, аварійний стоп 12-18%) позицію
+        ліквідує на ~9.5% руху раніше стопу — стоп марний, втрачається вся маржа."""
+        if not leverage or not stop_loss_price or not reference_price or reference_price <= 0:
+            return leverage
+        stop_fraction = abs(reference_price - stop_loss_price) / reference_price
+        if stop_fraction <= 0:
+            return leverage
+        max_leverage = max(1, int(self._STOP_TO_LIQUIDATION_MAX / stop_fraction))
+        if leverage <= max_leverage:
+            return leverage
+        logger.warning(
+            f"Leverage for {symbol} {side} lowered {leverage}x -> {max_leverage}x: "
+            f"stop {stop_fraction * 100:.2f}% away would sit beyond liquidation (~{100 / leverage:.1f}%)"
+        )
+        return max_leverage
+
     def _apply_min_margin(
         self,
         symbol: str,
@@ -311,6 +341,8 @@ class SimpleTrader:
                 positions_info_message = reason or positions_info_message
             if strategy:
                 positions_info_message = f"{positions_info_message} | Стратегія: {strategy}"
+
+            leverage = self._safe_leverage_for_stop(symbol, side, leverage, stop_loss_price, reference_price)
 
             quantity = await self._resolve_quantity(
                 symbol, side, quantity, leverage, stop_loss_price, reference_price, risk_percent
@@ -671,7 +703,15 @@ class SimpleTrader:
                 if key in self._pending_opens:
                     logger.debug(f"Account update for pending bot entry {symbol} {position_side} — not a manual position")
                     continue
-                await self._track_manual_position(symbol, position_side, to_float(pos.get('ep', 0)), abs(amount))
+                # Не записуємо одразу: під час редеплою старий і новий інстанси
+                # бота працюють паралельно, і вхід одного другий бачив як
+                # «ручний» (дубль, що висить у відкритих). Чекаємо, поки інший
+                # інстанс зареєструє позицію в БД, і лише тоді вирішуємо.
+                task = asyncio.create_task(self._maybe_track_manual_position(
+                    symbol, position_side, to_float(pos.get('ep', 0)), abs(amount)
+                ))
+                self._background_tasks().add(task)
+                task.add_done_callback(self._background_tasks().discard)
 
             elif amount == 0 and existing:
                 if existing.get('opened_by') != 'user':
@@ -699,6 +739,32 @@ class SimpleTrader:
                     close_reason='manual',
                     close_order_type=None,
                 )
+
+    _MANUAL_DETECT_DELAY_SECONDS = 5.0
+
+    def _background_tasks(self) -> set:
+        if not hasattr(self, '_bg_tasks'):
+            self._bg_tasks = set()
+        return self._bg_tasks
+
+    async def _maybe_track_manual_position(
+        self, symbol: str, side: str, entry_price: float, quantity: float
+    ) -> None:
+        try:
+            await asyncio.sleep(self._MANUAL_DETECT_DELAY_SECONDS)
+            key = position_key(symbol, side)
+            if key in self.open_positions or key in self._pending_opens:
+                return
+            if self.db.has_open_position(symbol, side):
+                logger.info(
+                    f"Account update {symbol} {side}: позиція вже є в БД (інший інстанс бота) — не ручна"
+                )
+                return
+            await self._track_manual_position(symbol, side, entry_price, quantity)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Manual position detection failed for {symbol} {side}: {e}", exc_info=True)
 
     async def _track_manual_position(self, symbol: str, side: str, entry_price: float, quantity: float) -> None:
         """Позиція відкрита вручну на біржі — бот про неї не знав."""

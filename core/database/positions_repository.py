@@ -108,6 +108,10 @@ class PositionsRepository:
                 {"$set": {"status": "STALE", "closed_at": now, "close_reason": "stale"}},
             )
 
+    def has_open_position(self, symbol: str, side: str) -> bool:
+        with self._lock:
+            return self.db.positions.find_one({"symbol": symbol, "side": side, "status": "OPEN"}) is not None
+
     def get_active_positions(self) -> List[dict]:
         with self._lock:
             return list(self.db.positions.find({"status": "OPEN"}).sort("created_at", DESCENDING))

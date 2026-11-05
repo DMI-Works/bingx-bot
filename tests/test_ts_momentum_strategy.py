@@ -219,13 +219,52 @@ class TestPendingOpenNotManual(unittest.IsolatedAsyncioTestCase):
         trader.open_positions = {}
         trader._pending_opens = {position_key('XRP-USDT', 'SHORT')}
         trader._track_manual_position = mock.AsyncMock()
+        trader._MANUAL_DETECT_DELAY_SECONDS = 0
+        trader.db = mock.MagicMock()
+        trader.db.has_open_position.return_value = False
         event = Event(type=EventType.HANDLE_ACCOUNT_INFO_UPDATE, data={'a': {'P': [
             {'s': 'XRP-USDT', 'ps': 'SHORT', 'pa': '-22', 'ep': '1.3189'},
             {'s': 'ETH-USDT', 'ps': 'LONG', 'pa': '0.01', 'ep': '2400'},
         ]}})
         await trader._handle_account_update(event)
+        import asyncio
+        await asyncio.gather(*list(trader._background_tasks()))
         # XRP (pending вхід бота) пропущено, ETH (справді ручна) — записано
         trader._track_manual_position.assert_awaited_once_with('ETH-USDT', 'LONG', 2400.0, 0.01)
+
+    async def test_position_of_other_instance_is_not_manual(self):
+        # регресія 05.11: під час редеплою старий інстанс бачив вхід нового
+        # як «ручний»; якщо позиція вже є в БД — це не ручна
+        import asyncio
+        import core.trading.simple_trader as st
+        from core.events import Event, EventType
+        trader = st.SimpleTrader.__new__(st.SimpleTrader)
+        trader.open_positions = {}
+        trader._pending_opens = set()
+        trader._track_manual_position = mock.AsyncMock()
+        trader._MANUAL_DETECT_DELAY_SECONDS = 0
+        trader.db = mock.MagicMock()
+        trader.db.has_open_position.return_value = True
+        await trader._handle_account_update(Event(type=EventType.HANDLE_ACCOUNT_INFO_UPDATE, data={'a': {'P': [
+            {'s': 'ETH-USDT', 'ps': 'SHORT', 'pa': '-0.04', 'ep': '2253'},
+        ]}}))
+        await asyncio.gather(*list(trader._background_tasks()))
+        trader._track_manual_position.assert_not_awaited()
+
+
+class TestLeverageVsStop(unittest.TestCase):
+    def _trader(self):
+        import core.trading.simple_trader as st
+        return st.SimpleTrader.__new__(st.SimpleTrader)
+
+    def test_leverage_lowered_when_stop_beyond_liquidation(self):
+        # стоп 16% при 10x (ліквідація ~10%) -> плече 0.75/0.16 = 4
+        lev = self._trader()._safe_leverage_for_stop('ETH-USDT', 'SHORT', 10, 116.0, 100.0)
+        self.assertEqual(lev, 4)
+
+    def test_leverage_kept_when_stop_is_close(self):
+        lev = self._trader()._safe_leverage_for_stop('ETH-USDT', 'LONG', 10, 99.0, 100.0)
+        self.assertEqual(lev, 10)
 
 
 class TestClosePosition(unittest.IsolatedAsyncioTestCase):
