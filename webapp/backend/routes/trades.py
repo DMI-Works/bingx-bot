@@ -128,6 +128,7 @@ async def get_positions(request: Request):
             "stop_loss_price": meta.get("stop_loss_price"),
             "take_profit_levels": meta.get("take_profit_levels"),
             "strategy": meta.get("strategy"),
+            "margin_usdt": margin,
             "pnl_usd": pnl_usd,
             "pnl_pct": (pnl_usd / margin * 100) if (pnl_usd is not None and margin) else None,
         })

@@ -29,6 +29,10 @@ export default function TradeHistoryList({ trades }) {
                     <div className="row-title-line">
                       <span className="symbol">{t.symbol}</span>
                       <SideBadge side={t.side} />
+                      {t.leverage && <span className="row-sub row-sub-faint">{t.leverage}x</span>}
+                      {t.margin_usdt != null && (
+                        <span className="row-sub row-sub-faint">маржа {fmtUsdPlain(t.margin_usdt)}</span>
+                      )}
                     </div>
                     <div className="row-sub">
                       {fmtTime(t.closed_at)}

@@ -4,7 +4,7 @@ import {
 } from "recharts";
 import { TrendingUp, TrendingDown } from "lucide-react";
 import { apiGet } from "../../lib/api";
-import { fmtUsd, fmtPct, fmtProfitFactor, slRoiPercent } from "../../lib/format";
+import { fmtUsd, fmtUsdPlain, fmtPct, fmtProfitFactor, slRoiPercent } from "../../lib/format";
 import { Spinner, EmptyRow, PnlTag, SideBadge } from "../common";
 import TradeHistoryList from "./TradeHistoryList";
 
@@ -320,6 +320,9 @@ export default function StatisticsTab() {
                       <span className="symbol">{p.symbol}</span>
                       <SideBadge side={p.side} />
                       {p.leverage && <span className="row-sub row-sub-faint">{p.leverage}x</span>}
+                      {p.margin_usdt != null && (
+                        <span className="row-sub row-sub-faint">маржа {fmtUsdPlain(p.margin_usdt)}</span>
+                      )}
                     </div>
                     <div className="row-sub">
                       вход {p.entry_price?.toLocaleString() ?? "—"}
