@@ -25,6 +25,11 @@ ROI_GAP_MODE = 'roi_gap'
 
 # мінімальне покращення стопу (% ROI) для перестановки ордера
 _MIN_STEP_ROI = 5.0
+# допуск на похибку float: стоп на безубитку читався як 0.9999999% ROI при
+# цілі 1.0% і переставлявся на кожен тік (06.11: 10 000 переносів AVAX)
+_ROI_EPS = 0.05
+# пауза між перестановками стопу однієї позиції — запобіжник від спаму біржі
+_MOVE_COOLDOWN_SECONDS = 30.0
 
 
 def is_roi_gap_mode(position: dict) -> bool:
@@ -69,14 +74,17 @@ class RoiGapTrailMixin:
         if target_roi is None:
             return
 
+        if time.time() - state.roi_gap_last_move_at < _MOVE_COOLDOWN_SECONDS:
+            return
+
         current_stop = position.get('stop_loss_price')
         current_roi = (
             roi_percent(entry_price, side, current_stop, leverage) if current_stop is not None else None
         )
         if current_roi is not None:
-            # стоп ще в мінусі — переносимо одразу; уже в плюсі — лише кроком
-            min_step = _MIN_STEP_ROI if current_roi >= breakeven_sl_roi else 0.0
-            if target_roi <= current_roi + min_step:
+            # стоп ще нижче безубитку — переносимо одразу; уже на ньому — лише кроком
+            min_step = _MIN_STEP_ROI if current_roi >= breakeven_sl_roi - _ROI_EPS else 0.0
+            if target_roi <= current_roi + max(min_step, _ROI_EPS):
                 return
 
         target_price = entry_price * (1 + side_sign(side) * target_roi / 100.0 / leverage)
@@ -89,6 +97,7 @@ class RoiGapTrailMixin:
                 f"TrailingStop: {position_key} roi_gap: ROI {roi_now:+.1f}% (peak {peak:+.1f}%) -> "
                 f"SL {current_roi if current_roi is not None else float('nan'):+.1f}% -> {target_roi:+.1f}% ROI"
             )
+            state.roi_gap_last_move_at = time.time()
             moved = await self._move_stop_loss(
                 position_key, position, state, [(1, target_roi, target_price)], stage=ROI_GAP_MODE,
             )

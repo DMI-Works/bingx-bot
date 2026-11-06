@@ -220,6 +220,42 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
         candidates = tsm._move_stop_loss.call_args.args[3]
         self.assertAlmostEqual(candidates[0][2], 103.0)
 
+    async def test_no_loop_when_stop_already_at_breakeven(self):
+        # регресія 06.11: стоп на безубитку (8.179171 = 0.99999...% ROI) при
+        # цілі 1.0% переставлявся на кожен тік — 10 000 переносів і повідомлень
+        from core.risk.trailing_stop_manager import TrailingStopManager
+        from core.risk.trailing_state import TrailState
+        tsm = TrailingStopManager.__new__(TrailingStopManager)
+        tsm.taker_fee_rate = 0.0005
+        tsm._retry_after = {}
+        tsm.move_retry_cooldown_seconds = 10
+        position = {'symbol': 'AVAX-USDT', 'side': 'LONG', 'entry_price': 8.171, 'leverage': 10,
+                    'stop_loss_price': 8.179170999999998, 'sl_order_id': 'sl1', 'trail_meta': dict(self.META)}
+        tsm.trader = mock.MagicMock()
+        tsm.trader.open_positions = {'k': position}
+        tsm._move_stop_loss = mock.AsyncMock(return_value=1)
+        state = TrailState()
+        for price in (8.30, 8.31, 8.32):  # ROI ~16-18%: безубиток досягнуто, трейлінг ще ні
+            await tsm._process_roi_gap_position('k', position, state, price, 10.0)
+        tsm._move_stop_loss.assert_not_awaited()
+
+    async def test_cooldown_between_moves(self):
+        from core.risk.trailing_stop_manager import TrailingStopManager
+        from core.risk.trailing_state import TrailState
+        tsm = TrailingStopManager.__new__(TrailingStopManager)
+        tsm.taker_fee_rate = 0.0005
+        tsm._retry_after = {}
+        tsm.move_retry_cooldown_seconds = 10
+        position = {'symbol': 'BTC-USDT', 'side': 'LONG', 'entry_price': 100.0, 'leverage': 10,
+                    'stop_loss_price': 88.0, 'sl_order_id': 'sl1', 'trail_meta': dict(self.META)}
+        tsm.trader = mock.MagicMock()
+        tsm.trader.open_positions = {'k': position}
+        tsm._move_stop_loss = mock.AsyncMock(return_value=1)  # стоп "не зрушив" у позиції
+        state = TrailState()
+        await tsm._process_roi_gap_position('k', position, state, 105.0, 10.0)
+        await tsm._process_roi_gap_position('k', position, state, 105.0, 10.0)
+        self.assertEqual(tsm._move_stop_loss.await_count, 1)
+
     async def test_trailing_manager_skips_mode_none(self):
         from core.events import Event, EventType
         from core.risk.trailing_stop_manager import TrailingStopManager

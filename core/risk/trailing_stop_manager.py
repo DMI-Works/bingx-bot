@@ -465,6 +465,9 @@ class TrailingStopManager(AtrThreeStepMixin, RoiGapTrailMixin, StopFallbackMixin
     async def _publish_stop_moved(
         self, position: dict, stage: str, old_stop_price, new_stop_price: float, leverage: float
     ) -> None:
+        # стоп фактично не зрушив (та сама ціна) — не спамимо Telegram
+        if old_stop_price and abs(new_stop_price - old_stop_price) <= abs(old_stop_price) * 1e-6:
+            return
         try:
             await self.event_bus.publish(Event(
                 type=EventType.STOP_LOSS_MOVED,
