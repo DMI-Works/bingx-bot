@@ -301,11 +301,8 @@ async def run_bot(config: ConfigLoader, restart_event: asyncio.Event) -> bool:
         tsmom_strategy = strategy_manager.get('TsMomentumStrategy')
         if tsmom_strategy is not None and hasattr(tsmom_strategy, 'set_symbol_pool_provider'):
             tsmom_strategy.set_symbol_pool_provider(lambda: tsmom_symbol_selector.current_symbols)
-            tsmom_strategy.set_position_provider(
-                lambda symbol, side: trader.open_positions.get(position_key(symbol, side))
-            )
-            tsmom_strategy.set_close_callback(trader.close_position)
-            logger.info("[OK] TsMomentumStrategy bound to its stable pool (+ position provider & close callback)")
+            # позиції стратегія не бачить: шле цілі (action=TARGET), звіряє SimpleTrader
+            logger.info("[OK] TsMomentumStrategy bound to its stable pool")
 
     telegram_enabled = config.get('telegram.enabled', False)
     telegram_bot = None

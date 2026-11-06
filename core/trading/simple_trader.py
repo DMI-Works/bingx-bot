@@ -134,6 +134,9 @@ class SimpleTrader:
     async def _handle_signal(self, event: Event) -> None:
         """Обробка сигналу від стратегії"""
         signal = event.data
+        if signal.get('action') == 'TARGET':
+            await self._handle_target(signal)
+            return
         if signal.get('action') != 'OPEN':
             return
 
@@ -161,6 +164,52 @@ class SimpleTrader:
             # під фактичну ціну виконання ринкового ордера
             reference_price=signal.get('reference_price')
         )
+
+    def _strategy_side(self, symbol: str, strategy: str) -> Optional[str]:
+        for side in ('LONG', 'SHORT'):
+            pos = self.open_positions.get(position_key(symbol, side))
+            if pos and pos.get('strategy') == strategy:
+                return side
+        return None
+
+    async def _handle_target(self, target: dict) -> None:
+        """Цель позиции від стратегії без знання позицій (TsMomentum): звіряємо з
+        ВЛАСНИМИ позиціями цього користувача.
+          позиція протилежна / ціль flat -> закрити (відкриємо на наступній звірці);
+          позиція в потрібний бік -> тримати, оновити trail_meta;
+          позиції немає, ціль є -> відкрити (якщо торгівля увімкнена).
+        refresh_only — лише оновлення trail_meta (змінились параметри стратегії)."""
+        symbol = target.get('symbol')
+        strategy = target.get('strategy')
+        desired = target.get('side')
+        if not symbol or not strategy:
+            return
+        current = self._strategy_side(symbol, strategy)
+
+        if current is not None and current == desired:
+            pos = self.open_positions.get(position_key(symbol, current))
+            meta = target.get('trail_meta')
+            if pos is not None and meta and pos.get('trail_meta') != meta:
+                pos['trail_meta'] = dict(meta)
+                persist_position_metadata(self.db, pos, context="trail_meta refresh")
+                logger.info(f"[{symbol}] {strategy}: trail_meta {current} оновлено -> {meta}")
+            return
+
+        if target.get('refresh_only'):
+            return
+
+        if current is not None:
+            logger.info(f"[{symbol}] {strategy}: ціль {desired}, позиція {current} -> закриваю")
+            await self.close_position(symbol, current, 'tsmom_flip')
+            return
+
+        if desired is None or target.get('stop_loss_price') is None:
+            return
+        await self._handle_signal(Event(
+            type=EventType.SIGNAL_GENERATED,
+            data={**target, 'action': 'OPEN'},
+            source=strategy,
+        ))
 
     async def _resolve_quantity(
         self,

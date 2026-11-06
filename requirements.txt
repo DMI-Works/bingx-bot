@@ -11,6 +11,9 @@ qrcode>=8.0.0
 pymongo[srv]>=4.9,<5
 certifi>=2024.2.2
 
+# Шифрування API-ключів користувачів (SECRETS_KEY)
+cryptography>=41
+
 # Optional for enhanced features
 # numpy>=1.24.0  # For advanced calculations
 # pandas>=2.0.0  # For data analysis

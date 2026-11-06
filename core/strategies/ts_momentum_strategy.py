@@ -11,12 +11,14 @@ vol-target дало +16%/год, Sharpe 0.64, плюс во всех трёх т
   1. Сигнал = знак доходности за lookback_days: mom = close[-1]/close[-1-L]-1.
        desired = LONG если mom>0, SHORT если mom<0 (long_short), либо FLAT вместо
        SHORT (long_flat).
-  2. Удержание ДО РАЗВОРОТА сигнала (не по ценовому стопу — суть TSMOM). Ежедневно
-     сверяем desired с текущей позицией по символу:
-       нет позиции + сигнал есть -> OPEN (нужная сторона);
-       позиция есть, знак сменился -> CLOSE по рынку (close_callback); противоположную
+  2. Удержание ДО РАЗВОРОТА сигнала (не по ценовому стопу — суть TSMOM). Стратегия
+     НЕ знает позиций (их у каждого пользователя свои): она публикует цель
+     SIGNAL_GENERATED {action:'TARGET', side: LONG|SHORT|None, ...}, а сверку
+     делает SimpleTrader каждого пользователя (_handle_target):
+       нет позиции + цель есть -> OPEN (нужная сторона);
+       позиция есть, знак сменился -> CLOSE по рынку (close_position); противоположную
          откроем на следующей сверке (без гонки close+open в одном тике);
-       знак совпал -> держим.
+       знак совпал -> держим (и обновляем trail_meta).
   3. Сайзинг = vol-target через риск-сайзинг: quantity=None + risk_percent +
      stop_loss_price = entry ∓ disaster_stop_atr*ATR. При стопе ∝ ATR размер
      ∝ 1/волатильность = vol-target. Дизастер-стоп широкий — только страховка от
@@ -110,10 +112,9 @@ class TsMomentumStrategy(BaseStrategy):
 
         # Набор символов СВОЕГО стабильного пула (см. main.py).
         self._symbol_pool_provider: Optional[Callable[[], Set[str]]] = None
-        # Текущая позиция по (symbol, side) — обычно trader.open_positions.get(...).
-        self._position_provider: Optional[Callable[[str, str], Optional[dict]]] = None
-        # Закрытие позиции по флипу сигнала — обычно trader.close_position.
-        self._close_callback: Optional[Callable[[str, str, str], object]] = None
+        # Последние цели по символам: {symbol: (bucket, target)} — для новых
+        # пользовательских сессий и обновления trail_meta открытых позиций.
+        self.last_targets: Dict[str, tuple] = {}
 
         logger.info(
             f"TsMomentumStrategy: tf={self._params['timeframe']}, lookback={self._params['lookback_days']}d, "
@@ -179,7 +180,22 @@ class TsMomentumStrategy(BaseStrategy):
         self.config = new_config
         self._params = params
         self._refresh_derived_params()
-        self._refresh_open_trail_meta()
+        self._publish_trail_refresh()
+
+    def _publish_trail_refresh(self) -> None:
+        """Новые параметры фиксации прибыли — и для уже открытых позиций:
+        трейдеры обновят trail_meta своих позиций (refresh_only — без входов/выходов)."""
+        if not self.last_targets:
+            return
+        meta = self._trail_meta()
+        for _bucket, target in list(self.last_targets.values()):
+            refresh = {**target, 'trail_meta': dict(meta), 'refresh_only': True}
+            try:
+                asyncio.get_running_loop().create_task(self.event_bus.publish(Event(
+                    type=EventType.SIGNAL_GENERATED, data=refresh, source=self.name,
+                )))
+            except RuntimeError:
+                return  # нет event loop (тесты/скрипты)
 
     def _trail_meta(self) -> dict:
         p = self._params
@@ -190,27 +206,6 @@ class TsMomentumStrategy(BaseStrategy):
             'gap_roi': p['trail_gap_roi'],
         }
 
-    def _refresh_open_trail_meta(self) -> None:
-        """Новые параметры фиксации прибыли — и для уже открытых позиций
-        стратегии (иначе действовали бы только на следующие входы)."""
-        if self._position_provider is None or self._symbol_pool_provider is None:
-            return
-        try:
-            symbols = set(self._symbol_pool_provider())
-        except Exception:
-            logger.error("TsMomentum: symbol_pool_provider failed", exc_info=True)
-            return
-        meta = self._trail_meta()
-        for symbol in symbols:
-            for side in ('LONG', 'SHORT'):
-                try:
-                    pos = self._position_provider(symbol, side)
-                except Exception:
-                    continue
-                if pos and pos.get('strategy') == self.name and pos.get('trail_meta') != meta:
-                    pos['trail_meta'] = dict(meta)
-                    logger.info(f"[{symbol}] TsMomentum: trail_meta {side} обновлён -> {meta}")
-
     def _refresh_derived_params(self) -> None:
         self._excluded_prefixes = tuple(
             x.strip().upper() for x in str(self._params['excluded_symbol_prefixes']).split(',') if x.strip()
@@ -220,12 +215,6 @@ class TsMomentumStrategy(BaseStrategy):
 
     def set_symbol_pool_provider(self, provider: Optional[Callable[[], Set[str]]]) -> None:
         self._symbol_pool_provider = provider
-
-    def set_position_provider(self, provider: Optional[Callable[[str, str], Optional[dict]]]) -> None:
-        self._position_provider = provider
-
-    def set_close_callback(self, callback: Optional[Callable[[str, str, str], object]]) -> None:
-        self._close_callback = callback
 
     # ---------- триггер: новая дневная свеча ----------
 
@@ -325,22 +314,6 @@ class TsMomentumStrategy(BaseStrategy):
 
     # ---------- сверка сигнала с позицией ----------
 
-    def _current_side(self, symbol: str) -> Optional[str]:
-        """'LONG'/'SHORT' — если у стратегии есть открытая позиция по символу, иначе None.
-        Считаем только свои (strategy==self.name) позиции, чтобы не трогать чужие."""
-        if self._position_provider is None:
-            return None
-        for side in ('LONG', 'SHORT'):
-            pos = None
-            try:
-                pos = self._position_provider(symbol, side)
-            except Exception:
-                logger.error("TsMomentum: position_provider failed", exc_info=True)
-                return None
-            if pos and pos.get('strategy') == self.name:
-                return side
-        return None
-
     async def _reconcile(self, symbol: str, bucket: int, tf_ms: int):
         """Возвращает dict-сигнал OPEN, None или 'not_ready'. Закрытие по флипу
         делает сразу через close_callback (не через возвращаемое значение)."""
@@ -372,36 +345,25 @@ class TsMomentumStrategy(BaseStrategy):
         if desired == 'SHORT' and p['mode'] == 'long_flat':
             desired = None  # в long_flat шортов нет — остаёмся/выходим в кэш
 
-        current = self._current_side(symbol)
-
-        # 1) разворот сигнала или уход в кэш -> закрыть текущую позицию
-        if current is not None and current != desired:
-            if self._close_callback is not None:
-                logger.info(
-                    f"[{symbol}] TsMomentum CLOSE {current}: сигнал сменился "
-                    f"(mom({p['lookback_days']}d)={mom*100:+.2f}% -> desired={desired})"
-                )
-                try:
-                    await self._close_callback(symbol, current, 'tsmom_flip')
-                except Exception:
-                    logger.error(f"[{symbol}] TsMomentum: close_callback failed", exc_info=True)
-            return None  # противоположную откроем на следующей дневной сверке
-
-        # 2) уже в нужной стороне или нет сигнала -> ничего
-        if current is not None and current == desired:
-            self._sync_trail_meta(symbol, current)
-        if desired is None or current == desired:
-            logger.info(
-                f"[{symbol}] TsMomentum HOLD: mom({p['lookback_days']}d)={mom*100:+.2f}%, "
-                f"desired={desired}, current={current}"
-            )
-            return None
+        target = {
+            'action': 'TARGET',
+            'symbol': symbol,
+            'side': desired,
+            'strategy': self.name,
+            'trail_meta': self._trail_meta(),
+            'momentum_pct': mom * 100.0,
+            'refresh_only': False,
+        }
+        if desired is None:
+            logger.info(f"[{symbol}] TsMomentum TARGET flat: mom({p['lookback_days']}d)={mom*100:+.2f}%")
+            return self._remember_target(symbol, bucket, target)
 
         # 3) позиции нет, есть сигнал -> OPEN с vol-target сайзингом
         atr_value = atr(highs, lows, closes, p['atr_period'])[-1]
         if atr_value is None or atr_value <= 0:
             logger.info(f"[{symbol}] TsMomentum: недостаточно истории для ATR — пропускаю")
             return None
+        # параметры входа нужны тем трейдерам, у кого позиции ещё нет
 
         price = self._last_price.get(symbol) or closes[-1]
         stop_distance = p['disaster_stop_atr'] * atr_value
@@ -428,40 +390,33 @@ class TsMomentumStrategy(BaseStrategy):
             'mode': p['mode'],
         }
 
-        return {
-            'action': 'OPEN',
-            'symbol': symbol,
-            'side': desired,
+        target.update({
             'analytics_context': analytics_context,
             'quantity': None,  # размер считает SimpleTrader по risk_percent (vol-target)
             'risk_percent': p['risk_per_trade_percent'],
             'leverage': p['leverage'],
             'stop_loss_price': stop_loss_price,
-            # своя фиксация прибыли (roi_gap): безубыток, потом стоп за пиком
-            # с отступом. Не ROI-лестница WallBreakout — та ставила SL впритык
-            # к цене (+5.5% ROI) и выбивала позицию через минуты (05.11)
-            'trail_meta': self._trail_meta(),
-            # take_profit_levels НЕТ: выход — по развороту сигнала (close_callback),
-            # дизастер-стоп лишь страхует от гэпа
-            'strategy': self.name,
+            # take_profit_levels НЕТ: выход — по развороту сигнала, дизастер-стоп
+            # лишь страхует от гэпа; прибыль фиксирует roi_gap (trail_meta)
             'reference_price': price,
             'reason': (
                 f"TSMOM {desired}: доходность за {p['lookback_days']}d = {mom*100:+.2f}% "
                 f"(mode={p['mode']}), размер по vol-target, дизастер-SL {p['disaster_stop_atr']:g}*ATR"
             ),
-        }
+        })
+        return self._remember_target(symbol, bucket, target)
 
-    def _sync_trail_meta(self, symbol: str, side: str) -> None:
-        """Позиция, открытая до появления roi_gap (trail_meta={'mode':'none'})
-        или с другими параметрами, получает актуальную фиксацию прибыли."""
-        try:
-            pos = self._position_provider(symbol, side) if self._position_provider else None
-        except Exception:
-            return
-        meta = self._trail_meta()
-        if pos and pos.get('strategy') == self.name and pos.get('trail_meta') != meta:
-            pos['trail_meta'] = dict(meta)
-            logger.info(f"[{symbol}] TsMomentum: trail_meta {side} обновлён -> {meta}")
+    def _remember_target(self, symbol: str, bucket: int, target: dict) -> dict:
+        """Последняя цель по символу — новые пользователи (и рестарт их сессии)
+        получают её сразу, не дожидаясь следующей дневной сверки."""
+        self.last_targets[symbol] = (bucket, target)
+        return target
+
+    def current_targets(self) -> list:
+        """Цели текущего дневного бакета (для подключившихся сессий)."""
+        tf_ms = interval_to_ms(self._params['timeframe'])
+        bucket_now = int(time.time() * 1000) // tf_ms
+        return [dict(t) for b, t in self.last_targets.values() if b == bucket_now]
 
     async def _passes_liquidity_filter(self, symbol: str) -> bool:
         min_volume = self._params['min_quote_volume_24h_usdt']

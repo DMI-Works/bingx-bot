@@ -39,7 +39,8 @@ class StrategySettingsStore:
 
     def __init__(self, db: Database):
         self.db = db
-        self.collection = self.db.db.strategy_settings
+        # спільні (адмінські) параметри стратегій — без user-scope
+        self.collection = self.db.raw.strategy_settings
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:

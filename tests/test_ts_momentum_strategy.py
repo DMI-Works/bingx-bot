@@ -66,17 +66,13 @@ class TestIndicators(unittest.TestCase):
         self.assertIsNone(realized_vol([None, None], 4))
 
 
-def _strategy(closes, pool=None, position_for=None, closer=None):
+def _strategy(closes, pool=None):
     cfg = TsMomentumStrategy.build_config(None)
     cfg['lookback_days'] = 5
     cfg['atr_period'] = 3
     cfg['min_quote_volume_24h_usdt'] = 0  # вимкнути фільтр ліквідності в тестах
     s = TsMomentumStrategy(EventBus(), cfg, bingx_client=FakeExchange(closes))
     s.set_symbol_pool_provider(lambda: (pool if pool is not None else {'BTC-USDT'}))
-    if position_for is not None:
-        s.set_position_provider(position_for)
-    if closer is not None:
-        s.set_close_callback(closer)
     return s
 
 
@@ -93,7 +89,7 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
         # після кожного рестарту стратегія чекала наступної доби
         import asyncio
         closes = [100 + i for i in range(40)]
-        s = _strategy(closes, position_for=lambda sym, side: None)
+        s = _strategy(closes)
         self.assertIsNone(await s.analyze('BTC-USDT', 139.0))
         await asyncio.gather(*list(s._tasks))
         self.assertEqual(s.bingx_client.klines_calls, 1)
@@ -104,7 +100,7 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
     async def test_open_long_on_positive_momentum(self):
         # зростаючий ряд -> mom>0 -> LONG; позиції немає -> OPEN
         closes = [100 + i for i in range(40)]
-        s = _strategy(closes, position_for=lambda sym, side: None)
+        s = _strategy(closes)
         sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
         self.assertIsInstance(sig, dict)
         self.assertEqual(sig['side'], 'LONG')
@@ -116,41 +112,79 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
 
     async def test_open_short_on_negative_momentum(self):
         closes = [140 - i for i in range(40)]  # падіння -> mom<0 -> SHORT
-        s = _strategy(closes, position_for=lambda sym, side: None)
+        s = _strategy(closes)
         sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
         self.assertEqual(sig['side'], 'SHORT')
         self.assertGreater(sig['stop_loss_price'], sig['reference_price'])  # SL вище для SHORT
 
     async def test_long_flat_mode_no_short(self):
         closes = [140 - i for i in range(40)]
-        s = _strategy(closes, position_for=lambda sym, side: None)
+        s = _strategy(closes)
         s._params['mode'] = 'long_flat'
         sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
-        self.assertIsNone(sig)  # шортів немає — залишаємось поза ринком
+        # шортів немає — ціль flat (трейдер закриє LONG, якщо був, і нічого не відкриє)
+        self.assertEqual(sig['action'], 'TARGET')
+        self.assertIsNone(sig['side'])
 
-    async def test_hold_when_same_side(self):
-        closes = [100 + i for i in range(40)]  # LONG desired
-        pos = {'BTC-USDT_LONG': {'strategy': 'TsMomentumStrategy', 'side': 'LONG'}}
-        s = _strategy(closes, position_for=lambda sym, side: pos.get(f"{sym}_{side}"))
-        closed = []
-        s.set_close_callback(lambda *a: closed.append(a))
-        sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
-        self.assertIsNone(sig)       # уже в LONG — нічого не відкриваємо
-        self.assertEqual(closed, [])  # і не закриваємо
+
+
+class TestTraderTargetReconcile(unittest.IsolatedAsyncioTestCase):
+    """Звірка цілі TsMomentum з ВЛАСНИМИ позиціями користувача (SimpleTrader)."""
+    META = {'mode': 'roi_gap', 'breakeven_roi': 10.0, 'start_roi': 30.0, 'gap_roi': 20.0}
+
+    def _trader(self, positions):
+        import core.trading.simple_trader as st
+        trader = st.SimpleTrader.__new__(st.SimpleTrader)
+        trader.open_positions = positions
+        trader.db = mock.MagicMock()
+        trader.close_position = mock.AsyncMock(return_value=True)
+        trader._handle_signal_open = None
+        trader.open_position = mock.AsyncMock(return_value=True)
+        trader.settings_manager = None
+        return trader
+
+    def _target(self, side, **extra):
+        return {'action': 'TARGET', 'symbol': 'BTC-USDT', 'side': side, 'strategy': 'TsMomentumStrategy',
+                'trail_meta': dict(self.META), 'refresh_only': False, 'stop_loss_price': 90.0,
+                'reference_price': 100.0, 'quantity': None, 'risk_percent': 1.0, 'leverage': 10, **extra}
+
+    async def test_hold_when_same_side_and_refresh_meta(self):
+        from core.common.position_math import position_key
+        pos = {'strategy': 'TsMomentumStrategy', 'side': 'LONG', 'trail_meta': {'mode': 'none'}, 'order_id': 'o1'}
+        trader = self._trader({position_key('BTC-USDT', 'LONG'): pos})
+        await trader._handle_target(self._target('LONG'))
+        trader.close_position.assert_not_awaited()
+        trader.open_position.assert_not_awaited()
+        self.assertEqual(pos['trail_meta'], self.META)  # стара позиція отримала roi_gap
 
     async def test_close_on_flip(self):
-        # desired LONG (зростання), але відкрита SHORT -> закрити SHORT
-        closes = [100 + i for i in range(40)]
-        pos = {'BTC-USDT_SHORT': {'strategy': 'TsMomentumStrategy', 'side': 'SHORT'}}
-        calls = []
+        from core.common.position_math import position_key
+        pos = {'strategy': 'TsMomentumStrategy', 'side': 'SHORT', 'order_id': 'o1'}
+        trader = self._trader({position_key('BTC-USDT', 'SHORT'): pos})
+        await trader._handle_target(self._target('LONG'))
+        trader.close_position.assert_awaited_once_with('BTC-USDT', 'SHORT', 'tsmom_flip')
+        trader.open_position.assert_not_awaited()  # відкриття — на наступній звірці
 
-        async def closer(symbol, side, reason):
-            calls.append((symbol, side, reason))
+    async def test_open_when_flat(self):
+        trader = self._trader({})
+        await trader._handle_target(self._target('LONG'))
+        trader.open_position.assert_awaited_once()
+        self.assertEqual(trader.open_position.call_args.kwargs['side'], 'LONG')
 
-        s = _strategy(closes, position_for=lambda sym, side: pos.get(f"{sym}_{side}"), closer=closer)
-        sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
-        self.assertIsNone(sig)  # на флипі лише закриваємо, відкриття — наступного дня
-        self.assertEqual(calls, [('BTC-USDT', 'SHORT', 'tsmom_flip')])
+    async def test_refresh_only_never_opens_or_closes(self):
+        from core.common.position_math import position_key
+        pos = {'strategy': 'TsMomentumStrategy', 'side': 'SHORT', 'order_id': 'o1'}
+        trader = self._trader({position_key('BTC-USDT', 'SHORT'): pos})
+        await trader._handle_target(self._target('LONG', refresh_only=True))
+        trader.close_position.assert_not_awaited()
+        trader.open_position.assert_not_awaited()
+
+    async def test_other_strategy_position_ignored(self):
+        from core.common.position_math import position_key
+        pos = {'strategy': 'TrendSupertrendStrategy', 'side': 'SHORT', 'order_id': 'o1'}
+        trader = self._trader({position_key('BTC-USDT', 'SHORT'): pos})
+        await trader._handle_target(self._target('LONG'))
+        trader.close_position.assert_not_awaited()  # чужу позицію не чіпаємо
 
 
 def _bucket_now():
@@ -191,17 +225,9 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
 
     async def test_signal_uses_roi_gap(self):
         closes = [100 + i for i in range(40)]
-        s = _strategy(closes, position_for=lambda sym, side: None)
+        s = _strategy(closes)
         sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
         self.assertEqual(sig['trail_meta'], self.META)
-
-    async def test_hold_upgrades_old_position_meta(self):
-        # позиція, відкрита з trail_meta={'mode':'none'}, отримує roi_gap на звірці
-        pos = {'strategy': 'TsMomentumStrategy', 'trail_meta': {'mode': 'none'}}
-        closes = [100 + i for i in range(40)]
-        s = _strategy(closes, position_for=lambda sym, side: pos if side == 'LONG' else None)
-        await s._reconcile('BTC-USDT', _bucket_now(), DAY)
-        self.assertEqual(pos['trail_meta'], self.META)
 
     async def test_manager_moves_stop_to_peak_minus_gap(self):
         from core.risk.trailing_stop_manager import TrailingStopManager
