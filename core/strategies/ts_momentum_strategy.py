@@ -59,7 +59,7 @@ _TICKERS_TTL_SECONDS = 900.0
 @register_strategy('TsMomentumStrategy')
 class TsMomentumStrategy(BaseStrategy):
     DEFAULT_PARAMS: Dict[str, object] = {
-        'leverage': 3,                       # потолок плеча (vol-target ограничен им)
+        'leverage': 10,                      # потолок плеча (vol-target ограничен им)
         'risk_per_trade_percent': 1.0,       # % equity на сделку (vol-target)
         'timeframe': '1d',
         'lookback_days': 60,                 # окно моментума (лучшее по бэктесту)
@@ -76,8 +76,8 @@ class TsMomentumStrategy(BaseStrategy):
         # ROI >= N -> стоп на безубыток с комиссиями
         'trail_breakeven_roi': 10.0,
         # ROI >= N -> стоп тянется за пиком ROI с отступом trail_gap_roi
-        'trail_start_roi': 30.0,
-        'trail_gap_roi': 20.0,
+        'trail_start_roi': 20.0,
+        'trail_gap_roi': 10.0,
         # сигнал живёт N секунд после закрытия дневной свечи. Для 60-дневного
         # моментума вход через несколько часов ничего не меняет, поэтому сутки:
         # иначе рестарт после 01:00 UTC пропускал целый день (было 3600).

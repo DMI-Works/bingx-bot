@@ -19,7 +19,6 @@ from core.strategies.param_catalog import (
     infer_param_kind,
 )
 
-from core.engine.user_session import DISABLED_STRATEGIES_KEY
 from core.state.settings_manager import MAX_OPEN_POSITIONS_LIMIT, MAX_STOP_ROI_LIMIT
 from core.strategies.registry import STRATEGY_REGISTRY
 
@@ -50,25 +49,21 @@ def _is_admin(session) -> bool:
     return session.user.get("role") == "admin"
 
 
-def _serialize_strategy(entry: Dict[str, Any], store, session) -> Dict[str, Any]:
-    """enabled — особистий вибір користувача, global_enabled — чи стратегія
-    взагалі працює (адмін). Параметри спільні й бачить їх лише адмін."""
+def _serialize_strategy(entry: Dict[str, Any], store) -> Dict[str, Any]:
+    """Стратегіями керує лише адмін: enabled і параметри спільні для всіх."""
     name = entry["strategy_name"]
-    admin = _is_admin(session)
     return {
         "name": name,
-        "enabled": name not in session.disabled_strategies(),
-        "global_enabled": entry["enabled"],
-        "can_edit": admin,
-        "modified": store.is_modified(name) if admin else False,
+        "enabled": entry["enabled"],
+        "modified": store.is_modified(name),
         "updated_at": entry["updated_at"],
-        "params": [_serialize_param(k, v) for k, v in entry["params"].items()] if admin else [],
+        "params": [_serialize_param(k, v) for k, v in entry["params"].items()],
     }
 
 
-def _strategy_response(store, name: str, session) -> Dict[str, Any]:
+def _strategy_response(store, name: str) -> Dict[str, Any]:
     entries = {e["strategy_name"]: e for e in store.list_strategies()}
-    return _serialize_strategy(entries[name], store, session)
+    return _serialize_strategy(entries[name], store)
 
 
 def _require_known_strategy(store, name: str) -> Dict[str, Any]:
@@ -98,14 +93,15 @@ def _apply_params_live(request: Request, name: str, params: Dict[str, Any]) -> N
 def get_settings(request: Request, session=Depends(require_session)):
     settings_manager = session.settings_manager
     store = require_strategy_settings(request)
+    admin = _is_admin(session)
     return {
         "trading_enabled": settings_manager.get_trading_enabled(),
         "min_margin_usdt": settings_manager.get_min_margin_usdt(),
         "max_stop_roi_percent": settings_manager.get_max_stop_roi_percent(),
         "max_open_positions": session.risk_manager.effective_max_open_positions(),
         "testnet": session.testnet,
-        "is_admin": _is_admin(session),
-        "strategies": [_serialize_strategy(entry, store, session) for entry in store.list_strategies()],
+        "is_admin": admin,
+        "strategies": [_serialize_strategy(entry, store) for entry in store.list_strategies()] if admin else [],
     }
 
 
@@ -226,25 +222,6 @@ async def set_strategy_enabled(
     name: str,
     request: Request,
     payload: Dict[str, Any] = Body(...),
-    session=Depends(require_session),
-):
-    """Особистий вибір: приймати сигнали цієї стратегії на свій рахунок чи ні."""
-    store = require_strategy_settings(request)
-    _require_known_strategy(store, name)
-    enabled = _require_bool(payload)
-    disabled = session.disabled_strategies()
-    disabled.discard(name) if enabled else disabled.add(name)
-    await session.settings_manager.set(DISABLED_STRATEGIES_KEY, sorted(disabled))
-    logger.info(f"Strategy '{name}' {'on' if enabled else 'off'} for user {session.user_id}")
-    return _strategy_response(store, name, session)
-
-
-@router.post("/strategies/{name}/global-enabled")
-async def set_strategy_global_enabled(
-    name: str,
-    request: Request,
-    payload: Dict[str, Any] = Body(...),
-    session=Depends(require_session),
     admin: dict = Depends(require_admin),
 ):
     """Вмикає/вимикає генерацію сигналів стратегії для всіх (адмін)."""
@@ -257,7 +234,7 @@ async def set_strategy_global_enabled(
     else:
         store.set_enabled(name, enabled)
     logger.info(f"Strategy '{name}' globally {'enabled' if enabled else 'disabled'} (admin={admin['_id']})")
-    return _strategy_response(store, name, session)
+    return _strategy_response(store, name)
 
 
 @router.post("/strategies/{name}/params")
@@ -265,7 +242,6 @@ async def update_strategy_param(
     name: str,
     request: Request,
     payload: Dict[str, Any] = Body(...),
-    session=Depends(require_session),
     admin: dict = Depends(require_admin),
 ):
     store = require_strategy_settings(request)
@@ -286,14 +262,13 @@ async def update_strategy_param(
     _apply_params_live(request, name, current)
 
     logger.info(f"Strategy '{name}' param '{key}' updated via mini app (admin={admin['_id']})")
-    return _strategy_response(store, name, session)
+    return _strategy_response(store, name)
 
 
 @router.post("/strategies/{name}/reset")
 async def reset_strategy_params(
     name: str,
     request: Request,
-    session=Depends(require_session),
     admin: dict = Depends(require_admin),
 ):
     store = require_strategy_settings(request)
@@ -302,4 +277,4 @@ async def reset_strategy_params(
     _apply_params_live(request, name, store.reset_to_default(name))
 
     logger.info(f"Strategy '{name}' reset to defaults via mini app (admin={admin['_id']})")
-    return _strategy_response(store, name, session)
+    return _strategy_response(store, name)

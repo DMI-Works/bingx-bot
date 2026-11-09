@@ -99,12 +99,11 @@ class TestAccess(unittest.TestCase):
         self.assertFalse(can_open_new(None)[0])
 
 
-def _session(user_id, held=(), disabled=(), status="active"):
+def _session(user_id, held=(), status="active"):
     session = mock.MagicMock()
     session.user_id = user_id
     session.user = {"_id": user_id, "status": status}
     session.held_symbols.return_value = set(held)
-    session.disabled_strategies.return_value = set(disabled)
     session.deliver = mock.AsyncMock()
     return session
 
@@ -130,12 +129,6 @@ class TestRouting(unittest.IsolatedAsyncioTestCase):
         a.deliver.assert_awaited_once()
         b.deliver.assert_awaited_once()
 
-    async def test_disabled_strategy_skipped_for_that_user_only(self):
-        a, b = _session("a", disabled=["S"]), _session("b")
-        await self._manager(a, b)._on_signal(self._signal())
-        a.deliver.assert_not_awaited()
-        b.deliver.assert_awaited_once()
-
     async def test_blocked_user_gets_no_new_entries(self):
         a = _session("a", status="blocked")
         await self._manager(a)._on_signal(self._signal())
@@ -144,15 +137,13 @@ class TestRouting(unittest.IsolatedAsyncioTestCase):
     async def test_target_still_delivered_but_no_open_when_not_allowed(self):
         # закриття по розвороту має працювати і без права на нові входи
         a = _session("a", status="blocked")
-        b = _session("b", disabled=["S"])
-        c = _session("c")
+        b = _session("b")
         target = Event(type=EventType.SIGNAL_GENERATED, data={
             "action": "TARGET", "symbol": "BTC-USDT", "side": "LONG", "strategy": "S",
         })
-        await self._manager(a, b, c)._on_signal(target)
+        await self._manager(a, b)._on_signal(target)
         self.assertTrue(a.deliver.call_args.args[0].data["no_open"])
-        self.assertTrue(b.deliver.call_args.args[0].data["no_open"])
-        self.assertNotIn("no_open", c.deliver.call_args.args[0].data)
+        self.assertNotIn("no_open", b.deliver.call_args.args[0].data)
 
     async def test_failure_of_one_user_does_not_stop_others(self):
         a, b = _session("a"), _session("b")
@@ -251,7 +242,7 @@ class TestUserSessionWiring(unittest.IsolatedAsyncioTestCase):
 
             one.trader.open_position = mock.AsyncMock(return_value=True)
             two.trader.open_position = mock.AsyncMock(return_value=True)
-            manager.sessions["2"].settings_manager.cache["strategies.disabled"] = ["S"]
+            manager.sessions["2"].user["status"] = "blocked"
             await manager._on_signal(Event(type=EventType.SIGNAL_GENERATED, data={
                 "action": "OPEN", "symbol": "BTC-USDT", "side": "LONG", "strategy": "S", "quantity": 1,
             }))
@@ -286,6 +277,42 @@ class TestEveryEndpointRequiresAuth(unittest.TestCase):
                 self.assertEqual(response.status_code, 401, f"{method} {path} -> {response.status_code}")
                 checked += 1
         self.assertGreater(checked, 15)
+
+
+class TestStrategiesAdminOnly(unittest.TestCase):
+    def _settings_for(self, role):
+        from webapp.backend.routes import settings as routes
+
+        session = mock.MagicMock()
+        session.user = {"role": role}
+        store = mock.MagicMock()
+        store.is_modified.return_value = False
+        store.list_strategies.return_value = [
+            {"strategy_name": "S", "enabled": False, "updated_at": None, "params": {"leverage": 10}},
+        ]
+        with mock.patch.object(routes, "require_strategy_settings", return_value=store):
+            return routes.get_settings(mock.MagicMock(), session)
+
+    def test_user_gets_no_strategies(self):
+        data = self._settings_for("user")
+        self.assertFalse(data["is_admin"])
+        self.assertEqual(data["strategies"], [])
+
+    def test_admin_gets_one_shared_flag(self):
+        data = self._settings_for("admin")
+        self.assertTrue(data["is_admin"])
+        strategy = data["strategies"][0]
+        self.assertFalse(strategy["enabled"])
+        self.assertNotIn("global_enabled", strategy)
+        self.assertEqual(strategy["params"][0]["key"], "leverage")
+
+    def test_enabled_endpoint_requires_admin(self):
+        from webapp.backend.deps import require_admin
+        from webapp.backend.routes.settings import set_strategy_enabled
+        import inspect
+
+        defaults = [p.default for p in inspect.signature(set_strategy_enabled).parameters.values()]
+        self.assertTrue(any(getattr(d, "dependency", None) is require_admin for d in defaults))
 
 
 class TestAdminId(unittest.TestCase):

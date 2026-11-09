@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Bell, Power, KeyRound } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api";
-import { Spinner, EmptyRow, ToggleRow, LinkRow } from "../common";
+import { EmptyRow, ToggleRow, LinkRow } from "../common";
 import StrategyCard from "./StrategyCard";
 import RiskNumberRow from "./RiskNumberRow";
 
@@ -90,21 +90,20 @@ export default function SettingsTab() {
         </div>
       </div>
 
-      <div className="section">
-        <div className="section-head">
-          <span className="section-title">Стратегии</span>
-          {settings && <span className="section-count">{settings.strategies.length}</span>}
+      {settings?.is_admin && (
+        <div className="section">
+          <div className="section-head">
+            <span className="section-title">Стратегии</span>
+            <span className="section-count">{settings.strategies.length}</span>
+          </div>
+          {!settings.strategies.length && (
+            <div className="list"><EmptyRow text="Стратегии ещё не инициализированы ботом" /></div>
+          )}
+          {settings.strategies.map((s) => (
+            <StrategyCard key={s.name} strategy={s} onUpdate={updateStrategy} />
+          ))}
         </div>
-        {!settings && !error && (
-          <div className="hero-loading"><Spinner /></div>
-        )}
-        {settings && !settings.strategies.length && (
-          <div className="list"><EmptyRow text="Стратегии ещё не инициализированы ботом" /></div>
-        )}
-        {settings?.strategies.map((s) => (
-          <StrategyCard key={s.name} strategy={s} onUpdate={updateStrategy} />
-        ))}
-      </div>
+      )}
 
       <div className="section">
         <div className="section-head">

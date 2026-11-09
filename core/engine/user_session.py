@@ -26,9 +26,6 @@ from ..trading import SimpleTrader
 
 logger = logging.getLogger(__name__)
 
-# Налаштування користувача: стратегії, які він сам вимкнув (список назв)
-DISABLED_STRATEGIES_KEY = 'strategies.disabled'
-
 
 class UserSession:
     def __init__(
@@ -92,10 +89,6 @@ class UserSession:
         await self.event_bus.start()
         if self.db.get_setting('trading.enabled') is None:
             await self.settings_manager.set_trading_enabled(True)
-        if self.db.get_setting(DISABLED_STRATEGIES_KEY) is None:
-            # SettingsManager не кешує відсутні ключі — без цього кожен сигнал
-            # читав би БД синхронно для кожної сесії
-            await self.settings_manager.set(DISABLED_STRATEGIES_KEY, [])
         await self.exchange.start_user_data_stream()
         self.started = True
         logger.info(
@@ -124,9 +117,6 @@ class UserSession:
 
     def held_symbols(self) -> set:
         return {p.get('symbol') for p in self.trader.open_positions.values() if p.get('symbol')}
-
-    def disabled_strategies(self) -> set:
-        return set(self.settings_manager.get(DISABLED_STRATEGIES_KEY, []) or [])
 
     async def deliver(self, event: Event) -> None:
         await self.event_bus.publish(event)

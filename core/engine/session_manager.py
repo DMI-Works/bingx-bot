@@ -150,17 +150,14 @@ class SessionManager:
         # session.user, а не запит у БД: сигнал іде всім сесіям одразу, 100
         # синхронних запитів затримали б входи (оновлює refresh_user)
         allowed, reason = can_open_new(session.user)
-        disabled = strategy in session.disabled_strategies()
 
         if signal.get('action') == 'TARGET':
             data = dict(signal)
-            if not allowed or disabled:
+            if not allowed:
                 data['no_open'] = True
             await session.deliver(Event(type=EventType.SIGNAL_GENERATED, data=data, source=source))
             return
 
-        if disabled:
-            return
         if not allowed:
             logger.info(f"[SESSIONS] {session.user_id}: сигнал {strategy} пропущено — {reason}")
             return

@@ -20,7 +20,7 @@ MAX_OPEN_POSITIONS_KEY = 'trading.max_open_positions'
 DEFAULT_MIN_MARGIN_USDT = 10.0
 # Максимальний збиток на стопі, % ROI від маржі. Ліквідація — близько 100%
 # мінус maintenance margin, тож стоп має стояти помітно раніше.
-DEFAULT_MAX_STOP_ROI_PERCENT = 70.0
+DEFAULT_MAX_STOP_ROI_PERCENT = 30.0
 MAX_STOP_ROI_LIMIT = 90.0
 # Верхня межа ліміту одночасних позицій із мініаппу (захист від опечатки)
 MAX_OPEN_POSITIONS_LIMIT = 50

@@ -106,7 +106,7 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sig['side'], 'LONG')
         self.assertIsNone(sig.get('take_profit_levels'))
         self.assertLess(sig['stop_loss_price'], sig['reference_price'])  # SL нижче для LONG
-        self.assertEqual(sig['leverage'], 3)
+        self.assertEqual(sig['leverage'], 10)
         self.assertEqual(sig['risk_percent'], 1.0)
         self.assertIsNone(sig['quantity'])
 
@@ -227,7 +227,7 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
         closes = [100 + i for i in range(40)]
         s = _strategy(closes)
         sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
-        self.assertEqual(sig['trail_meta'], self.META)
+        self.assertEqual(sig['trail_meta'], {**self.META, 'start_roi': 20.0, 'gap_roi': 10.0})
 
     async def test_manager_moves_stop_to_peak_minus_gap(self):
         from core.risk.trailing_stop_manager import TrailingStopManager
