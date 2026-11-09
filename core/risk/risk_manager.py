@@ -287,6 +287,12 @@ class RiskManager:
     def _count_by_symbol(positions: list[dict]) -> dict[str, int]:
         return dict(Counter(p.get('symbol') for p in positions if p.get('symbol')))
 
+    def effective_max_open_positions(self) -> int:
+        """Значення з мініаппу важливіше за max_open_positions із config.yaml."""
+        getter = getattr(self.settings_manager, 'get_max_open_positions', None)
+        override = getter() if callable(getter) else None
+        return override if isinstance(override, int) else self.max_open_positions
+
     def _is_blacklisted(self, symbol: str) -> bool:
         if self.settings_manager is None:
             return False
@@ -323,8 +329,9 @@ class RiskManager:
             f"by symbol: {open_positions_by_symbol}"
         )
 
-        if current_open_positions >= self.max_open_positions:
-            reason = f"Max open positions reached: {self.max_open_positions}"
+        max_open_positions = self.effective_max_open_positions()
+        if current_open_positions >= max_open_positions:
+            reason = f"Max open positions reached: {max_open_positions}"
             logger.warning(reason)
             return False, reason
 
@@ -453,7 +460,7 @@ class RiskManager:
 
         return {
             'current_open_positions': current_open_positions,
-            'max_open_positions': self.max_open_positions,
+            'max_open_positions': self.effective_max_open_positions(),
             'open_positions_by_symbol': open_positions_by_symbol,
             'max_consecutive_losses': self.max_consecutive_losses,
             # По каждому символу: сколько подряд убытков сейчас. Достигшие
