@@ -68,6 +68,60 @@ class TestSettingsRoundTrip(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(SettingsManager(db, EventBus()).get_blacklist_symbols(), [])
 
 
+class TestSymbolPauseAfterLosses(unittest.IsolatedAsyncioTestCase):
+    def _risk_manager(self, settings):
+        from unittest import mock
+        from core.risk import RiskManager
+        bus = EventBus()
+        bus.publish = mock.AsyncMock()
+        rm = RiskManager(db=None, event_bus=bus, exchange=mock.MagicMock(),
+                         config={'max_consecutive_losses': 2, 'symbol_pause_hours': 24},
+                         settings_manager=settings)
+        rm._get_real_open_positions = mock.AsyncMock(return_value=[])
+        return rm
+
+    def setUp(self):
+        self.settings = SettingsManager(FakeSettingsDb(), EventBus())
+
+    async def _streak(self, rm):
+        await rm.position_closed(-1.0, 'BTC-USDT')
+        await rm.position_closed(-1.0, 'BTC-USDT')
+
+    async def test_streak_pauses_coin_without_blacklisting(self):
+        from core.events import EventType
+        rm = self._risk_manager(self.settings)
+        await self._streak(rm)
+        allowed, reason = await rm.can_open_position('BTC-USDT')
+        self.assertFalse(allowed)
+        self.assertIn('paused', reason)
+        self.assertEqual(self.settings.get_blacklist_symbols(), [])
+        self.assertTrue((await rm.can_open_position('ETH-USDT'))[0])
+        event = rm.event_bus.publish.await_args.args[0]
+        self.assertEqual(event.type, EventType.SYMBOL_PAUSED)
+        self.assertEqual(event.data['pause_hours'], 24)
+
+    async def test_entries_resume_after_pause(self):
+        from unittest import mock
+        import time
+        rm = self._risk_manager(self.settings)
+        await self._streak(rm)
+        with mock.patch('core.risk.risk_manager.time.time', return_value=time.time() + 24 * 3600 + 1):
+            self.assertTrue((await rm.can_open_position('BTC-USDT'))[0])
+        self.assertEqual(rm.consecutive_losses, {})
+
+    async def test_pause_survives_restart(self):
+        rm = self._risk_manager(self.settings)
+        await self._streak(rm)
+        restarted = self._risk_manager(self.settings)
+        self.assertFalse((await restarted.can_open_position('BTC-USDT'))[0])
+
+    async def test_loss_during_pause_not_counted(self):
+        rm = self._risk_manager(self.settings)
+        await self._streak(rm)
+        await rm.position_closed(-1.0, 'BTC-USDT')
+        self.assertEqual(rm.consecutive_losses, {})
+
+
 class TestMaxOpenPositionsOverride(unittest.IsolatedAsyncioTestCase):
     async def _risk_manager(self, open_count):
         from unittest import mock

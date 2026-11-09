@@ -315,6 +315,18 @@ class TestStrategiesAdminOnly(unittest.TestCase):
         self.assertTrue(any(getattr(d, "dependency", None) is require_admin for d in defaults))
 
 
+class TestCoinsReadOnlyForUsers(unittest.TestCase):
+    def test_every_coin_change_requires_admin(self):
+        from webapp.backend.deps import require_admin
+        from webapp.backend.routes.symbols import router
+
+        changing = [r for r in router.routes if r.methods & {"POST", "PUT", "PATCH", "DELETE"}]
+        self.assertEqual(len(changing), 4)
+        for route in changing:
+            calls = [d.call for d in route.dependant.dependencies]
+            self.assertIn(require_admin, calls, route.path)
+
+
 class TestAdminId(unittest.TestCase):
     def test_admin_only_from_admin_telegram_id(self):
         from core.users.repository import admin_telegram_id

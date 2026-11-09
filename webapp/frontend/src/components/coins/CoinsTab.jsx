@@ -16,7 +16,7 @@ export default function CoinsTab() {
   // только уже подписанные. Именно отсюда можно принудительно добавить
   // монету в торговлю (whitelist), даже если бот её сам ещё не выбрал.
   const [candidates, setCandidates] = useState(null);
-  // Общий пул монет меняет только администратор
+  // Менять монеты может только администратор, остальные только смотрят
   const [canEditPool, setCanEditPool] = useState(false);
   const [candidatesError, setCandidatesError] = useState(null);
   const [busyCandidate, setBusyCandidate] = useState(null);
@@ -24,7 +24,7 @@ export default function CoinsTab() {
 
   const load = () => {
     apiGet("/symbols")
-      .then((data) => setSymbols(data.symbols))
+      .then((data) => { setSymbols(data.symbols); setCanEditPool(!!data.can_edit_pool); })
       .catch((e) => setError(e.message));
   };
 
@@ -246,42 +246,48 @@ export default function CoinsTab() {
                     Сделка: {s.last_traded_at ? fmtDate(s.last_traded_at) : "—"}
                   </div>
                 </div>
-                <button
-                  className="icon-btn icon-btn-danger"
-                  disabled={busySymbol === s.symbol}
-                  onClick={() => blacklistSymbol(s.symbol)}
-                  title="Добавить в чёрный список"
-                >
-                  <Ban size={15} />
-                </button>
+                {canEditPool && (
+                  <button
+                    className="icon-btn icon-btn-danger"
+                    disabled={busySymbol === s.symbol}
+                    onClick={() => blacklistSymbol(s.symbol)}
+                    title="Добавить в чёрный список"
+                  >
+                    <Ban size={15} />
+                  </button>
+                )}
               </div>
             ))}
           </div>
         )}
       </div>
 
-      <div className="section">
+      {(canEditPool || blacklistedSymbols.length > 0) && <div className="section">
         <div className="section-head">
-          <span className="section-title">Добавить в чёрный список</span>
+          <span className="section-title">{canEditPool ? "Добавить в чёрный список" : "Чёрный список"}</span>
         </div>
-        <form className="list" onSubmit={addManually}>
-          <div className="row row-compact">
-            <input
-              className="param-input"
-              placeholder="Например BTC-USDT"
-              value={newSymbol}
-              onChange={(e) => setNewSymbol(e.target.value)}
-              disabled={addBusy}
-            />
-            <button className="param-save-btn" type="submit" disabled={addBusy || !newSymbol.trim()}>
-              <Plus size={14} />
-            </button>
-          </div>
-        </form>
-        <div className="row-sub row-sub-faint" style={{ padding: "0 14px" }}>
-          Монета не будет выбираться ботом при ротации, даже если сейчас на неё не подписаны.
-          Уже открытые позиции при этом продолжают сопровождаться как обычно.
-        </div>
+        {canEditPool && (
+          <>
+            <form className="list" onSubmit={addManually}>
+              <div className="row row-compact">
+                <input
+                  className="param-input"
+                  placeholder="Например BTC-USDT"
+                  value={newSymbol}
+                  onChange={(e) => setNewSymbol(e.target.value)}
+                  disabled={addBusy}
+                />
+                <button className="param-save-btn" type="submit" disabled={addBusy || !newSymbol.trim()}>
+                  <Plus size={14} />
+                </button>
+              </div>
+            </form>
+            <div className="row-sub row-sub-faint" style={{ padding: "0 14px" }}>
+              Монета не будет выбираться ботом при ротации, даже если сейчас на неё не подписаны.
+              Уже открытые позиции при этом продолжают сопровождаться как обычно.
+            </div>
+          </>
+        )}
 
         {blacklistedSymbols.length > 0 && (
           <div className="list" style={{ marginTop: 10 }}>
@@ -301,19 +307,21 @@ export default function CoinsTab() {
                     Сделка: {s.last_traded_at ? fmtDate(s.last_traded_at) : "—"}
                   </div>
                 </div>
-                <button
-                  className="icon-btn"
-                  disabled={busySymbol === s.symbol}
-                  onClick={() => unblacklistSymbol(s.symbol)}
-                  title="Убрать из чёрного списка"
-                >
-                  <RotateCcw size={15} />
-                </button>
+                {canEditPool && (
+                  <button
+                    className="icon-btn"
+                    disabled={busySymbol === s.symbol}
+                    onClick={() => unblacklistSymbol(s.symbol)}
+                    title="Убрать из чёрного списка"
+                  >
+                    <RotateCcw size={15} />
+                  </button>
+                )}
               </div>
             ))}
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 }

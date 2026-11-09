@@ -101,14 +101,14 @@ def stop_loss_moved_short(data: dict) -> str:
     return f"{stage_label}\n\n{side_emoji(side)} <b>{data.get('symbol', 'N/A')}</b> {side}"
 
 
-def symbol_blacklisted(data: dict) -> str:
+def symbol_paused(data: dict) -> str:
     symbol = data.get('symbol', 'N/A')
     return (
-        f"🚫 <b>{symbol} прибрано з торгівлі</b>\n\n"
+        f"⏸ <b>{symbol} на паузі</b>\n\n"
         f"{data.get('consecutive_losses')} збиткових угод поспіль по {symbol} "
         f"(ліміт: {data.get('max_consecutive_losses')}).\n"
-        "Монету додано до чорного списку й відписано від потоку даних — нові позиції по ній "
-        "не відкриваються, доки ти не повернеш її вручну (міні-апп → Монети → чорний список).\n"
+        f"Нові позиції по цій монеті не відкриватимуться {data.get('pause_hours')} год, "
+        "потім торгівля відновиться автоматично.\n"
         "По інших символах бот торгує як звичайно."
     )
 

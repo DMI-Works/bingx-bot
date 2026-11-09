@@ -18,7 +18,6 @@ from ..deps import (
     require_session,
     require_sessions,
     require_symbol_selector,
-    require_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +37,11 @@ async def _fetch_held_symbols(exchange, context: str) -> set:
 
 def _settings_list(settings_manager, getter: str) -> set:
     return set(getattr(settings_manager, getter)()) if settings_manager else set()
+
+
+def _can_edit_pool(session) -> bool:
+    """Звичайний користувач бачить монети, але змінювати їх може лише адмін."""
+    return session.user.get("role") == "admin"
 
 
 def _subscribed(exchange) -> set:
@@ -74,7 +78,7 @@ async def get_symbols(request: Request, session=Depends(require_session)):
             "last_traded_at": last_traded_by_symbol.get(symbol),
         })
 
-    return {"symbols": result}
+    return {"symbols": result, "can_edit_pool": _can_edit_pool(session)}
 
 
 @router.get("/candidates")
@@ -123,7 +127,7 @@ async def get_symbol_candidates(
         })
 
     candidates.sort(key=lambda c: c["volume_24h"], reverse=True)
-    return {"candidates": candidates[:limit], "can_edit_pool": session.user.get("role") == "admin"}
+    return {"candidates": candidates[:limit], "can_edit_pool": _can_edit_pool(session)}
 
 
 def _symbol_from_payload(payload: Dict[str, Any]) -> str:
@@ -157,17 +161,15 @@ async def _change_whitelist(request: Request, user: dict, symbol: str, add: bool
 
 
 async def _change_blacklist(request: Request, user: dict, symbol: str, add: bool) -> Dict[str, list]:
-    """Чорний список особистий: монета зникає лише з торгівлі цього користувача.
-    Чорний список адміна — ще й спільний: монета прибирається з пулу для всіх."""
+    """Чорний список адміна: монета прибирається зі спільного пулу для всіх."""
     session = require_sessions(request).get(user["_id"])
     if session is None:
         raise HTTPException(status_code=409, detail={"code": "no_session", "message": "Подключите API-ключи BingX"})
     action = "add" if add else "remove"
     await getattr(session.settings_manager, f"{action}_blacklist_symbol")(symbol)
-    if user.get("role") == "admin":
-        await getattr(require_global_settings(request), f"{action}_blacklist_symbol")(symbol)
-        await _reapply_after(request, f"blacklist {action}")
-    logger.info(f"Symbol '{symbol}' blacklist {action} via mini app (user={user['_id']})")
+    await getattr(require_global_settings(request), f"{action}_blacklist_symbol")(symbol)
+    await _reapply_after(request, f"blacklist {action}")
+    logger.info(f"Symbol '{symbol}' blacklist {action} via mini app (admin={user['_id']})")
     return {"blacklist": session.settings_manager.get_blacklist_symbols()}
 
 
@@ -190,11 +192,11 @@ async def remove_symbol_from_whitelist(symbol: str, request: Request, user: dict
 async def add_symbol_to_blacklist(
     request: Request,
     payload: Dict[str, Any] = Body(...),
-    user: dict = Depends(require_user),
+    user: dict = Depends(require_admin),
 ):
     return await _change_blacklist(request, user, _symbol_from_payload(payload), add=True)
 
 
 @router.delete("/blacklist/{symbol}")
-async def remove_symbol_from_blacklist(symbol: str, request: Request, user: dict = Depends(require_user)):
+async def remove_symbol_from_blacklist(symbol: str, request: Request, user: dict = Depends(require_admin)):
     return await _change_blacklist(request, user, symbol.strip().upper(), add=False)

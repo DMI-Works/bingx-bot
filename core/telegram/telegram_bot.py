@@ -51,7 +51,7 @@ class TelegramBot:
             EventType.TAKE_PROFIT_TRIGGERED: self._on_take_profit_triggered,
             EventType.ERROR: self._on_error,
             EventType.CRITICAL_ERROR: self._on_critical_error,
-            EventType.SYMBOL_BLACKLISTED: self._on_symbol_blacklisted,
+            EventType.SYMBOL_PAUSED: self._on_symbol_paused,
         }
         for event_type, handler in handlers.items():
             self.event_bus.subscribe(event_type, handler)
@@ -124,8 +124,8 @@ class TelegramBot:
             text = messages.stop_loss_moved_short(event.data)
         await self.send_message(text)
 
-    async def _on_symbol_blacklisted(self, event: Event) -> None:
-        await self.send_message(messages.symbol_blacklisted(event.data))
+    async def _on_symbol_paused(self, event: Event) -> None:
+        await self.send_message(messages.symbol_paused(event.data))
 
     async def _on_error(self, event: Event) -> None:
         await self.send_message(messages.error(event.data, "⚠️ <b>Помилка</b>", "Невідома помилка"))

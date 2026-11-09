@@ -16,9 +16,8 @@ class RiskManager:
         self.db = db
         self.event_bus = event_bus
         self.exchange = exchange  # BingXClient — нужен для получения реальных позиций
-        # SettingsManager — через него монета, набравшая max_consecutive_losses
-        # убытков подряд, добавляется в чёрный список (хранится в БД, тот же
-        # список, что и в мини-аппе → вкладка «Монеты»)
+        # SettingsManager — хранит в БД счётчики убытков и паузы монет, а также
+        # чёрный список (мини-апп → вкладка «Монеты»)
         self.settings_manager = settings_manager
         self.config = config
 
@@ -26,6 +25,7 @@ class RiskManager:
         self.max_positions_per_symbol = config.get('max_positions_per_symbol', 1)
         self.max_total_risk_percent = config.get('max_total_risk_percent', 5.0)
         self.max_consecutive_losses = config.get('max_consecutive_losses', 3)
+        self.symbol_pause_hours = config.get('symbol_pause_hours', 24)
 
         # --- risk-based position sizing (заменяет fixed position_size из стратегии) ---
         # По умолчанию ВЫКЛЮЧЕНО (use_risk_based_sizing=False) — включать
@@ -38,11 +38,13 @@ class RiskManager:
         # Счётчики серий убытков по монетам. Сохраняются в БД (settings-ключ
         # CONSECUTIVE_LOSSES_KEY), поэтому переживают рестарт бота.
         self.consecutive_losses: dict[str, int] = self._load_consecutive_losses()
+        # Монеты на паузе после серии убытков: символ -> unix-время окончания
+        self.symbol_paused_until: dict[str, float] = self._load_symbol_pauses()
 
         # --- предохранитель "серия стоп-лоссов": N стопов В МИНУС подряд за
         # window часов -> блок НОВЫХ входов на block часов. Глобальный (по
         # аккаунту, не по монете): в отличие от max_consecutive_losses выше,
-        # который выкидывает из торговли одну монету. 0 = выключено.
+        # который ставит на паузу одну монету. 0 = выключено.
         # Стеля маржі на одну угоду (% від equity) і комісія taker однієї
         # сторони — див. compute_risk_based_quantity. 0 = стелю вимкнено.
         self.max_margin_percent_per_trade = config.get('max_margin_percent_per_trade', 5.0)
@@ -71,6 +73,7 @@ class RiskManager:
 
     CONSECUTIVE_LOSSES_KEY = 'risk.consecutive_losses'
     STOP_LOSS_STREAK_KEY = 'risk.stop_loss_streak'
+    SYMBOL_PAUSES_KEY = 'risk.symbol_pauses'
 
     def _load_stop_loss_state(self) -> None:
         if self.settings_manager is None:
@@ -162,6 +165,32 @@ class RiskManager:
         if loaded:
             logger.info(f"Restored consecutive losses from DB: {loaded}")
         return loaded
+
+    def _load_symbol_pauses(self) -> dict[str, float]:
+        if self.settings_manager is None:
+            return {}
+        try:
+            raw = self.settings_manager.get(self.SYMBOL_PAUSES_KEY, {})
+            now = time.time()
+            loaded = {str(sym): float(until) for sym, until in dict(raw).items() if float(until) > now}
+        except Exception as e:
+            logger.error(f"Failed to load symbol pauses from DB, starting without pauses: {e}", exc_info=True)
+            return {}
+        if loaded:
+            logger.info(f"Restored symbol pauses from DB: {sorted(loaded)}")
+        return loaded
+
+    async def _save_symbol_pauses(self) -> None:
+        if self.settings_manager is None:
+            return
+        try:
+            await self.settings_manager.set(self.SYMBOL_PAUSES_KEY, dict(self.symbol_paused_until))
+        except Exception as e:
+            logger.error(f"Failed to persist symbol pauses: {e}", exc_info=True)
+
+    def get_symbol_pause_remaining(self, symbol: str) -> float:
+        """Сколько секунд ещё действует пауза монеты (0 — паузы нет)."""
+        return max(0.0, self.symbol_paused_until.get(symbol, 0.0) - time.time())
 
     async def _save_consecutive_losses(self) -> None:
         if self.settings_manager is None:
@@ -305,6 +334,12 @@ class RiskManager:
             logger.warning(reason)
             return False, reason
 
+        pause_remaining = self.get_symbol_pause_remaining(symbol)
+        if pause_remaining > 0:
+            reason = f"{symbol} paused after consecutive losses: {pause_remaining / 3600:.1f}h left"
+            logger.warning(reason)
+            return False, reason
+
         block_remaining = self.get_entry_block_remaining()
         if block_remaining > 0:
             reason = (
@@ -348,16 +383,15 @@ class RiskManager:
         комиссии, но в минусе после неё, считается убытком.
 
         Как только по монете набралось max_consecutive_losses убытков подряд —
-        монета УБИРАЕТСЯ из торговли (чёрный список + отписка от WS), а не
-        ставится на паузу по таймеру. Вернуть её можно только вручную
-        (мини-апп → Монеты → чёрный список)."""
+        новые входы по ней блокируются на symbol_pause_hours часов, затем
+        торговля возобновляется автоматически, а серия считается заново."""
         if symbol is None:
             logger.warning("position_closed() called without symbol — skipping per-symbol loss tracking")
             return
 
         if pnl < 0:
-            if self._is_blacklisted(symbol):
-                logger.info(f"Loss on already blacklisted {symbol} — not counting")
+            if self._is_blacklisted(symbol) or self.get_symbol_pause_remaining(symbol) > 0:
+                logger.info(f"Loss on already blacklisted or paused {symbol} — not counting")
                 return
 
             self.consecutive_losses[symbol] = self.consecutive_losses.get(symbol, 0) + 1
@@ -365,7 +399,7 @@ class RiskManager:
             logger.info(f"Loss recorded for {symbol} (net pnl {pnl:.6f}). Consecutive losses: {losses}")
 
             if self.max_consecutive_losses > 0 and losses >= self.max_consecutive_losses:
-                await self._remove_symbol_from_trading(symbol, losses)
+                await self._pause_symbol(symbol, losses)
                 return  # счётчик уже сохранён внутри
 
             await self._save_consecutive_losses()
@@ -374,38 +408,28 @@ class RiskManager:
                 logger.info(f"Win recorded for {symbol} (net pnl {pnl:.6f}). Consecutive losses reset to 0")
                 await self._save_consecutive_losses()
 
-    async def _remove_symbol_from_trading(self, symbol: str, losses: int) -> None:
-        if self.settings_manager is None:
-            logger.error(
-                f"Consecutive losses limit reached for {symbol} ({losses}/{self.max_consecutive_losses}), "
-                f"but RiskManager has no settings_manager — cannot blacklist the symbol"
-            )
-            return
+    async def _pause_symbol(self, symbol: str, losses: int) -> None:
+        now = time.time()
+        self.symbol_paused_until = {s: until for s, until in self.symbol_paused_until.items() if until > now}
+        self.symbol_paused_until[symbol] = now + self.symbol_pause_hours * 3600
+        await self._save_symbol_pauses()
 
-        try:
-            await self.settings_manager.add_blacklist_symbol(symbol)
-        except Exception as e:
-            # счётчик НЕ сбрасываем — при следующем убытке попробуем снова
-            logger.error(f"Failed to blacklist {symbol} after {losses} consecutive losses: {e}", exc_info=True)
-            return
-
-        # Счётчик обнуляем: если монету потом вернут вручную, серия начнётся
-        # с нуля, а не забанит её снова после первого же убытка.
+        # Счётчик обнуляем: после паузы серия начинается с нуля
         self.consecutive_losses.pop(symbol, None)
         await self._save_consecutive_losses()
 
         logger.warning(
             f"Consecutive losses limit reached for {symbol} ({losses}/{self.max_consecutive_losses}) "
-            f"— {symbol} REMOVED from trading (blacklisted)"
+            f"— {symbol} paused for {self.symbol_pause_hours}h"
         )
-        # Слушают: SymbolSelector (отписаться от WS) и TelegramBot (уведомление)
         await self.event_bus.publish(Event(
-            type=EventType.SYMBOL_BLACKLISTED,
+            type=EventType.SYMBOL_PAUSED,
             data={
                 'symbol': symbol,
                 'reason': 'consecutive_losses',
                 'consecutive_losses': losses,
                 'max_consecutive_losses': self.max_consecutive_losses,
+                'pause_hours': self.symbol_pause_hours,
             },
             source='RiskManager',
         ))
@@ -422,7 +446,7 @@ class RiskManager:
 
     async def reset_consecutive_losses(self, symbol: Optional[str] = None) -> None:
         """Без symbol — сброс счётчиков по всем монетам; с symbol — только по
-        конкретной. Из чёрного списка монету это НЕ убирает (см. мини-апп)."""
+        конкретной. Паузу и чёрный список монеты это НЕ снимает."""
         if symbol is None:
             self.consecutive_losses.clear()
             logger.info("Consecutive losses manually reset for all symbols")
@@ -436,6 +460,7 @@ class RiskManager:
         self.max_positions_per_symbol = config.get('max_positions_per_symbol', self.max_positions_per_symbol)
         self.max_total_risk_percent = config.get('max_total_risk_percent', self.max_total_risk_percent)
         self.max_consecutive_losses = config.get('max_consecutive_losses', self.max_consecutive_losses)
+        self.symbol_pause_hours = config.get('symbol_pause_hours', self.symbol_pause_hours)
         self.use_risk_based_sizing = config.get('use_risk_based_sizing', self.use_risk_based_sizing)
         self.risk_per_trade_percent = config.get('risk_per_trade_percent', self.risk_per_trade_percent)
         self.max_margin_percent_per_trade = config.get(
@@ -463,9 +488,9 @@ class RiskManager:
             'max_open_positions': self.effective_max_open_positions(),
             'open_positions_by_symbol': open_positions_by_symbol,
             'max_consecutive_losses': self.max_consecutive_losses,
-            # По каждому символу: сколько подряд убытков сейчас. Достигшие
-            # лимита монеты не «на паузе», а убраны в чёрный список.
+            # По каждому символу: сколько подряд убытков сейчас
             'consecutive_losses_by_symbol': dict(self.consecutive_losses),
+            'paused_symbols': [s for s in self.symbol_paused_until if self.get_symbol_pause_remaining(s) > 0],
             'blacklisted_symbols': list(self.settings_manager.get_blacklist_symbols()) if self.settings_manager else [],
             'stop_loss_streak': len(self._sl_streak),
             'entry_block_remaining_seconds': self.get_entry_block_remaining(),

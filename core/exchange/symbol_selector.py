@@ -98,11 +98,6 @@ class SymbolSelector:
         # останні перевірки тикерів (із select()) — для market_context угод
         self._last_checks: Dict[str, TickerCheck] = {}
 
-        if self.event_bus is not None:
-            # Монету убрал RiskManager (серия убытков) — сразу отписываемся,
-            # не дожидаясь следующей ротации по таймеру.
-            self.event_bus.subscribe(EventType.SYMBOL_BLACKLISTED, self._on_symbol_blacklisted)
-
     async def select(self) -> List[str]:
         """
         Формує список символів для торгівлі:
@@ -305,14 +300,6 @@ class SymbolSelector:
     async def apply(self) -> Set[str]:
         async with self._apply_lock:
             return await self._apply_unlocked()
-
-    async def _on_symbol_blacklisted(self, event: Event) -> None:
-        symbol = event.data.get('symbol')
-        logger.info(f"[SYMBOLS] {symbol} blacklisted ({event.data.get('reason')}) — re-applying symbol selection")
-        try:
-            await self.apply()
-        except Exception as e:
-            logger.error(f"[SYMBOLS] Failed to re-apply selection after blacklisting {symbol}: {e}", exc_info=True)
 
     async def _apply_unlocked(self) -> Set[str]:
         """Обчислює актуальний список символів, підписує нові, відписує зайві.
