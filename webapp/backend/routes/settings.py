@@ -1,7 +1,7 @@
 """
 /api/settings — глобальний тумблер торгівлі + стратегії з їхніми параметрами.
 Тонка HTTP-обгортка над:
-  - core/state/settings_manager.py      -> trading.enabled (kill-switch)
+  - core/state/settings_manager.py      -> особисті налаштування користувача
   - core/database/strategy_settings.py  -> StrategySettingsStore (БД)
   - core/strategies/strategies_setup.py -> StrategyManager (live-інстанси)
 Мутуючі ендпоінти вимагають Telegram-авторизації: вони керують реальною торгівлею.
@@ -19,17 +19,17 @@ from core.strategies.param_catalog import (
     infer_param_kind,
 )
 
-from core.database.mongo_config import read_mode_override, save_mode_override
-from core.strategies.registry import STRATEGY_REGISTRY
+from core.engine.user_session import DISABLED_STRATEGIES_KEY
 from core.state.settings_manager import MAX_STOP_ROI_LIMIT
+from core.strategies.registry import STRATEGY_REGISTRY
 
 from ..deps import (
-    require_db,
-    require_restart_event,
-    require_settings_manager,
+    require_admin,
+    require_session,
+    require_sessions,
     require_strategy_settings,
-    require_telegram_user,
-    require_trader,
+    require_user,
+    require_users,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,20 +46,29 @@ def _serialize_param(key: str, value: Any) -> Dict[str, Any]:
     return item
 
 
-def _serialize_strategy(entry: Dict[str, Any], store) -> Dict[str, Any]:
+def _is_admin(session) -> bool:
+    return session.user.get("role") == "admin"
+
+
+def _serialize_strategy(entry: Dict[str, Any], store, session) -> Dict[str, Any]:
+    """enabled — особистий вибір користувача, global_enabled — чи стратегія
+    взагалі працює (адмін). Параметри спільні й бачить їх лише адмін."""
     name = entry["strategy_name"]
+    admin = _is_admin(session)
     return {
         "name": name,
-        "enabled": entry["enabled"],
-        "modified": store.is_modified(name),
+        "enabled": name not in session.disabled_strategies(),
+        "global_enabled": entry["enabled"],
+        "can_edit": admin,
+        "modified": store.is_modified(name) if admin else False,
         "updated_at": entry["updated_at"],
-        "params": [_serialize_param(k, v) for k, v in entry["params"].items()],
+        "params": [_serialize_param(k, v) for k, v in entry["params"].items()] if admin else [],
     }
 
 
-def _strategy_response(store, name: str) -> Dict[str, Any]:
+def _strategy_response(store, name: str, session) -> Dict[str, Any]:
     entries = {e["strategy_name"]: e for e in store.list_strategies()}
-    return _serialize_strategy(entries[name], store)
+    return _serialize_strategy(entries[name], store, session)
 
 
 def _require_known_strategy(store, name: str) -> Dict[str, Any]:
@@ -86,23 +95,16 @@ def _apply_params_live(request: Request, name: str, params: Dict[str, Any]) -> N
 
 
 @router.get("")
-def get_settings(request: Request):
-    settings_manager = require_settings_manager(request)
+def get_settings(request: Request, session=Depends(require_session)):
+    settings_manager = session.settings_manager
     store = require_strategy_settings(request)
-    # Режим: testnet — поточний активний (з яким піднятий бот); mode_override —
-    # що записано в Mongo (None => працюємо на дефолті з config.yaml).
-    db = require_db(request)
-    try:
-        mode_override = read_mode_override(db.client)
-    except Exception:
-        mode_override = None
     return {
         "trading_enabled": settings_manager.get_trading_enabled(),
         "min_margin_usdt": settings_manager.get_min_margin_usdt(),
         "max_stop_roi_percent": settings_manager.get_max_stop_roi_percent(),
-        "testnet": bool(getattr(request.app.state, "testnet", True)),
-        "mode_override": mode_override,
-        "strategies": [_serialize_strategy(entry, store) for entry in store.list_strategies()],
+        "testnet": session.testnet,
+        "is_admin": _is_admin(session),
+        "strategies": [_serialize_strategy(entry, store, session) for entry in store.list_strategies()],
     }
 
 
@@ -110,68 +112,64 @@ def get_settings(request: Request):
 async def set_mode(
     request: Request,
     payload: Dict[str, Any] = Body(...),
-    user: dict = Depends(require_telegram_user),
+    user: dict = Depends(require_user),
 ):
-    """Перемикання testnet <-> live з Mini App. Пише режим у mode-незалежну
-    базу (control.mode) і сигналить супервізору main.py на штатний перезапуск
-    у тому ж процесі (без редеплою). Guard: не перемикати з відкритими
-    позиціями, якщо немає явного force=true (позиції лишилися б у старій базі
-    без супроводу SL/TP до повернення в той режим)."""
+    """Перемикання testnet <-> live СВОГО рахунку: перезапускає лише сесію цього
+    користувача. Guard: з відкритими позиціями — лише з force=true (вони лишились
+    би без супроводу SL/TP до повернення в цей режим)."""
     testnet = payload.get("testnet")
     if not isinstance(testnet, bool):
         raise HTTPException(status_code=422, detail="'testnet' must be a boolean")
     force = bool(payload.get("force", False))
 
-    current = bool(getattr(request.app.state, "testnet", True))
+    users = require_users(request)
+    sessions = require_sessions(request)
+    user_id = user["_id"]
+    current = bool(user.get("testnet", True))
     if testnet == current:
         return {"testnet": current, "restarting": False, "detail": "already in this mode"}
+    if not users.has_keys(user, testnet):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "no_keys", "message": f"Нет API-ключей для режима {'Testnet' if testnet else 'Live'}"},
+        )
 
-    trader = require_trader(request)
-    open_count = len(getattr(trader, "open_positions", {}) or {})
+    session = sessions.get(user_id)
+    open_count = len(session.trader.open_positions) if session is not None else 0
     if open_count > 0 and not force:
         raise HTTPException(
             status_code=409,
             detail={
-                "message": "Є відкриті позиції — зміна режиму заблокована",
+                "code": "open_positions",
+                "message": "Есть открытые позиции — смена режима заблокирована",
                 "open_positions": open_count,
             },
         )
 
-    restart_event = require_restart_event(request)
-    db = require_db(request)
-    save_mode_override(db.client, testnet)
-    restart_event.set()
+    users.set_testnet(user_id, testnet)
+    if await sessions.start_user(user_id) is None:
+        users.set_testnet(user_id, current)
+        await sessions.start_user(user_id)
+        raise HTTPException(status_code=502, detail="Не удалось запустить торговлю в этом режиме")
 
-    logger.info(
-        f"Mode switch requested via mini app: {'testnet' if testnet else 'live'} "
-        f"(force={force}, open_positions={open_count}, user={user})"
-    )
+    logger.info(f"Mode switched to {'testnet' if testnet else 'live'} (force={force}, user={user_id})")
     return {"testnet": testnet, "restarting": True}
 
 
 @router.post("/trading")
-async def set_trading_enabled(
-    request: Request,
-    payload: Dict[str, Any] = Body(...),
-    user: dict = Depends(require_telegram_user),
-):
-    settings_manager = require_settings_manager(request)
+async def set_trading_enabled(payload: Dict[str, Any] = Body(...), session=Depends(require_session)):
     enabled = _require_bool(payload)
-    await settings_manager.set_trading_enabled(enabled)
-    logger.info(f"Trading globally {'enabled' if enabled else 'disabled'} via mini app (user={user})")
+    await session.settings_manager.set_trading_enabled(enabled)
+    logger.info(f"Trading {'enabled' if enabled else 'disabled'} via mini app (user={session.user_id})")
     return {"trading_enabled": enabled}
 
 
 @router.post("/risk")
-async def set_risk_settings(
-    request: Request,
-    payload: Dict[str, Any] = Body(...),
-    user: dict = Depends(require_telegram_user),
-):
+async def set_risk_settings(payload: Dict[str, Any] = Body(...), session=Depends(require_session)):
     """Глобальні ризик-налаштування угод (застосовуються до наступних входів
     без рестарту): min_margin_usdt — мінімальна маржа (0 = вимкнено);
     max_stop_roi_percent — найбільший збиток на стопі в % ROI (1..90)."""
-    settings_manager = require_settings_manager(request)
+    settings_manager = session.settings_manager
 
     def _number(key):
         value = payload.get(key)
@@ -194,7 +192,7 @@ async def set_risk_settings(
                 detail=f"'max_stop_roi_percent' must be between 1 and {MAX_STOP_ROI_LIMIT:g} (ликвидация ~100%)",
             )
         await settings_manager.set_max_stop_roi_percent(value)
-    logger.info(f"Risk settings updated via mini app: {payload} (user={user})")
+    logger.info(f"Risk settings updated via mini app: {payload} (user={session.user_id})")
     return {
         "min_margin_usdt": settings_manager.get_min_margin_usdt(),
         "max_stop_roi_percent": settings_manager.get_max_stop_roi_percent(),
@@ -220,20 +218,38 @@ async def set_strategy_enabled(
     name: str,
     request: Request,
     payload: Dict[str, Any] = Body(...),
-    user: dict = Depends(require_telegram_user),
+    session=Depends(require_session),
 ):
+    """Особистий вибір: приймати сигнали цієї стратегії на свій рахунок чи ні."""
     store = require_strategy_settings(request)
     _require_known_strategy(store, name)
     enabled = _require_bool(payload)
+    disabled = session.disabled_strategies()
+    disabled.discard(name) if enabled else disabled.add(name)
+    await session.settings_manager.set(DISABLED_STRATEGIES_KEY, sorted(disabled))
+    logger.info(f"Strategy '{name}' {'on' if enabled else 'off'} for user {session.user_id}")
+    return _strategy_response(store, name, session)
 
+
+@router.post("/strategies/{name}/global-enabled")
+async def set_strategy_global_enabled(
+    name: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    session=Depends(require_session),
+    admin: dict = Depends(require_admin),
+):
+    """Вмикає/вимикає генерацію сигналів стратегії для всіх (адмін)."""
+    store = require_strategy_settings(request)
+    _require_known_strategy(store, name)
+    enabled = _require_bool(payload)
     strategy_manager = request.app.state.strategy_manager
     if strategy_manager is not None:
-        strategy_manager.set_enabled(name, enabled)  # оновлює і БД, і live-інстанс
+        strategy_manager.set_enabled(name, enabled)
     else:
         store.set_enabled(name, enabled)
-
-    logger.info(f"Strategy '{name}' {'enabled' if enabled else 'disabled'} via mini app (user={user})")
-    return _strategy_response(store, name)
+    logger.info(f"Strategy '{name}' globally {'enabled' if enabled else 'disabled'} (admin={admin['_id']})")
+    return _strategy_response(store, name, session)
 
 
 @router.post("/strategies/{name}/params")
@@ -241,7 +257,8 @@ async def update_strategy_param(
     name: str,
     request: Request,
     payload: Dict[str, Any] = Body(...),
-    user: dict = Depends(require_telegram_user),
+    session=Depends(require_session),
+    admin: dict = Depends(require_admin),
 ):
     store = require_strategy_settings(request)
     current = _require_known_strategy(store, name)
@@ -260,20 +277,21 @@ async def update_strategy_param(
     store.update_params(name, current)
     _apply_params_live(request, name, current)
 
-    logger.info(f"Strategy '{name}' param '{key}' updated via mini app (user={user})")
-    return _strategy_response(store, name)
+    logger.info(f"Strategy '{name}' param '{key}' updated via mini app (admin={admin['_id']})")
+    return _strategy_response(store, name, session)
 
 
 @router.post("/strategies/{name}/reset")
 async def reset_strategy_params(
     name: str,
     request: Request,
-    user: dict = Depends(require_telegram_user),
+    session=Depends(require_session),
+    admin: dict = Depends(require_admin),
 ):
     store = require_strategy_settings(request)
     _require_known_strategy(store, name)
 
     _apply_params_live(request, name, store.reset_to_default(name))
 
-    logger.info(f"Strategy '{name}' reset to defaults via mini app (user={user})")
-    return _strategy_response(store, name)
+    logger.info(f"Strategy '{name}' reset to defaults via mini app (admin={admin['_id']})")
+    return _strategy_response(store, name, session)

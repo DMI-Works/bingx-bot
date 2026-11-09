@@ -58,7 +58,12 @@ class Database(PositionsRepository, TradeAnalyticsRepository):
             f"Database initialized: db={self.db_name} (testnet={self.testnet}, user={self.user_id or '-'})"
         )
 
+    _indexed: set = set()  # (db_name, scoped) — індекси однакові для всіх користувачів
+
     def _create_indexes(self) -> None:
+        index_key = (self.db_name, bool(self.user_id))
+        if index_key in Database._indexed:
+            return
         # у scoped-режимі ScopedCollection.create_index додає префікс user_id,
         # тож унікальність order_id/key — у межах користувача
         self.db.positions.create_index("order_id", unique=True, sparse=True)
@@ -78,6 +83,7 @@ class Database(PositionsRepository, TradeAnalyticsRepository):
             [("strategy", ASCENDING), ("mode", ASCENDING), ("closed_at", DESCENDING)]
         )
 
+        Database._indexed.add(index_key)
         logger.info("Database indexes created/verified")
 
     # ------------------------------------------------------------------

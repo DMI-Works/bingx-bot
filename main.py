@@ -14,19 +14,18 @@ import uvicorn
 from pymongo import MongoClient
 
 from config import ConfigLoader
-from core.common.position_math import position_key
 from core.database import Database, StrategySettingsStore
-from core.database.mongo_config import MONGO_URI, read_mode_override, resolve_testnet
+from core.database.mongo_config import MONGO_URI
+from core.engine import SessionManager
 from core.events import EventBus
 from core.exchange import BingXClient
 from core.exchange import SymbolSelector
 from core.state import SettingsManager
-from core.risk import RiskManager, TrailingStopManager
-from core.analytics import ExcursionTracker
-from core.trading import SimpleTrader
 from core.strategies import StrategyManager, SignalActivityTracker
 from core.strategies.orderbook_analyzer import OrderBookAnalyzer
-from core.telegram import TelegramBot
+from core.telegram import TelegramGateway
+from core.users import UsersRepository, admin_telegram_id
+from core.users.migration import GLOBAL_SCOPE, migrate_legacy
 from webapp.backend.api import app as webapp_app
 
 
@@ -67,194 +66,76 @@ def setup_logging(config: ConfigLoader) -> None:
     logger.info("Logging initialized")
 
 
-def _resolve_testnet(config: ConfigLoader, logger: logging.Logger) -> bool:
-    """Визначає режим рантайму ДО вибору робочої бази: override із Mini App
-    (control.mode у БАЗОВІЙ БД) важливіший за дефолт exchange.testnet із
-    config.yaml. Одне коротке підключення лише заради прапорця."""
-    config_default = config.get('exchange.testnet', True)
-    override = None
-    try:
-        probe = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-        try:
-            override = read_mode_override(probe)
-        finally:
-            probe.close()
-    except Exception as e:
-        logger.warning(f"Не вдалось прочитати override режиму ({e}) — дефолт із config.yaml")
-    testnet = resolve_testnet(config_default, override)
-    src = "config.yaml" if override is None else "Mini App (control.mode)"
-    logger.info(f"Режим: {'testnet' if testnet else 'LIVE'} (джерело: {src})")
-    return testnet
-
-
 async def main():
-    """Супервізор: будує й запускає бота; якщо з Mini App прийшов запит на зміну
-    режиму (restart_event) — штатно зупиняється й перезбирає все з новим режимом,
-    без редеплою. KeyboardInterrupt виходить остаточно."""
     config = ConfigLoader()
     setup_logging(config)
-    logger = logging.getLogger(__name__)
-
-    while True:
-        restart_event = asyncio.Event()
-        should_restart = await run_bot(ConfigLoader(), restart_event)
-        if not should_restart:
-            break
-        logger.info("=" * 60)
-        logger.info("Зміна режиму торгівлі — перезапуск бота в цьому ж процесі")
-        logger.info("=" * 60)
+    try:
+        await run_bot(config)
+    except KeyboardInterrupt:
+        pass
 
 
-async def run_bot(config: ConfigLoader, restart_event: asyncio.Event) -> bool:
-    """Одна «життєва сесія» бота. Повертає True, якщо був запит на перезапуск
-    (зміна режиму), False — якщо звичайний вихід (Ctrl+C)."""
+async def run_bot(config: ConfigLoader) -> None:
+    """Багатокористувацький бот в одному event loop:
+
+    MarketEngine (один): ринкові дані BingX (live), пули монет, OrderBookAnalyzer,
+        стратегії — сигнали рахуються ОДИН раз і йдуть у спільну шину.
+    SessionManager: торговий контур кожного користувача (власні ключі, режим
+        testnet/live, трейдер, ризик, трейлінг, сповіщення) — див. core/engine.
+    """
     logger = logging.getLogger(__name__)
     logger.info("=" * 60)
-    logger.info("Starting Ruflo Trading Bot")
+    logger.info("Starting Ruflo Trading Bot (multi-user)")
     logger.info("=" * 60)
 
-    testnet = _resolve_testnet(config, logger)
-
-    db = Database(testnet=testnet)
-    logger.info("[OK] Database initialized")
-
-    event_bus = EventBus()
-    await event_bus.start()
-    logger.info("[OK] Event Bus started")
-
-    # Ключі за режимом: testnet (VST) і live — РІЗНІ ключі. У testnet беремо
-    # BINGX_API_KEY_TESTNET/_SECRET_TESTNET; якщо їх немає — відкат на live-ключі
-    # з попередженням (VST-ендпоінти їх не приймуть — запити до біржі падатимуть).
-    if testnet:
-        api_key = os.getenv('BINGX_API_KEY_TESTNET') or os.getenv('BINGX_API_KEY')
-        api_secret = os.getenv('BINGX_API_SECRET_TESTNET') or os.getenv('BINGX_API_SECRET')
-        if not os.getenv('BINGX_API_KEY_TESTNET'):
-            logger.warning(
-                "testnet-режим, але BINGX_API_KEY_TESTNET не задано — використовую live-ключі. "
-                "VST-ендпоінти їх, найімовірніше, відхилять. Додай окремі testnet-ключі у .env."
-            )
+    mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+    admin_id = admin_telegram_id()
+    if admin_id:
+        migrate_legacy(mongo_client, admin_id, default_testnet=config.get('exchange.testnet', True))
     else:
-        api_key = os.getenv('BINGX_API_KEY')
-        api_secret = os.getenv('BINGX_API_SECRET')
+        logger.warning("ADMIN_TELEGRAM_ID/TELEGRAM_CHAT_ID не задано — адміна немає, міграцію пропущено")
+    users = UsersRepository(mongo_client)
 
-    if not api_key or not api_secret:
-        logger.error("BingX API credentials not found in environment variables")
-        return False
+    # Спільні (адмінські) дані: параметри стратегій (strategy_settings, live-база)
+    # і whitelist/blacklist пулу монет (settings з user_id="__global__").
+    market_db = Database(testnet=False, user_id=GLOBAL_SCOPE, client=mongo_client)
+    shared_bus = EventBus()
+    await shared_bus.start()
+    global_settings = SettingsManager(market_db, shared_bus)
+    strategy_settings = StrategySettingsStore(market_db)
 
-    exchange = BingXClient(
-        api_key=api_key,
-        api_secret=api_secret,
-        testnet=testnet,
-        event_bus=event_bus
+    # Ринкові дані — завжди live (публічні ендпоінти); ключі адміна з env
+    # потрібні лише для _get_held_symbols без провайдера (тут він є).
+    market = BingXClient(
+        api_key=os.getenv('BINGX_API_KEY', ''),
+        api_secret=os.getenv('BINGX_API_SECRET', ''),
+        testnet=False,
+        event_bus=shared_bus,
     )
-    logger.info("[OK] Exchange client initialized")
+    logger.info("[OK] Market data client initialized (live)")
 
-    settings_manager = SettingsManager(db, event_bus)
-    logger.info("[OK] Settings Manager initialized")
+    signal_activity_tracker = SignalActivityTracker(shared_bus)
 
-    # Раньше глобальный тумблер торговли (trading.enabled) нигде не
-    # проверялся перед исполнением сигналов — по факту бот всегда торговал,
-    # если стратегии были включены. Чтобы включение этого гейта в
-    # SimpleTrader ниже не остановило торговлю на уже работающих
-    # инсталляциях, при самом первом запуске (когда в БД ещё нет записи)
-    # сидируем trading.enabled=True — сохраняя прежнее поведение "по
-    # умолчанию торгуем". Дальше состоянием управляет только пользователь
-    # (через мини-апп) — это уже настоящий kill-switch, а не решаемый я.
-    if db.get_setting('trading.enabled') is None:
-        await settings_manager.set_trading_enabled(True)
-        logger.info("[OK] trading.enabled not set yet — seeded to True (preserves prior always-on behavior)")
-
-    risk_config = config.get('trading.risk')
-    risk_manager = RiskManager(db, event_bus, exchange, risk_config, settings_manager=settings_manager)
-    logger.info("[OK] Risk Manager initialized")
-
-    # Створюється ДО SimpleTrader (раніше створювався нижче, разом з
-    # StrategyManager) — трейдеру потрібен для знімку параметрів стратегії
-    # в trade_analytics у момент відкриття угоди.
-    strategy_settings = StrategySettingsStore(db)
-    logger.info("[OK] Strategy Settings Store initialized")
-
-    trader = SimpleTrader(
-        exchange=exchange,
-        event_bus=event_bus,
-        db=db,
-        risk_manager=risk_manager,
-        settings_manager=settings_manager,
-        strategy_settings=strategy_settings,
-    )
-    logger.info("[OK] Simple Trader initialized")
-
-    trailing_stop_config = config.get('trading.trailing_stop', {})
-    trailing_stop_manager = TrailingStopManager(
-        event_bus=event_bus,
-        exchange=exchange,
-        db=db,
-        trader=trader,
-        config=trailing_stop_config,
-    )
-    logger.info("[OK] Trailing Stop Manager initialized")
-
-    # MFE/MAE угод для trade_analytics (лише читає тики, у торгівлю не втручається)
-    excursion_tracker = ExcursionTracker(event_bus, db, trader, config.get('analytics', {}))
-    logger.info("[OK] Excursion Tracker initialized (MFE/MAE -> trade_analytics)")
+    def make_selector(cfg, **kwargs):
+        return SymbolSelector(
+            market, cfg, signal_tracker=signal_activity_tracker, event_bus=shared_bus,
+            settings_manager=global_settings, **kwargs,
+        )
 
     filters_config = config.get('trading.filters', {})
     refresh_interval = config.get('trading.filters.rotation_interval_seconds', 1800)
-    # Слухає SIGNAL_GENERATED і дозволяє SymbolSelector'у при ротації монет
-    # не чіпати символи, які зараз "живі" (давали сигнал за останні
-    # rotation_interval_seconds), і, навпаки, вважати "тихі" непридбані
-    # символи кандидатами на заміну.
-    signal_activity_tracker = SignalActivityTracker(event_bus)
-    symbol_selector = SymbolSelector(
-        exchange,
-        filters_config,
-        signal_tracker=signal_activity_tracker,
-        event_bus=event_bus,
-        settings_manager=settings_manager,
-    )
-    logger.info("[OK] Symbol Selector initialized (signal-activity-aware rotation, notifies Telegram)")
-    # 24h-знімок монети (об'єм, зміна, діапазон, спред) -> trade_analytics.market_context
-    trader.market_context_provider = symbol_selector.market_context
-
-    # ОКРЕМИЙ пул для TrendSupertrendStrategy: підписує монети ЛИШЕ на @trade
-    # (trade_only=True), тому OrderBookAnalyzer їх не бачить і WallBreakout по
-    # них не торгує. Піднімається, лише якщо є непорожній trading.trend_filters.
-    # Два селектори координуються через reserved_symbols_provider: @trade-підписку
-    # спільного символу знімає лише той пул, для якого він зайвий, і лише якщо
-    # його не тримає інший пул.
+    symbol_selector = make_selector(filters_config)
     trend_filters_config = config.get('trading.trend_filters', {}) or {}
-    trend_symbol_selector = None
-    if trend_filters_config:
-        trend_symbol_selector = SymbolSelector(
-            exchange,
-            trend_filters_config,
-            signal_tracker=signal_activity_tracker,
-            event_bus=event_bus,
-            settings_manager=settings_manager,
-            trade_only=True,
-            pool_label="TREND-SYMBOLS",
-        )
-        logger.info("[OK] Trend Symbol Selector initialized (@trade-only pool for TrendSupertrendStrategy)")
-
-    # ОКРЕМИЙ СТАБІЛЬНИЙ пул для TsMomentumStrategy (денний моментум тримає
-    # позицію тижнями — ротація майже вимкнена, universe по whitelist).
-    # Теж @trade-only, тому ізольований від OrderBookAnalyzer/WallBreakout.
+    trend_symbol_selector = (
+        make_selector(trend_filters_config, trade_only=True, pool_label="TREND-SYMBOLS")
+        if trend_filters_config else None
+    )
     tsmom_filters_config = config.get('trading.tsmom_filters', {}) or {}
-    tsmom_symbol_selector = None
-    if tsmom_filters_config:
-        tsmom_symbol_selector = SymbolSelector(
-            exchange,
-            tsmom_filters_config,
-            signal_tracker=signal_activity_tracker,
-            event_bus=event_bus,
-            settings_manager=settings_manager,
-            trade_only=True,
-            pool_label="TSMOM-SYMBOLS",
-        )
-        logger.info("[OK] TSMOM Symbol Selector initialized (@trade-only stable pool for TsMomentumStrategy)")
+    tsmom_symbol_selector = (
+        make_selector(tsmom_filters_config, trade_only=True, pool_label="TSMOM-SYMBOLS")
+        if tsmom_filters_config else None
+    )
 
-    # Координація @trade-підписок між пулами: кожен пул НЕ знімає @trade символу,
-    # який тримає БУДЬ-ЯКИЙ інший пул (union). @depth чіпає лише wall-пул.
     def _others_union(*selectors):
         def provider():
             union = set()
@@ -270,192 +151,117 @@ async def run_bot(config: ConfigLoader, restart_event: asyncio.Event) -> bool:
     if tsmom_symbol_selector is not None:
         tsmom_symbol_selector.reserved_symbols_provider = _others_union(symbol_selector, trend_symbol_selector)
 
-    orderbook_config = config.get('trading.orderbook', {})
-    OrderBookAnalyzer(event_bus, orderbook_config)  # живе через підписки на EventBus
-    logger.info(
-        "[OK] OrderBookAnalyzer initialized (detect+log+publish; "
-        "trading happens only if WallBreakoutStrategy is enabled in the mini app)"
-    )
-
-
-    strategy_manager = StrategyManager(event_bus, config, logger, strategy_settings, bingx_client=exchange)
+    OrderBookAnalyzer(shared_bus, config.get('trading.orderbook', {}))
+    strategy_manager = StrategyManager(shared_bus, config, logger, strategy_settings, bingx_client=market)
     strategies = strategy_manager.setup()
     logger.info(f"[OK] Strategy Manager initialized ({len(strategies)} strategies)")
 
-    strategy_manager.subscribe_params(
-        'WallBreakoutStrategy',
-        lambda params: trailing_stop_manager.set_levels(params.get('trail_levels_percent')),
-    )
-
-    # Прив'язуємо TrendSupertrendStrategy до її власного трендового пулу: після
-    # цього вона реагує лише на тики цих символів, ігноруючи волатильний wall-пул.
     if trend_symbol_selector is not None:
         trend_strategy = strategy_manager.get('TrendSupertrendStrategy')
         if trend_strategy is not None and hasattr(trend_strategy, 'set_symbol_pool_provider'):
             trend_strategy.set_symbol_pool_provider(lambda: trend_symbol_selector.current_symbols)
-            logger.info("[OK] TrendSupertrendStrategy bound to its trend symbol pool")
+    tsmom_strategy = strategy_manager.get('TsMomentumStrategy')
+    if tsmom_symbol_selector is not None and tsmom_strategy is not None:
+        tsmom_strategy.set_symbol_pool_provider(lambda: tsmom_symbol_selector.current_symbols)
 
-    # TsMomentumStrategy: власний стабільний пул + доступ до відкритих позицій
-    # (для сверки сигнал/позиція) + колбек закриття по розвороту сигналу.
-    if tsmom_symbol_selector is not None:
-        tsmom_strategy = strategy_manager.get('TsMomentumStrategy')
-        if tsmom_strategy is not None and hasattr(tsmom_strategy, 'set_symbol_pool_provider'):
-            tsmom_strategy.set_symbol_pool_provider(lambda: tsmom_symbol_selector.current_symbols)
-            # позиції стратегія не бачить: шле цілі (action=TARGET), звіряє SimpleTrader
-            logger.info("[OK] TsMomentumStrategy bound to its stable pool")
+    # --- Telegram: один бот на всіх, сповіщення — кожному в свій чат ---
+    telegram_gateway = None
+    telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    sessions: SessionManager  # оголошено нижче; lookup викликається вже після старту
 
-    telegram_enabled = config.get('telegram.enabled', False)
-    telegram_bot = None
+    if config.get('telegram.enabled', False) and telegram_token:
+        telegram_gateway = TelegramGateway(
+            token=telegram_token,
+            session_lookup=lambda user_id: sessions.get(user_id),
+            admin_chat_id=admin_id,
+            shared_event_bus=shared_bus,
+        )
 
-    if telegram_enabled:
-        telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+    sessions = SessionManager(
+        users=users,
+        mongo_client=mongo_client,
+        config=config,
+        shared_bus=shared_bus,
+        strategy_settings=strategy_settings,
+        telegram_gateway=telegram_gateway,
+        market_context_provider=symbol_selector.market_context,
+        targets_provider=(tsmom_strategy.current_targets if tsmom_strategy is not None else None),
+    )
+    strategy_manager.subscribe_params(
+        'WallBreakoutStrategy',
+        lambda params: sessions.set_trail_levels(params.get('trail_levels_percent')),
+    )
+    for selector in (symbol_selector, trend_symbol_selector, tsmom_symbol_selector):
+        if selector is not None:
+            selector.held_symbols_provider = sessions.held_symbols
 
-        if telegram_token and telegram_chat_id:
-            telegram_bot = TelegramBot(
-                token=telegram_token,
-                chat_id=telegram_chat_id,
-                event_bus=event_bus,
-                settings_manager=settings_manager,
-                exchange_client=exchange,
-                db=db,
-            )
-            await telegram_bot.start()
-            logger.info("[OK] Telegram Bot started")
-        else:
-            logger.warning("Telegram credentials not found, bot disabled")
+    if telegram_gateway is not None:
+        await telegram_gateway.start()
+        logger.info("[OK] Telegram gateway started")
 
-    ws_enabled = config.get('exchange.websocket.enabled', True)
-    selected_symbols = set()
+    await sessions.start_all()
 
-    if ws_enabled:
-        await exchange.start_websocket()
-        await exchange.start_user_data_stream()
-        logger.info("[OK] WebSocket connected")
-
-        selected_symbols = await symbol_selector.apply()
-        logger.info(f"[OK] Initial symbol selection: {sorted(selected_symbols)}")
-
+    if config.get('exchange.websocket.enabled', True):
+        await market.start_websocket()
+        logger.info("[OK] Market WebSocket connected")
+        selected = await symbol_selector.apply()
+        logger.info(f"[OK] Initial symbol selection: {sorted(selected)}")
         await symbol_selector.start_refresh_loop(refresh_interval)
-
         if trend_symbol_selector is not None:
-            trend_symbols = await trend_symbol_selector.apply()
-            logger.info(f"[OK] Initial trend symbol selection (@trade-only): {sorted(trend_symbols)}")
-            trend_refresh_interval = trend_filters_config.get('rotation_interval_seconds', 3600)
-            await trend_symbol_selector.start_refresh_loop(trend_refresh_interval)
-
+            await trend_symbol_selector.apply()
+            await trend_symbol_selector.start_refresh_loop(trend_filters_config.get('rotation_interval_seconds', 3600))
         if tsmom_symbol_selector is not None:
-            tsmom_symbols = await tsmom_symbol_selector.apply()
-            logger.info(f"[OK] Initial TSMOM symbol selection (@trade-only, stable): {sorted(tsmom_symbols)}")
-            tsmom_refresh_interval = tsmom_filters_config.get('rotation_interval_seconds', 86400)
-            await tsmom_symbol_selector.start_refresh_loop(tsmom_refresh_interval)
+            await tsmom_symbol_selector.apply()
+            await tsmom_symbol_selector.start_refresh_loop(tsmom_filters_config.get('rotation_interval_seconds', 86400))
 
-    # --- Mini App (webapp) ---
-    # Поднимаем FastAPI как фоновую задачу того же event loop — отдельный
-    # процесс/сервис на Railway не нужен, порт берём из PORT (его подставляет
-    # сам Railway), локально — 8000.
+    # --- Mini App ---
     webapp_server = None
     webapp_task = None
-
     if config.get('webapp.enabled', True):
-        # api.py не открывает свою БД и не создаёт свой exchange-клиент —
-        # прокидываем уже готовые объекты через app.state
-        webapp_app.state.db = db
-        webapp_app.state.exchange_client = exchange
-        webapp_app.state.settings_manager = settings_manager
-        webapp_app.state.strategy_settings = strategy_settings
-        webapp_app.state.strategy_manager = strategy_manager
-        webapp_app.state.symbol_selector = symbol_selector
-        webapp_app.state.signal_tracker = signal_activity_tracker
-        # Для перемикача режиму з Mini App: поточний режим, джерело відкритих
-        # позицій (guard від зміни режиму з відкритими угодами) і подія-сигнал
-        # штатного перезапуску супервізору (див. main()).
-        webapp_app.state.testnet = testnet
-        webapp_app.state.trader = trader
-        webapp_app.state.restart_event = restart_event
+        state = webapp_app.state
+        state.users = users
+        state.sessions = sessions
+        state.mongo_client = mongo_client
+        state.market_exchange = market
+        state.global_settings = global_settings
+        state.strategy_settings = strategy_settings
+        state.strategy_manager = strategy_manager
+        state.symbol_selector = symbol_selector
+        state.signal_tracker = signal_activity_tracker
 
         port = int(os.getenv('PORT', config.get('webapp.port', 8000)))
-        uvicorn_config = uvicorn.Config(
-            webapp_app,
-            host='0.0.0.0',
-            port=port,
-            log_level='warning',  # не дублируем шум uvicorn поверх логов бота
-        )
-        webapp_server = uvicorn.Server(uvicorn_config)
+        webapp_server = uvicorn.Server(uvicorn.Config(webapp_app, host='0.0.0.0', port=port, log_level='warning'))
         webapp_task = asyncio.create_task(webapp_server.serve())
         logger.info(f"[OK] Web App API started on port {port}")
 
-    # --- Стартове повідомлення в Telegram — ЛИШЕ після того, як усе
-    # реально готове (біржа, стратегії, символи), щоб цифри в ньому
-    # відповідали дійсності. Якщо Telegram вимкнено — просто пропускаємо. ---
-    if telegram_bot:
-        try:
-            await telegram_bot.notify_startup(
-                testnet=testnet,
-                strategies=strategies
-            )
-            logger.info("[OK] Startup notification sent to Telegram")
-        except Exception as e:
-            logger.error(f"Failed to send startup notification: {e}", exc_info=True)
+    if telegram_gateway is not None and admin_id:
+        await telegram_gateway.send_to(admin_id, (
+            f"🚀 <b>Бот запущено</b>\n"
+            f"Користувачів із активною сесією: {len(sessions.sessions)}\n"
+            f"Стратегій увімкнено: {sum(1 for s in strategies if getattr(s, 'enabled', False))}/{len(strategies)}"
+        ))
 
-    logger.info("=" * 60)
     logger.info("Ruflo Trading Bot is running")
-    logger.info("Press Ctrl+C to stop")
-    logger.info("=" * 60)
-
-    # restart_event ставиться з вебапа при зміні режиму (/api/settings/mode):
-    # тоді цей цикл завершується, бот штатно вимикається і супервізор main()
-    # перезбирає все з новим режимом. Ctrl+C — остаточний вихід.
-    should_restart = False
     try:
-        while not restart_event.is_set():
-            await asyncio.sleep(1)
-        should_restart = True
-        logger.info("Restart requested (mode change) — shutting down to rebuild")
-
-    except KeyboardInterrupt:
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutdown signal received")
-
-    logger.info("Shutting down...")
-
-    if telegram_bot:
-        await telegram_bot.stop()
-        logger.info("[OK] Telegram Bot stopped")
 
     if webapp_server:
         webapp_server.should_exit = True
         await webapp_task
-        logger.info("[OK] Web App API stopped")
-
-    await symbol_selector.stop_refresh_loop()
-    logger.info("[OK] Symbol selector stopped")
-
-    if trend_symbol_selector is not None:
-        await trend_symbol_selector.stop_refresh_loop()
-        logger.info("[OK] Trend symbol selector stopped")
-
-    if tsmom_symbol_selector is not None:
-        await tsmom_symbol_selector.stop_refresh_loop()
-        logger.info("[OK] TSMOM symbol selector stopped")
-
-    await exchange.stop_websocket()
-    logger.info("[OK] WebSocket stopped")
-
-    await exchange.close()
-    logger.info("[OK] Exchange client closed")
-
-    await event_bus.stop()
-    logger.info("[OK] Event Bus stopped")
-
-    await excursion_tracker.flush_all()
-    logger.info("[OK] Excursion Tracker flushed")
-
-    db.close()
-    logger.info("[OK] Database closed")
-
-    logger.info("Ruflo Trading Bot stopped successfully")
-
-    return should_restart
+    for selector in (symbol_selector, trend_symbol_selector, tsmom_symbol_selector):
+        if selector is not None:
+            await selector.stop_refresh_loop()
+    await sessions.stop_all()
+    if telegram_gateway is not None:
+        await telegram_gateway.stop()
+    await market.stop_websocket()
+    await market.close()
+    await shared_bus.stop()
+    mongo_client.close()
+    logger.info("Ruflo Trading Bot stopped")
 
 
 if __name__ == "__main__":

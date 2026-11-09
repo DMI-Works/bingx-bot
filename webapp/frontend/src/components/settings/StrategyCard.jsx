@@ -21,6 +21,18 @@ export default function StrategyCard({ strategy, onUpdate }) {
     }
   };
 
+  const toggleGlobal = async (next) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      onUpdate(await apiPost(`/settings/strategies/${strategy.name}/global-enabled`, { enabled: next }));
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const reset = async () => {
     setBusy(true);
     setErr(null);
@@ -36,7 +48,7 @@ export default function StrategyCard({ strategy, onUpdate }) {
   return (
     <div className="strategy-card">
       <div className="row" onClick={() => setOpen(!open)} style={{ cursor: "pointer", borderBottom: open ? undefined : "none" }}>
-        <span className={`status-dot ${strategy.enabled ? "status-on" : "status-off"}`} />
+        <span className={`status-dot ${strategy.enabled && strategy.global_enabled ? "status-on" : "status-off"}`} />
         <div className="row-main">
           <div className="row-title-line">
             <span className="settings-title">{strategy.name}</span>
@@ -52,23 +64,38 @@ export default function StrategyCard({ strategy, onUpdate }) {
           <div className="list" style={{ marginBottom: 10 }}>
             <ToggleRow
               icon={Power}
-              title="Стратегия включена"
+              title="Торговать по этой стратегии"
+              sub={strategy.global_enabled ? undefined : "Стратегия сейчас отключена администратором"}
               checked={strategy.enabled}
               disabled={busy}
               onToggle={toggleEnabled}
             />
+            {strategy.can_edit && (
+              <ToggleRow
+                icon={Power}
+                title="Стратегия работает для всех"
+                sub="Если выключить, сигналы не будут приходить никому."
+                checked={strategy.global_enabled}
+                disabled={busy}
+                onToggle={toggleGlobal}
+              />
+            )}
           </div>
-          <div className="list">
-            {strategy.params.length
-              ? strategy.params.map((p) => (
-                  <ParamRow key={p.key} strategyName={strategy.name} param={p} onSaved={onUpdate} />
-                ))
-              : <EmptyRow text="Нет параметров" />}
-          </div>
-          <button className="danger-btn" onClick={reset} disabled={busy}>
-            <RotateCcw size={16} />
-            Сбросить к заводским
-          </button>
+          {strategy.can_edit && (
+            <>
+              <div className="list">
+                {strategy.params.length
+                  ? strategy.params.map((p) => (
+                      <ParamRow key={p.key} strategyName={strategy.name} param={p} onSaved={onUpdate} />
+                    ))
+                  : <EmptyRow text="Нет параметров" />}
+              </div>
+              <button className="danger-btn" onClick={reset} disabled={busy}>
+                <RotateCcw size={16} />
+                Сбросить к заводским
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

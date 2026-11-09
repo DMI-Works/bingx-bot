@@ -57,15 +57,11 @@ class UsersRepository:
         with self._lock:
             return list(self.collection.find().sort("created_at", 1))
 
-    def list_active_with_keys(self) -> List[dict]:
-        """Активні користувачі, у яких є ключі для поточного режиму їхнього рахунку."""
-        result = []
-        for user in self.list_all():
-            if user.get("status") != "active":
-                continue
-            if self.has_keys(user, bool(user.get("testnet", False))):
-                result.append(user)
-        return result
+    def list_with_keys(self) -> List[dict]:
+        """Користувачі з ключами для поточного режиму. Заблоковані теж: нових
+        входів у них не буде (access.can_open_new), але відкриті позиції
+        мають супроводжуватись."""
+        return [u for u in self.list_all() if self.has_keys(u, bool(u.get("testnet", False)))]
 
     @staticmethod
     def has_keys(user: dict, testnet: bool) -> bool:

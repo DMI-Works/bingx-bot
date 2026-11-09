@@ -8,6 +8,16 @@ Async Python trading bot for BingX perpetual futures ("Ruflo Trading Bot"), plus
 
 `README.md` (Russian) is the user-facing description. Keep it in sync when you change setup steps, env vars, config keys or strategies. Storage is **MongoDB** (`pymongo`), and the working strategies are `WallBreakoutStrategy`, `TrendSupertrendStrategy` and `TsMomentumStrategy` (daily time-series momentum: holds until the momentum sign flips, exits via `SimpleTrader.close_position` reduce-only market order rather than a price stop; vol-target sizing; its own stable `trading.tsmom_filters` pool). `SimpleTrader.close_position(symbol, side, reason)` is the only programmatic (non-event) close path — it cancels resting SL/TP and sends a reduce-only MARKET order; the normal ORDER_TRADE_UPDATE→`_finalize_close` flow finalizes it (tagged `closed_by=bot`, `close_reason=<reason>`).
 
+## Multi-user architecture
+
+One process serves many users. `main.py` builds one shared market layer (live `BingXClient` for market data, `SymbolSelector` pools, `OrderBookAnalyzer`, strategies, a shared `EventBus`) and a `core/engine/SessionManager`, which owns one `UserSession` per user with API keys: their own `BingXClient` (keys, user-data stream), `EventBus`, `SettingsManager`, `RiskManager`, `SimpleTrader`, `TrailingStopManager`, `ExcursionTracker` and Telegram notifier (chat id = Telegram user id). The manager forwards `SIGNAL_GENERATED` to each session (skipping strategies the user disabled and users without entry rights, see `core/users/access.py`) and `PRICE_UPDATED` only to sessions holding that symbol. Components that need account events must live in the session: position events never reach the shared bus.
+
+- Users are in the `users` collection of the base DB (`core/users/`). `_id` is the Telegram user id; API keys are Fernet-encrypted with env `SECRETS_KEY`; each user has their own `testnet` mode.
+- `Database(testnet, user_id, client)` wraps collections in `ScopedDatabase` (`core/database/scoped.py`), which adds `user_id` to every filter, insert and aggregate. Strategy params (`strategy_settings`) are shared and use `db.raw`. Shared pool whitelist/blacklist use `user_id="__global__"`.
+- `core/users/migration.py` runs at startup and assigns legacy rows to the admin (`ADMIN_TELEGRAM_ID`, else `TELEGRAM_CHAT_ID`).
+- Webapp: every endpoint depends on `require_user`/`require_session` (the caller's data only) or `require_admin` (strategy params, shared coin pool).
+- Strategies must not read positions of an account. TsMomentum publishes `action: 'TARGET'` signals and each `SimpleTrader._handle_target` reconciles its own positions; `no_open` blocks entries but still lets flips close.
+
 ## Commands
 
 ```bash
@@ -29,15 +39,15 @@ No linter or formatter is configured. Deployment is the multi-stage `Dockerfile`
 
 ## Environment
 
-`.env` (see `.env.example`): `BINGX_API_KEY`, `BINGX_API_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `WEBAPP_URL`, `MONGO_URI`, `MONGO_DB_NAME`.
+`.env` (see `.env.example`): `BINGX_API_KEY`, `BINGX_API_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `WEBAPP_URL`, `MONGO_URI`, `MONGO_DB_NAME`, `SECRETS_KEY` (required), `ADMIN_TELEGRAM_ID`.
 
 - `core/database/mongo_config.py` checks `MONGO_URI` **at import time** and raises if it is missing. Anything that imports `core.risk`, `core.trading` or `core.database` needs it set. Tests do `os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")` before importing and never open a real connection. Copy that pattern in new tests.
-- The DB name gets the suffix `_testnet` in testnet mode, so testnet and live data sit in separate databases. `trade_analytics` rows also carry a `mode` field. The runtime mode is **not** just `exchange.testnet` from the YAML: that value is only the default. The source of truth is an override document `control.mode` (`{_id:"mode", testnet}`) in the **base** (non-suffixed) DB, which the Mini App writes and `main.py` reads at startup (`resolve_testnet` / `read_mode_override` in `core/database/mongo_config.py`) before building `Database`/`BingXClient`. Switching mode from the Mini App (Profile tab → `POST /api/settings/mode`) persists the override and sets `app.state.restart_event`; `main.py`'s supervisor loop (`run_bot`) then tears the bot down and rebuilds it in-process with the new mode (no redeploy). `Database(testnet=...)` carries the mode per instance (`self.db_name`, `self.trade_mode`); the module-level `IS_TESTNET`/`MONGO_DB_NAME`/`TRADE_MODE` remain config-default constants for tests/scripts.
+- The DB name gets the suffix `_testnet` in testnet mode, so testnet and live data sit in separate databases. `trade_analytics` rows also carry a `mode` field. The mode is per user (`users.testnet`, new users start on testnet) and switching it from the Mini App (`POST /api/settings/mode`) restarts only that user's session. `Database(testnet=...)` carries the mode per instance (`self.db_name`, `self.trade_mode`); the module-level `IS_TESTNET`/`MONGO_DB_NAME`/`TRADE_MODE` remain config-default constants for tests/scripts.
 - `main.py` calls `load_dotenv()` before importing `webapp.backend.api`, because `auth.py` reads `TELEGRAM_BOT_TOKEN` at module import.
 
 ## Architecture
 
-Everything runs in one asyncio event loop started by `main.py`, which builds every component and wires them together explicitly. The FastAPI app runs in that same loop as a `uvicorn.Server` task. It gets the live objects (`db`, `exchange_client`, `settings_manager`, `strategy_settings`, `strategy_manager`, `symbol_selector`, `signal_tracker`) through `app.state`, so it never creates its own DB or exchange client.
+Everything runs in one asyncio event loop started by `main.py`, which builds every component and wires them together explicitly. The FastAPI app runs in that same loop as a `uvicorn.Server` task. It gets the shared objects (`users`, `sessions`, `market_exchange`, `global_settings`, `strategy_settings`, `strategy_manager`, `symbol_selector`, `signal_tracker`) through `app.state`.
 
 ### Event bus
 
@@ -77,10 +87,10 @@ SimpleTrader --POSITION_OPENED/CLOSED, STOP_LOSS_*, ERROR/CRITICAL_ERROR--> Tele
   - `StrategySettingsStore` (`strategy_settings` collection): per-strategy default params, current params and an enabled flag.
 - **`core/state/settings_manager.py`**: runtime settings stored in the `settings` collection as JSON strings. Includes `trading.enabled`, a global kill switch that gates **only new entries**; SL/TP/trailing keep running. It is seeded to `True` on the first run.
 - **`core/events/notify.py`**: `publish_error()` publishes ERROR/CRITICAL_ERROR, which `TelegramBot` forwards to the chat. Use it instead of building the event by hand.
-- **`core/telegram/`**: `telegram_bot.py` handles notifications plus `/start` and `/emergency`, and `messages.py` builds the message texts. Settings management moved to the Mini App.
+- **`core/telegram/`**: `telegram_bot.py` has `TelegramGateway` (one Telegram application, `/start`, `/emergency` per caller) and `TelegramBot` (per-user notifications), and `messages.py` builds the message texts. Settings management moved to the Mini App.
 - **`webapp/backend/`**:
   - `api.py` only assembles the FastAPI app. Endpoints live in `routes/` (`trades.py`: stats, positions, trades; plus `analytics.py`, `profile.py`, `settings.py`, `symbols.py`).
-  - `deps.py` holds the `app.state` dependencies (503 when missing) and `require_telegram_user`. Mutating endpoints use `Depends(require_telegram_user)`, which validates Telegram `initData` from the `X-Telegram-Init-Data` header.
+  - `deps.py` holds the `app.state` dependencies (503 when missing) and `require_telegram_user`. All endpoints authenticate through `require_user`, which validates Telegram `initData` from the `X-Telegram-Init-Data` header.
   - `services/trade_stats.py` holds the pure trade aggregation.
   - Built static files are mounted at `/`.
 

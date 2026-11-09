@@ -9,7 +9,7 @@ from core.common.market_data import extract_account_balance, filter_open_positio
 from core.common.position_math import position_key
 from core.common.position_metadata import load_metadata
 
-from ..deps import require_db, require_telegram_user, require_trader
+from ..deps import require_session
 from ..services.trade_stats import (
     closed_row_to_trade,
     in_period,
@@ -60,15 +60,15 @@ def _pct_of(value: float, base: Optional[float]) -> Optional[float]:
 
 
 @router.get("/api/stats")
-async def get_stats(request: Request, period: str = Query("1W")):
-    db = require_db(request)
+async def get_stats(period: str = Query("1W"), session=Depends(require_session)):
+    db = session.db
     cutoff = period_cutoff(period)
 
     summary = summarize_closed_trades(db.get_all_closed_positions(), cutoff)
     running = summary.pop("cumulative_pnl_raw")
 
     open_unrealized, account_equity, funding_total, funding_period = await _fetch_live_snapshot(
-        request.app.state.exchange_client, cutoff
+        session.exchange, cutoff
     )
 
     total_pnl = round(running + open_unrealized + funding_total, 2)
@@ -93,10 +93,10 @@ async def get_stats(request: Request, period: str = Query("1W")):
 
 
 @router.get("/api/positions")
-async def get_positions(request: Request):
+async def get_positions(session=Depends(require_session)):
     """Відкриті позиції: метадані з БД + live-цифри з біржі."""
-    db = require_db(request)
-    exchange = request.app.state.exchange_client
+    db = session.db
+    exchange = session.exchange
 
     db_positions = {(row["symbol"], row["side"]): row for row in db.get_active_positions()}
     if not exchange or not db_positions:
@@ -139,16 +139,15 @@ async def get_positions(request: Request):
 
 @router.post("/api/positions/close")
 async def close_position(
-    request: Request,
     payload: Dict[str, Any] = Body(...),
-    user: dict = Depends(require_telegram_user),
+    session=Depends(require_session),
 ):
     """Швидке закриття позиції з Mini App (reduce-only MARKET через
     SimpleTrader.close_position). Якщо на біржі позиції вже немає (закриття
     бот пропустив) — запис просто прибирається з відкритих (STALE)."""
-    db = require_db(request)
-    trader = require_trader(request)
-    exchange = request.app.state.exchange_client
+    db = session.db
+    trader = session.trader
+    exchange = session.exchange
 
     order_id = payload.get("order_id")
     if not isinstance(order_id, str) or not order_id:
@@ -174,21 +173,21 @@ async def close_position(
         db.mark_position_stale(order_id)
         if tracked is not None and tracked.get("order_id") == order_id:
             trader.open_positions.pop(key, None)
-        logger.info(f"Stale position {symbol} {side} ({order_id}) removed via mini app (user={user})")
+        logger.info(f"Stale position {symbol} {side} ({order_id}) removed via mini app (user={session.user_id})")
         return {"status": "removed"}
 
     if tracked is None:
         raise HTTPException(status_code=409, detail="Бот не ведёт эту позицию — закройте её на бирже")
     if not await trader.close_position(symbol, side, "manual_app"):
         raise HTTPException(status_code=502, detail="Биржа не приняла ордер на закрытие")
-    logger.info(f"Position {symbol} {side} close requested via mini app (user={user})")
+    logger.info(f"Position {symbol} {side} close requested via mini app (user={session.user_id})")
     return {"status": "closing"}
 
 
 @router.get("/api/trades")
-def get_trades(request: Request, limit: int = 50, offset: int = 0, period: str = Query("ALL")):
+def get_trades(limit: int = 50, offset: int = 0, period: str = Query("ALL"), session=Depends(require_session)):
     """Пагінована історія закритих угод з урахуванням періоду."""
-    db = require_db(request)
+    db = session.db
 
     cutoff = period_cutoff(period)
     if cutoff is None:

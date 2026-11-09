@@ -93,6 +93,8 @@ class SymbolSelector:
         self._quiet_since: Dict[str, float] = {}
         # symbol -> час підписки (молоді підписки ще не можуть бути "тихими")
         self._subscribed_at: Dict[str, float] = {}
+        # () -> set символів з відкритими позиціями (див. _get_held_symbols)
+        self.held_symbols_provider: Optional[Callable[[], Set[str]]] = None
         # останні перевірки тикерів (із select()) — для market_context угод
         self._last_checks: Dict[str, TickerCheck] = {}
 
@@ -434,6 +436,14 @@ class SymbolSelector:
                 logger.error(f"[SYMBOLS] Error during refresh: {e}", exc_info=True)
 
     async def _get_held_symbols(self) -> Set[str]:
+        # багатокористувацький режим: відкриті позиції УСІХ користувачів
+        # (SessionManager.held_symbols), а не лише рахунку market-клієнта
+        if self.held_symbols_provider is not None:
+            try:
+                return set(self.held_symbols_provider())
+            except Exception as e:
+                logger.error(f"held_symbols_provider failed: {e}")
+                return set()
         try:
             return held_symbols(await self.exchange.get_positions())
         except Exception as e:

@@ -142,23 +142,10 @@ class TestWallBreakoutReentry(unittest.TestCase):
         self.assertEqual(context['wall_multiple'], 7.5)
         self.assertEqual(context['consumed_pct'], 50.0)
 
-        asyncio.run(strategy._on_position_closed(Event(
-            type=EventType.POSITION_CLOSED, data={'symbol': 'KAIA-USDT', 'strategy': 'WallBreakoutStrategy'},
-        )))
-        asyncio.run(strategy._on_wall_breakout(self._breakout(side='bid')))
-        self.assertEqual(len(bus.published), 1, "вхід одразу після закриття має бути пропущений")
-
-        # чужа стратегія паузу не ставить
-        asyncio.run(strategy._on_position_closed(Event(
-            type=EventType.POSITION_CLOSED, data={'symbol': 'SOL-USDT', 'strategy': 'TrendSupertrendStrategy'},
-        )))
-        asyncio.run(strategy._on_wall_breakout(self._breakout(symbol='SOL-USDT')))
-        self.assertEqual(len(bus.published), 2)
-
-        strategy.last_close_time['KAIA-USDT'] -= strategy.reentry_cooldown_seconds + 1
-        asyncio.run(strategy._on_wall_breakout(self._breakout(side='bid')))
-        self.assertEqual(len(bus.published), 3)
-        self.assertIn('seconds_since_prev_close', bus.published[-1].data['analytics_context'])
+        # пауза після закриття тепер у трейдера кожного користувача: сигнал лише несе її
+        self.assertEqual(
+            bus.published[0].data['reentry_cooldown_seconds'], strategy.reentry_cooldown_seconds
+        )
 
 
 class TestOrderBookBreakoutContext(unittest.TestCase):

@@ -1,13 +1,19 @@
-import { useState } from "react";
-import { BarChart3, User, SettingsIcon, Coins, Microscope } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { BarChart3, User, SettingsIcon, Coins, Microscope, Shield } from "lucide-react";
 import StatisticsTab from "./components/stats/StatisticsTab";
 import ProfileTab from "./components/profile/ProfileTab";
 import SettingsTab from "./components/settings/SettingsTab";
 import CoinsTab from "./components/coins/CoinsTab";
 import AnalyticsTab from "./components/analytics/AnalyticsTab";
+import AdminTab from "./components/admin/AdminTab";
+import ConnectKeys from "./components/account/ConnectKeys";
+import { Spinner } from "./components/common";
+import { apiGet } from "./lib/api";
 import "./styles/global.css";
 
-const TABS = [
+const ADMIN_TAB = { id: "admin", label: "Админ", icon: Shield, render: AdminTab };
+
+const BASE_TABS = [
   { id: "stats", label: "Статистика", icon: BarChart3, render: StatisticsTab },
   { id: "analytics", label: "Аналитика", icon: Microscope, render: AnalyticsTab },
   { id: "coins", label: "Монеты", icon: Coins, render: CoinsTab },
@@ -17,14 +23,44 @@ const TABS = [
 
 export default function App() {
   const [active, setActive] = useState("stats");
-  const ActiveTab = TABS.find((t) => t.id === active).render;
+  const [me, setMe] = useState(null);
+  const [error, setError] = useState(null);
+  const tabs = me?.role === "admin" ? [...BASE_TABS, ADMIN_TAB] : BASE_TABS;
+  const ActiveTab = tabs.find((t) => t.id === active).render;
+
+  const loadMe = useCallback(() => {
+    setError(null);
+    return apiGet("/me").then(setMe).catch((e) => setError(e));
+  }, []);
+
+  useEffect(() => { loadMe(); }, [loadMe]);
+
+  if (error) {
+    const text = error.status === 401
+      ? "Откройте приложение через бота в Telegram."
+      : `Не удалось загрузить данные: ${error.message}`;
+    return <div className="app-root"><div className="tab-pane"><div className="error-banner">{text}</div></div></div>;
+  }
+  if (!me) {
+    return <div className="app-root"><div className="hero-loading"><Spinner /></div></div>;
+  }
+  // Ключи не подключены (или сессия не запустилась) — сначала подключение биржи
+  if (!me.session_active) {
+    return (
+      <div className="app-root">
+        <div className="tab-pane">
+          <ConnectKeys onDone={setMe} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app-root">
       <ActiveTab />
 
       <nav className="tabbar">
-        {TABS.map((t) => {
+        {tabs.map((t) => {
           const Icon = t.icon;
           return (
             <button

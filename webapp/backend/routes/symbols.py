@@ -12,11 +12,13 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from core.common.market_data import held_symbols
 
 from ..deps import (
-    require_db,
-    require_exchange,
-    require_settings_manager,
+    require_admin,
+    require_global_settings,
+    require_market_exchange,
+    require_session,
+    require_sessions,
     require_symbol_selector,
-    require_telegram_user,
+    require_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,15 +45,16 @@ def _subscribed(exchange) -> set:
 
 
 @router.get("")
-async def get_symbols(request: Request):
-    db = require_db(request)
-    exchange = require_exchange(request)
-    settings_manager = request.app.state.settings_manager
+async def get_symbols(request: Request, session=Depends(require_session)):
+    """Спільний пул монет + особистий чорний список і позиції користувача."""
+    db = session.db
+    market = require_market_exchange(request)
+    settings_manager = session.settings_manager
     signal_tracker = request.app.state.signal_tracker
 
-    subscribed = _subscribed(exchange)
+    subscribed = _subscribed(market)
     blacklist = _settings_list(settings_manager, "get_blacklist_symbols")
-    held = await _fetch_held_symbols(exchange, "/api/symbols")
+    held = await _fetch_held_symbols(session.exchange, "/api/symbols")
     last_traded_by_symbol = db.get_last_position_time_by_symbol()
 
     result = []
@@ -75,13 +78,15 @@ async def get_symbols(request: Request):
 
 
 @router.get("/candidates")
-async def get_symbol_candidates(request: Request, limit: int = Query(50, ge=1, le=200)):
+async def get_symbol_candidates(
+    request: Request, limit: int = Query(50, ge=1, le=200), session=Depends(require_session),
+):
     """«Топ монет» так, як їх бачить SymbolSelector: усі тикери біржі з тими
     самими фільтрами (об'єм/спред/ціна), відсортовані за об'ємом. Звідси
     монету можна примусово додати в торгівлю (whitelist)."""
     symbol_selector = require_symbol_selector(request)
-    exchange = require_exchange(request)
-    settings_manager = request.app.state.settings_manager
+    exchange = require_market_exchange(request)
+    global_settings = require_global_settings(request)
 
     try:
         tickers = await exchange.get_all_tickers()
@@ -89,10 +94,10 @@ async def get_symbol_candidates(request: Request, limit: int = Query(50, ge=1, l
         logger.error(f"Failed to fetch tickers for /api/symbols/candidates: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail="Exchange request failed")
 
-    blacklist = _settings_list(settings_manager, "get_blacklist_symbols")
-    whitelist = _settings_list(settings_manager, "get_whitelist_symbols")
+    blacklist = _settings_list(session.settings_manager, "get_blacklist_symbols")
+    whitelist = _settings_list(global_settings, "get_whitelist_symbols")  # спільний пул
     subscribed = _subscribed(exchange)
-    held = await _fetch_held_symbols(exchange, "/api/symbols/candidates")
+    held = await _fetch_held_symbols(session.exchange, "/api/symbols/candidates")
 
     candidates = []
     for ticker in tickers:
@@ -118,7 +123,7 @@ async def get_symbol_candidates(request: Request, limit: int = Query(50, ge=1, l
         })
 
     candidates.sort(key=lambda c: c["volume_24h"], reverse=True)
-    return {"candidates": candidates[:limit]}
+    return {"candidates": candidates[:limit], "can_edit_pool": session.user.get("role") == "admin"}
 
 
 def _symbol_from_payload(payload: Dict[str, Any]) -> str:
@@ -137,54 +142,59 @@ async def _reapply_selection(symbol_selector, action: str) -> None:
         logger.error(f"Failed to re-apply symbol selection after {action}: {e}", exc_info=True)
 
 
-async def _change_list(request: Request, user: dict, symbol: str, list_name: str, add: bool) -> Dict[str, list]:
-    settings_manager = require_settings_manager(request)
-    symbol_selector = require_symbol_selector(request)
+async def _reapply_after(request: Request, action: str) -> None:
+    await _reapply_selection(require_symbol_selector(request), action)
 
+
+async def _change_whitelist(request: Request, user: dict, symbol: str, add: bool) -> Dict[str, list]:
+    """Whitelist — спільний пул монет усіх користувачів, змінює лише адмін."""
+    global_settings = require_global_settings(request)
     action = "add" if add else "remove"
-    await getattr(settings_manager, f"{action}_{list_name}_symbol")(symbol)
-    logger.info(
-        f"Symbol '{symbol}' {'added to' if add else 'removed from'} {list_name} via mini app (user={user})"
-    )
-    await _reapply_selection(symbol_selector, f"{list_name} {action}")
-    return {list_name: getattr(settings_manager, f"get_{list_name}_symbols")()}
+    await getattr(global_settings, f"{action}_whitelist_symbol")(symbol)
+    logger.info(f"Symbol '{symbol}' whitelist {action} via mini app (admin={user['_id']})")
+    await _reapply_after(request, f"whitelist {action}")
+    return {"whitelist": global_settings.get_whitelist_symbols()}
+
+
+async def _change_blacklist(request: Request, user: dict, symbol: str, add: bool) -> Dict[str, list]:
+    """Чорний список особистий: монета зникає лише з торгівлі цього користувача.
+    Чорний список адміна — ще й спільний: монета прибирається з пулу для всіх."""
+    session = require_sessions(request).get(user["_id"])
+    if session is None:
+        raise HTTPException(status_code=409, detail={"code": "no_session", "message": "Подключите API-ключи BingX"})
+    action = "add" if add else "remove"
+    await getattr(session.settings_manager, f"{action}_blacklist_symbol")(symbol)
+    if user.get("role") == "admin":
+        await getattr(require_global_settings(request), f"{action}_blacklist_symbol")(symbol)
+        await _reapply_after(request, f"blacklist {action}")
+    logger.info(f"Symbol '{symbol}' blacklist {action} via mini app (user={user['_id']})")
+    return {"blacklist": session.settings_manager.get_blacklist_symbols()}
 
 
 @router.post("/whitelist")
 async def add_symbol_to_whitelist(
     request: Request,
     payload: Dict[str, Any] = Body(...),
-    user: dict = Depends(require_telegram_user),
+    user: dict = Depends(require_admin),
 ):
-    """Примусово додає монету в торгівлю — вона потрапить у підписку при
-    найближчому apply(), навіть якщо за об'ємом не входить у топ."""
-    return await _change_list(request, user, _symbol_from_payload(payload), "whitelist", add=True)
+    """Примусово додає монету в спільний пул при найближчому apply()."""
+    return await _change_whitelist(request, user, _symbol_from_payload(payload), add=True)
 
 
 @router.delete("/whitelist/{symbol}")
-async def remove_symbol_from_whitelist(
-    symbol: str,
-    request: Request,
-    user: dict = Depends(require_telegram_user),
-):
-    return await _change_list(request, user, symbol.strip().upper(), "whitelist", add=False)
+async def remove_symbol_from_whitelist(symbol: str, request: Request, user: dict = Depends(require_admin)):
+    return await _change_whitelist(request, user, symbol.strip().upper(), add=False)
 
 
 @router.post("/blacklist")
 async def add_symbol_to_blacklist(
     request: Request,
     payload: Dict[str, Any] = Body(...),
-    user: dict = Depends(require_telegram_user),
+    user: dict = Depends(require_user),
 ):
-    return await _change_list(request, user, _symbol_from_payload(payload), "blacklist", add=True)
+    return await _change_blacklist(request, user, _symbol_from_payload(payload), add=True)
 
 
 @router.delete("/blacklist/{symbol}")
-async def remove_symbol_from_blacklist(
-    symbol: str,
-    request: Request,
-    user: dict = Depends(require_telegram_user),
-):
-    """Монета знову стає кандидатом при наступному select() — потрапить у
-    підписку, лише якщо реально пройде фільтри об'єму/спреду."""
-    return await _change_list(request, user, symbol.strip().upper(), "blacklist", add=False)
+async def remove_symbol_from_blacklist(symbol: str, request: Request, user: dict = Depends(require_user)):
+    return await _change_blacklist(request, user, symbol.strip().upper(), add=False)

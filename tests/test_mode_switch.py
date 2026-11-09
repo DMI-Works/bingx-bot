@@ -83,44 +83,57 @@ class _Request:
 
 
 class TestModeEndpoint(unittest.IsolatedAsyncioTestCase):
+    """Режим у кожного свій: перемикання перезапускає лише сесію цього користувача."""
+
     def setUp(self):
         from webapp.backend.routes import settings as settings_route
         self.route = settings_route
+        self.user = {"_id": "1", "testnet": True}
+        self.users = mock.MagicMock()
+        self.users.has_keys.return_value = True
+        self.sessions = mock.MagicMock()
+        self.sessions.start_user = mock.AsyncMock(return_value=object())
+        self.session = _State()
+        self.session.trader = _State()
+        self.session.trader.open_positions = {}
+        self.sessions.get.return_value = self.session
+        self.req = _Request(users=self.users, sessions=self.sessions)
 
     async def test_blocked_when_open_positions(self):
-        trader = _State(); trader.open_positions = {"BTC-USDT_LONG": object()}
-        req = _Request(testnet=True, trader=trader,
-                       restart_event=asyncio.Event(), db=_State())
+        self.session.trader.open_positions = {"BTC-USDT_LONG": object()}
         with self.assertRaises(HTTPException) as ctx:
-            await self.route.set_mode(req, {"testnet": False}, user={})
+            await self.route.set_mode(self.req, {"testnet": False}, user=self.user)
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.detail["open_positions"], 1)
-        self.assertFalse(req.app.state.restart_event.is_set())
+        self.sessions.start_user.assert_not_awaited()
 
     async def test_noop_same_mode(self):
-        req = _Request(testnet=True)
-        res = await self.route.set_mode(req, {"testnet": True}, user={})
+        res = await self.route.set_mode(self.req, {"testnet": True}, user=self.user)
         self.assertFalse(res["restarting"])
+        self.sessions.start_user.assert_not_awaited()
 
-    async def test_success_sets_restart_event(self):
-        trader = _State(); trader.open_positions = {}
-        db = _State(); db.client = mock.MagicMock()
-        ev = asyncio.Event()
-        req = _Request(testnet=True, trader=trader, restart_event=ev, db=db)
-        res = await self.route.set_mode(req, {"testnet": False}, user={})
+    async def test_no_keys_for_target_mode(self):
+        self.users.has_keys.return_value = False
+        with self.assertRaises(HTTPException) as ctx:
+            await self.route.set_mode(self.req, {"testnet": False}, user=self.user)
+        self.assertEqual(ctx.exception.detail["code"], "no_keys")
+
+    async def test_success_restarts_only_this_user(self):
+        res = await self.route.set_mode(self.req, {"testnet": False}, user=self.user)
         self.assertTrue(res["restarting"])
-        self.assertFalse(res["testnet"])
-        self.assertTrue(ev.is_set())
-        db.client.__getitem__.assert_called()  # save_mode_override звернувся до БД
+        self.users.set_testnet.assert_called_once_with("1", False)
+        self.sessions.start_user.assert_awaited_once_with("1")
+
+    async def test_failed_start_rolls_back_mode(self):
+        self.sessions.start_user = mock.AsyncMock(side_effect=[None, object()])
+        with self.assertRaises(HTTPException):
+            await self.route.set_mode(self.req, {"testnet": False}, user=self.user)
+        self.users.set_testnet.assert_called_with("1", True)
 
     async def test_force_bypasses_open_positions(self):
-        trader = _State(); trader.open_positions = {"X_LONG": object()}
-        db = _State(); db.client = mock.MagicMock()
-        ev = asyncio.Event()
-        req = _Request(testnet=False, trader=trader, restart_event=ev, db=db)
-        res = await self.route.set_mode(req, {"testnet": True, "force": True}, user={})
+        self.session.trader.open_positions = {"X_LONG": object()}
+        res = await self.route.set_mode(self.req, {"testnet": False, "force": True}, user=self.user)
         self.assertTrue(res["restarting"])
-        self.assertTrue(ev.is_set())
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@ export default function CoinsTab() {
   // только уже подписанные. Именно отсюда можно принудительно добавить
   // монету в торговлю (whitelist), даже если бот её сам ещё не выбрал.
   const [candidates, setCandidates] = useState(null);
+  // Общий пул монет меняет только администратор
+  const [canEditPool, setCanEditPool] = useState(false);
   const [candidatesError, setCandidatesError] = useState(null);
   const [busyCandidate, setBusyCandidate] = useState(null);
   const [showAllCandidates, setShowAllCandidates] = useState(false);
@@ -28,7 +30,7 @@ export default function CoinsTab() {
 
   const loadCandidates = () => {
     apiGet("/symbols/candidates?limit=50")
-      .then((data) => setCandidates(data.candidates))
+      .then((data) => { setCandidates(data.candidates); setCanEditPool(!!data.can_edit_pool); })
       .catch((e) => setCandidatesError(e.message));
   };
 
@@ -171,7 +173,7 @@ export default function CoinsTab() {
                     </div>
                   </div>
                   {inTrading ? (
-                    c.whitelisted ? (
+                    c.whitelisted && canEditPool ? (
                       <button
                         className="icon-btn"
                         disabled={busyCandidate === c.symbol}
@@ -185,7 +187,7 @@ export default function CoinsTab() {
                         <Check size={15} />
                       </div>
                     )
-                  ) : (
+                  ) : canEditPool ? (
                     <button
                       className="icon-btn icon-btn-success"
                       disabled={busyCandidate === c.symbol}
@@ -194,7 +196,7 @@ export default function CoinsTab() {
                     >
                       <TrendingUp size={15} />
                     </button>
-                  )}
+                  ) : null}
                 </div>
               );
             })}

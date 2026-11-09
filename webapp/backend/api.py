@@ -1,9 +1,9 @@
 """
 Ruflo Mini App backend.
 
-Своєї БД і свого exchange-клієнта не відкриває: використовує ті самі живі
-об'єкти бота (Database, BingXClient, SettingsManager, ...), які main.py
-кладе в app.state при старті (див. секцію "Mini App" в main.py).
+Своєї БД і свого exchange-клієнта не відкриває: спільні об'єкти (users,
+sessions, пул монет, параметри стратегій) main.py кладе в app.state, а дані
+рахунку беруться із сесії авторизованого користувача (див. deps.py).
 Ендпоінти — у routes/, залежності від app.state — у deps.py.
 """
 
@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .routes import analytics, profile, settings, symbols, trades
+from .routes import account, admin, analytics, profile, settings, symbols, trades
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -21,9 +21,11 @@ app = FastAPI(title="Ruflo Mini App API")
 
 # Опційні: якщо main.py їх не проставить (webapp.enabled=False, тести),
 # відповідні ендпоінти відповідатимуть 503, решта API працює.
-app.state.db = None
-app.state.exchange_client = None
-app.state.settings_manager = None
+app.state.users = None
+app.state.mongo_client = None
+app.state.sessions = None
+app.state.market_exchange = None
+app.state.global_settings = None
 app.state.strategy_settings = None
 app.state.strategy_manager = None
 app.state.symbol_selector = None
@@ -36,7 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for module in (trades, analytics, profile, settings, symbols):
+for module in (account, admin, trades, analytics, profile, settings, symbols):
     app.include_router(module.router)
 
 # Зібраний фронт (npm run build кладе файли в static/) — монтується

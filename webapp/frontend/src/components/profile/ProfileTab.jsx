@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
-import { LogOut, Repeat } from "lucide-react";
+import { KeyRound, LogOut, Repeat } from "lucide-react";
 import { apiGet, apiPost, tg } from "../../lib/api";
 import { fmtUsd, fmtUsdPlain, initialsOf } from "../../lib/format";
 import { Spinner } from "../common";
+import ConnectKeys from "../account/ConnectKeys";
 
 // Подтверждение: в Telegram — нативное окно, вне его (локальная разработка) — window.confirm.
 function confirmAsync(message) {
@@ -20,6 +21,8 @@ export default function ProfileTab() {
   // Состояние смены режима: idle | switching; switchMsg — что показать пользователю.
   const [switching, setSwitching] = useState(false);
   const [switchMsg, setSwitchMsg] = useState(null);
+  // null — форма скрыта; иначе режим, для которого подключаем ключи
+  const [keysFor, setKeysFor] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,9 +36,9 @@ export default function ProfileTab() {
   async function postMode(target, force) {
     const res = await apiPost("/settings/mode", { testnet: target, force });
     if (!res.restarting) return; // уже в этом режиме
-    // Бот штатно перезапускается в этом же процессе (~10-20с): /api/* на это
-    // время могут отвечать 503. Опрашиваем /profile, пока режим не сменится.
-    setSwitchMsg(`Перезапуск бота в режим ${target ? "Testnet" : "Live"}…`);
+    // Перезапускается только сессия этого пользователя; бэкенд уже переключён,
+    // опрашиваем /profile, пока баланс нового режима не станет доступен.
+    setSwitchMsg(`Переключение счёта в режим ${target ? "Testnet" : "Live"}…`);
     for (let i = 0; i < 40; i++) {
       await sleep(1500);
       try {
@@ -56,8 +59,8 @@ export default function ProfileTab() {
     if (!profile || switching) return;
     const target = !profile.testnet; // куда переключаемся
     const warn = target
-      ? "Переключить в TESTNET? Бот перезапустится и начнёт торговать на тестовой бирже (виртуальные средства)."
-      : "⚠️ Переключить в LIVE (РЕАЛЬНЫЕ ДЕНЬГИ)? Бот перезапустится и начнёт торговать на реальном счёте.";
+      ? "Переключить ваш счёт в TESTNET? Бот начнёт торговать на тестовой бирже (виртуальные средства)."
+      : "⚠️ Переключить ваш счёт в LIVE (РЕАЛЬНЫЕ ДЕНЬГИ)? Бот начнёт торговать на реальном счёте.";
     if (!(await confirmAsync(warn))) return;
 
     setSwitching(true);
@@ -66,7 +69,9 @@ export default function ProfileTab() {
     try {
       await postMode(target, false);
     } catch (e) {
-      if (e.status === 409) {
+      if (e.detail?.code === "no_keys") {
+        setKeysFor({ testnet: target });
+      } else if (e.status === 409) {
         const n = e.detail?.open_positions ?? "?";
         const ok = await confirmAsync(
           `Есть ${n} открытых позиций. Они останутся в текущей базе без сопровождения SL/TP до возврата в этот режим. Переключить принудительно?`
@@ -147,6 +152,19 @@ export default function ProfileTab() {
                 : `Переключить в ${profile.testnet ? "Live" : "Testnet"}`}
             </button>
             {switchMsg && <div className="row-sub" style={{ marginTop: 8 }}>{switchMsg}</div>}
+            <button
+              className="secondary-btn"
+              onClick={() => setKeysFor(keysFor ? null : { testnet: profile.testnet })}
+            >
+              <KeyRound size={16} />
+              {keysFor ? "Скрыть" : "Обновить API-ключ"}
+            </button>
+            {keysFor && (
+              <ConnectKeys
+                testnet={keysFor.testnet}
+                onDone={() => window.location.reload()}
+              />
+            )}
           </>
         )}
       </div>

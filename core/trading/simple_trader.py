@@ -67,10 +67,14 @@ class SimpleTrader:
         # приходить раніше — без цього набору його записувало як «ручну»
         # позицію-дубль, яка після закриття угоди ботом висіла у відкритих.
         self._pending_opens: set = set()
+        # (symbol, strategy) -> час закриття: пауза перед повторним входом
+        # (reentry_cooldown_seconds у сигналі) рахується окремо для користувача
+        self._last_close_at: dict = {}
 
         self.event_bus.subscribe(EventType.SIGNAL_GENERATED, self._handle_signal)
         self.event_bus.subscribe(EventType.ORDER_FILLED, self._handle_order_update)
         self.event_bus.subscribe(EventType.HANDLE_ACCOUNT_INFO_UPDATE, self._handle_account_update)
+        self.event_bus.subscribe(EventType.POSITION_CLOSED, self._remember_close)
 
         # Відновлюємо активні позиції з БД при старті (переживають рестарт бота)
         self._restore_open_positions()
@@ -140,6 +144,24 @@ class SimpleTrader:
         if signal.get('action') != 'OPEN':
             return
 
+        cooldown = signal.get('reentry_cooldown_seconds')
+        if cooldown:
+            closed_at = self._last_close_at.get((signal.get('symbol'), signal.get('strategy')), 0.0)
+            if time.time() - closed_at < cooldown:
+                logger.info(
+                    f"[{signal.get('symbol')}] {signal.get('strategy')}: повторний вхід пропущено — "
+                    f"пауза після закриття ({cooldown:g}с)"
+                )
+                return
+            if closed_at and isinstance(signal.get('analytics_context'), dict):
+                signal = {
+                    **signal,
+                    'analytics_context': {
+                        **signal['analytics_context'],
+                        'seconds_since_prev_close': time.time() - closed_at,
+                    },
+                }
+
         # Kill-switch гейтить ЛИШЕ відкриття нових позицій — супровід уже
         # відкритих (SL/TP/trailing) від нього не залежить.
         if self.settings_manager is not None and not self.settings_manager.get_trading_enabled():
@@ -164,6 +186,11 @@ class SimpleTrader:
             # під фактичну ціну виконання ринкового ордера
             reference_price=signal.get('reference_price')
         )
+
+    async def _remember_close(self, event: Event) -> None:
+        data = event.data or {}
+        if data.get('symbol') and data.get('strategy'):
+            self._last_close_at[(data['symbol'], data['strategy'])] = time.time()
 
     def _strategy_side(self, symbol: str, strategy: str) -> Optional[str]:
         for side in ('LONG', 'SHORT'):
@@ -204,6 +231,10 @@ class SimpleTrader:
             return
 
         if desired is None or target.get('stop_loss_price') is None:
+            return
+        if target.get('no_open'):
+            # входи заборонені (стратегію вимкнено / доступ закінчився) —
+            # закриття по розвороту вище все одно спрацювало б
             return
         await self._handle_signal(Event(
             type=EventType.SIGNAL_GENERATED,

@@ -1,10 +1,11 @@
 """
-Залежності ендпоінтів: живі об'єкти бота з app.state (їх проставляє main.py)
-і Telegram-авторизація мутуючих запитів. Якщо об'єкта ще немає (бот не
-стартував або webapp запущено окремо) — 503, решта API працює далі.
+Залежності ендпоінтів. Кожен запит авторизується через Telegram initData
+(require_user), усі дані рахунку беруться із сесії ЦЬОГО користувача
+(require_session), спільні налаштування бота змінює лише адмін (require_admin).
+Спільні об'єкти (app.state) проставляє main.py; якщо їх ще немає — 503.
 """
 
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 from .auth import validate_init_data
 
@@ -16,16 +17,20 @@ def _require_state(request: Request, attr: str, detail: str):
     return value
 
 
-def require_db(request: Request):
-    return _require_state(request, "db", "Backend not ready yet")
+def require_users(request: Request):
+    return _require_state(request, "users", "Backend not ready yet")
 
 
-def require_exchange(request: Request):
-    return _require_state(request, "exchange_client", "Exchange client not ready")
+def require_sessions(request: Request):
+    return _require_state(request, "sessions", "Backend not ready yet")
 
 
-def require_settings_manager(request: Request):
-    return _require_state(request, "settings_manager", "Settings manager not ready yet")
+def require_market_exchange(request: Request):
+    return _require_state(request, "market_exchange", "Exchange client not ready")
+
+
+def require_global_settings(request: Request):
+    return _require_state(request, "global_settings", "Settings manager not ready yet")
 
 
 def require_strategy_settings(request: Request):
@@ -36,17 +41,27 @@ def require_symbol_selector(request: Request):
     return _require_state(request, "symbol_selector", "Symbol selector not ready yet")
 
 
-def require_trader(request: Request):
-    return _require_state(request, "trader", "Trader not ready yet")
-
-
-def require_restart_event(request: Request):
-    # Подія штатного перезапуску (зміна режиму). Є лише коли бот піднятий main.py.
-    return _require_state(request, "restart_event", "Bot supervisor not running")
-
-
-def require_telegram_user(x_telegram_init_data: str = Header(default="")) -> dict:
-    user = validate_init_data(x_telegram_init_data)
-    if user is None:
+def require_user(request: Request, x_telegram_init_data: str = Header(default="")) -> dict:
+    """Документ користувача; при першому вході створюється."""
+    tg_user = validate_init_data(x_telegram_init_data)
+    if tg_user is None or not tg_user.get("id"):
         raise HTTPException(status_code=401, detail="Invalid Telegram init data")
+    return require_users(request).ensure_user(tg_user)
+
+
+def require_session(request: Request, user: dict = Depends(require_user)):
+    """Торгова сесія користувача. Немає (ключі не підключено) — 409 no_session,
+    Mini App показує екран підключення ключів."""
+    session = require_sessions(request).get(user["_id"])
+    if session is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "no_session", "message": "Подключите API-ключи BingX"},
+        )
+    return session
+
+
+def require_admin(user: dict = Depends(require_user)) -> dict:
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для администратора")
     return user
