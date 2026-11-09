@@ -25,6 +25,13 @@ class FakeSettingsDb:
 
 
 class TestSettingsRoundTrip(unittest.IsolatedAsyncioTestCase):
+    async def test_max_open_positions_survives_restart(self):
+        db = FakeSettingsDb()
+        manager = SettingsManager(db, EventBus())
+        self.assertIsNone(manager.get_max_open_positions())
+        await manager.set_max_open_positions(5)
+        self.assertEqual(SettingsManager(db, EventBus()).get_max_open_positions(), 5)
+
     async def test_disabled_trading_survives_restart(self):
         db = FakeSettingsDb()
         await SettingsManager(db, EventBus()).set_trading_enabled(False)
@@ -59,6 +66,37 @@ class TestSettingsRoundTrip(unittest.IsolatedAsyncioTestCase):
         await manager.remove_blacklist_symbol('BTC-USDT')
         await manager.remove_blacklist_symbol('BTC-USDT')
         self.assertEqual(SettingsManager(db, EventBus()).get_blacklist_symbols(), [])
+
+
+class TestMaxOpenPositionsOverride(unittest.IsolatedAsyncioTestCase):
+    async def _risk_manager(self, open_count):
+        from unittest import mock
+        from core.risk import RiskManager
+        settings = SettingsManager(FakeSettingsDb(), EventBus())
+        rm = RiskManager(db=None, event_bus=EventBus(), exchange=mock.MagicMock(),
+                         config={'max_open_positions': 3, 'max_consecutive_losses': 0},
+                         settings_manager=settings)
+        rm._get_real_open_positions = mock.AsyncMock(
+            return_value=[{'symbol': f'C{i}-USDT'} for i in range(open_count)]
+        )
+        return rm, settings
+
+    async def test_yaml_value_without_override(self):
+        rm, _ = await self._risk_manager(3)
+        self.assertEqual(rm.effective_max_open_positions(), 3)
+        self.assertFalse((await rm.can_open_position('BTC-USDT'))[0])
+
+    async def test_raised_limit_allows_entry(self):
+        rm, settings = await self._risk_manager(3)
+        await settings.set_max_open_positions(5)
+        self.assertTrue((await rm.can_open_position('BTC-USDT'))[0])
+
+    async def test_lowered_limit_blocks_entry(self):
+        rm, settings = await self._risk_manager(1)
+        await settings.set_max_open_positions(1)
+        ok, reason = await rm.can_open_position('BTC-USDT')
+        self.assertFalse(ok)
+        self.assertIn('1', reason)
 
 
 if __name__ == "__main__":

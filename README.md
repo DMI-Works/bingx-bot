@@ -201,6 +201,7 @@ return {
 `RiskManager` (`trading.risk`) действует для всего аккаунта и всех стратегий:
 
 - `max_open_positions`, `max_positions_per_symbol`, `max_total_risk_percent` — лимиты позиций и общего риска.
+- Лимит одновременных позиций меняется в Mini App (Настройки → Торговля, `trading.max_open_positions` в `settings`). Значение из Mini App важнее `max_open_positions` из YAML и действует на следующие входы.
 - `use_risk_based_sizing` + `risk_per_trade_percent` — размер позиции = `equity × risk% / |entry − stop|` (по умолчанию выключено).
 - `max_margin_percent_per_trade` — потолок маржи одной сделки для сигналов с `risk_percent`, чтобы узкий стоп не раздувал позицию.
 - Минимальная маржа сделки (`trading.min_margin_usdt` в коллекции `settings`, по умолчанию 10 USDT) задаётся в Mini App (Настройки → Торговля). Если стратегия посчитала маржу меньше, объём увеличивается до этой суммы. Действует для всех стратегий и важнее `max_margin_percent_per_trade`. 0 — выключено.

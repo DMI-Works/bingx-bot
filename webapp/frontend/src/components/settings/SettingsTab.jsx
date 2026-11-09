@@ -64,6 +64,14 @@ export default function SettingsTab() {
             onToggle={toggleTrading}
           />
           <RiskNumberRow
+            field="max_open_positions"
+            title="Максимум открытых позиций"
+            sub="Сколько сделок может быть открыто одновременно. Новые входы блокируются, пока число позиций на бирже не станет меньше. Уже открытые не закрываются. От 1 до 50."
+            value={settings?.max_open_positions}
+            format={(v) => String(v)}
+            onSaved={saveRisk}
+          />
+          <RiskNumberRow
             field="min_margin_usdt"
             title="Минимальная маржа сделки, USDT"
             sub="Если стратегия посчитала маржу меньше — объём увеличивается до этой суммы (для всех стратегий). Реальный риск сделки может быть выше risk% стратегии. 0 — выключено."

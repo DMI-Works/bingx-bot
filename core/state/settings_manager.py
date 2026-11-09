@@ -14,6 +14,7 @@ BLACKLIST_KEY = 'trading.blacklist_symbols'
 EMERGENCY_KEY = 'emergency'
 MIN_MARGIN_KEY = 'trading.min_margin_usdt'
 MAX_STOP_ROI_KEY = 'trading.max_stop_roi_percent'
+MAX_OPEN_POSITIONS_KEY = 'trading.max_open_positions'
 
 # Мінімальна маржа однієї угоди (USDT), якщо в Mongo ще нічого не записано.
 DEFAULT_MIN_MARGIN_USDT = 10.0
@@ -21,6 +22,8 @@ DEFAULT_MIN_MARGIN_USDT = 10.0
 # мінус maintenance margin, тож стоп має стояти помітно раніше.
 DEFAULT_MAX_STOP_ROI_PERCENT = 70.0
 MAX_STOP_ROI_LIMIT = 90.0
+# Верхня межа ліміту одночасних позицій із мініаппу (захист від опечатки)
+MAX_OPEN_POSITIONS_LIMIT = 50
 
 _LEGACY_BOOLS = {'True': True, 'False': False}
 
@@ -104,6 +107,14 @@ class SettingsManager:
 
     async def set_max_stop_roi_percent(self, value: float) -> None:
         await self.set(MAX_STOP_ROI_KEY, float(value))
+
+    def get_max_open_positions(self):
+        """Ліміт одночасних позицій із мініаппу або None (діє значення з config.yaml)."""
+        value = self.get(MAX_OPEN_POSITIONS_KEY)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+    async def set_max_open_positions(self, value: int) -> None:
+        await self.set(MAX_OPEN_POSITIONS_KEY, int(value))
 
     # ---------- whitelist / blacklist монет (мініапп «Монети») ----------
 
