@@ -11,7 +11,7 @@ from core.exchange.errors import BingXAPIError
 from core.users import SecretsKeyMissing, public_view
 from core.users.access import can_open_new
 
-from ..deps import require_sessions, require_user, require_users
+from ..deps import require_billing, require_sessions, require_user, require_users
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,11 @@ def _me(request: Request, user: dict) -> Dict[str, Any]:
 @router.get("/api/me")
 def get_me(request: Request, user: dict = Depends(require_user)):
     return _me(request, user)
+
+
+@router.get("/api/billing")
+def get_billing(request: Request, user: dict = Depends(require_user)):
+    return require_billing(request).user_status(user)
 
 
 def _key_field(payload: Dict[str, Any], name: str) -> str:

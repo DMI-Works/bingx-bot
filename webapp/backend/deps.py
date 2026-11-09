@@ -25,6 +25,10 @@ def require_sessions(request: Request):
     return _require_state(request, "sessions", "Backend not ready yet")
 
 
+def require_billing(request: Request):
+    return _require_state(request, "billing", "Backend not ready yet")
+
+
 def require_market_exchange(request: Request):
     return _require_state(request, "market_exchange", "Exchange client not ready")
 

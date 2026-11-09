@@ -28,9 +28,8 @@ TRIAL_DAYS = 7
 
 
 def admin_telegram_id() -> Optional[str]:
-    """Адмін — ADMIN_TELEGRAM_ID, а якщо не задано — TELEGRAM_CHAT_ID (власник,
-    якому бот і раніше слав усі повідомлення)."""
-    value = os.getenv("ADMIN_TELEGRAM_ID") or os.getenv("TELEGRAM_CHAT_ID")
+    """Адмін — особистий Telegram id з ADMIN_TELEGRAM_ID (усі сповіщення йдуть в особисті)."""
+    value = os.getenv("ADMIN_TELEGRAM_ID")
     return str(value).strip() if value else None
 
 

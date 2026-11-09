@@ -3,7 +3,7 @@
 (SL, фіксація прибутку, закриття по розвороту) працює завжди — чужі гроші
 без захисту не кидаємо.
 
-Сюди ж підключиться підписка (етап «Подписка»): неоплачений рахунок -> False.
+Неоплачений рахунок підписки (core/billing) теж забороняє нові входи.
 """
 
 from __future__ import annotations
@@ -16,4 +16,6 @@ def can_open_new(user: Optional[dict]) -> Tuple[bool, str]:
         return False, "користувача не знайдено"
     if user.get("status") != "active":
         return False, "акаунт заблоковано"
+    if user.get("role") != "admin" and (user.get("billing") or {}).get("unpaid"):
+        return False, "є неоплачений рахунок"
     return True, ""

@@ -14,8 +14,9 @@ One process serves many users. `main.py` builds one shared market layer (live `B
 
 - Users are in the `users` collection of the base DB (`core/users/`). `_id` is the Telegram user id; API keys are Fernet-encrypted with env `SECRETS_KEY`; each user has their own `testnet` mode.
 - `Database(testnet, user_id, client)` wraps collections in `ScopedDatabase` (`core/database/scoped.py`), which adds `user_id` to every filter, insert and aggregate. Strategy params (`strategy_settings`) are shared and use `db.raw`. Shared pool whitelist/blacklist use `user_id="__global__"`.
-- `core/users/migration.py` runs at startup and assigns legacy rows to the admin (`ADMIN_TELEGRAM_ID`, else `TELEGRAM_CHAT_ID`).
+- `core/users/migration.py` runs at startup and assigns legacy rows to the admin (`ADMIN_TELEGRAM_ID`, the admin's personal Telegram id; it is skipped when unset).
 - Webapp: every endpoint depends on `require_user`/`require_session` (the caller's data only) or `require_admin` (strategy params, shared coin pool).
+- Billing (`core/billing`): `BillingService` runs hourly, closes each user's 7-day periods after the trial and writes `invoices` (base DB). Fee is % of net live PnL with loss carry-over (`calculator.py`). `users.billing.unpaid` blocks new entries through `can_open_new`; call `sessions.refresh_user` after changing it. Settlement is manual for now; automatic BingX collection should end in `mark_paid(method='bingx')`.
 - Strategies must not read positions of an account. TsMomentum publishes `action: 'TARGET'` signals and each `SimpleTrader._handle_target` reconciles its own positions; `no_open` blocks entries but still lets flips close.
 
 ## Commands
@@ -39,7 +40,7 @@ No linter or formatter is configured. Deployment is the multi-stage `Dockerfile`
 
 ## Environment
 
-`.env` (see `.env.example`): `BINGX_API_KEY`, `BINGX_API_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `WEBAPP_URL`, `MONGO_URI`, `MONGO_DB_NAME`, `SECRETS_KEY` (required), `ADMIN_TELEGRAM_ID`.
+`.env` (see `.env.example`): `BINGX_API_KEY`, `BINGX_API_SECRET`, `TELEGRAM_BOT_TOKEN`, `WEBAPP_URL`, `MONGO_URI`, `MONGO_DB_NAME`, `SECRETS_KEY` (required), `ADMIN_TELEGRAM_ID`.
 
 - `core/database/mongo_config.py` checks `MONGO_URI` **at import time** and raises if it is missing. Anything that imports `core.risk`, `core.trading` or `core.database` needs it set. Tests do `os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")` before importing and never open a real connection. Copy that pattern in new tests.
 - The DB name gets the suffix `_testnet` in testnet mode, so testnet and live data sit in separate databases. `trade_analytics` rows also carry a `mode` field. The mode is per user (`users.testnet`, new users start on testnet) and switching it from the Mini App (`POST /api/settings/mode`) restarts only that user's session. `Database(testnet=...)` carries the mode per instance (`self.db_name`, `self.trade_mode`); the module-level `IS_TESTNET`/`MONGO_DB_NAME`/`TRADE_MODE` remain config-default constants for tests/scripts.

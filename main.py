@@ -14,6 +14,7 @@ import uvicorn
 from pymongo import MongoClient
 
 from config import ConfigLoader
+from core.billing import BillingService
 from core.database import Database, StrategySettingsStore
 from core.database.mongo_config import MONGO_URI
 from core.engine import SessionManager
@@ -93,7 +94,7 @@ async def run_bot(config: ConfigLoader) -> None:
     if admin_id:
         migrate_legacy(mongo_client, admin_id, default_testnet=config.get('exchange.testnet', True))
     else:
-        logger.warning("ADMIN_TELEGRAM_ID/TELEGRAM_CHAT_ID не задано — адміна немає, міграцію пропущено")
+        logger.warning("ADMIN_TELEGRAM_ID не задано — адміна немає, міграцію пропущено")
     users = UsersRepository(mongo_client)
 
     # Спільні (адмінські) дані: параметри стратегій (strategy_settings, live-база)
@@ -201,6 +202,13 @@ async def run_bot(config: ConfigLoader) -> None:
 
     await sessions.start_all()
 
+    billing = BillingService(
+        users, mongo_client, sessions=sessions,
+        notify=telegram_gateway.send_to if telegram_gateway is not None else None,
+    )
+    await billing.start()
+    logger.info("[OK] Billing started")
+
     if config.get('exchange.websocket.enabled', True):
         await market.start_websocket()
         logger.info("[OK] Market WebSocket connected")
@@ -222,6 +230,7 @@ async def run_bot(config: ConfigLoader) -> None:
         state.users = users
         state.sessions = sessions
         state.mongo_client = mongo_client
+        state.billing = billing
         state.market_exchange = market
         state.global_settings = global_settings
         state.strategy_settings = strategy_settings
@@ -254,6 +263,7 @@ async def run_bot(config: ConfigLoader) -> None:
     for selector in (symbol_selector, trend_symbol_selector, tsmom_symbol_selector):
         if selector is not None:
             await selector.stop_refresh_loop()
+    await billing.stop()
     await sessions.stop_all()
     if telegram_gateway is not None:
         await telegram_gateway.stop()

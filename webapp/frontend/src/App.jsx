@@ -57,6 +57,9 @@ export default function App() {
 
   return (
     <div className="app-root">
+      {!me.can_open && (
+        <div className="error-banner">Новые сделки остановлены: {me.can_open_reason}. Открытые позиции сопровождаются.</div>
+      )}
       <ActiveTab />
 
       <nav className="tabbar">

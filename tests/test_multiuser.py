@@ -278,7 +278,7 @@ class TestEveryEndpointRequiresAuth(unittest.TestCase):
             if not path.startswith("/api"):
                 continue
             url = path.replace("{name}", "X").replace("{symbol}", "X").replace("{order_id}", "X")
-            url = url.replace("{user_id}", "X")
+            url = url.replace("{user_id}", "X").replace("{invoice_id}", "X")
             for method in route.methods - {"HEAD", "OPTIONS"}:
                 query = "?testnet=true" if path == "/api/account/keys" and method == "DELETE" else ""
                 body = {"json": {}} if method == "POST" else {}
@@ -286,6 +286,17 @@ class TestEveryEndpointRequiresAuth(unittest.TestCase):
                 self.assertEqual(response.status_code, 401, f"{method} {path} -> {response.status_code}")
                 checked += 1
         self.assertGreater(checked, 15)
+
+
+class TestAdminId(unittest.TestCase):
+    def test_admin_only_from_admin_telegram_id(self):
+        from core.users.repository import admin_telegram_id
+
+        with mock.patch.dict(os.environ, {"TELEGRAM_CHAT_ID": "-100"}, clear=False):
+            os.environ.pop("ADMIN_TELEGRAM_ID", None)
+            self.assertIsNone(admin_telegram_id())
+            os.environ["ADMIN_TELEGRAM_ID"] = " 42 "
+            self.assertEqual(admin_telegram_id(), "42")
 
 
 if __name__ == "__main__":

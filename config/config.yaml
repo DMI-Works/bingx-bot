@@ -221,9 +221,9 @@ logging:
   backup_count: 5
 
 # Telegram Configuration
-# bot_token / chat_id сюда НЕ выносятся — main.py читает их напрямую из
-# TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID в .env (как и с ключами BingX),
-# дублирующие поля в YAML реально не читались.
+# bot_token сюда НЕ выносится — main.py читает его напрямую из
+# TELEGRAM_BOT_TOKEN в .env (как и с ключами BingX). Сообщения уходят
+# в личку: chat id = Telegram user id пользователя.
 telegram:
   enabled: true
   # notifications.* тут раніше був, але TelegramBot ніколи його не читав

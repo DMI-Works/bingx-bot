@@ -23,6 +23,7 @@ app = FastAPI(title="Ruflo Mini App API")
 # відповідні ендпоінти відповідатимуть 503, решта API працює.
 app.state.users = None
 app.state.mongo_client = None
+app.state.billing = None
 app.state.sessions = None
 app.state.market_exchange = None
 app.state.global_settings = None

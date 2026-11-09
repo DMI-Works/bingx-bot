@@ -4,6 +4,7 @@ import { apiGet, apiPost, tg } from "../../lib/api";
 import { fmtUsd, fmtUsdPlain, initialsOf } from "../../lib/format";
 import { Spinner } from "../common";
 import ConnectKeys from "../account/ConnectKeys";
+import BillingSection from "./BillingSection";
 
 // Подтверждение: в Telegram — нативное окно, вне его (локальная разработка) — window.confirm.
 function confirmAsync(message) {
@@ -168,6 +169,8 @@ export default function ProfileTab() {
           </>
         )}
       </div>
+
+      <BillingSection />
 
       <div className="section">
         <div className="section-head">
