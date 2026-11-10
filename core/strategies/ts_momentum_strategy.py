@@ -7,7 +7,8 @@ vol-target дало +16%/год, Sharpe 0.64, плюс во всех трёх т
 риск-премия с УМЕРЕННЫМ ожиданием, не «грааль»: Sharpe скромный, доходность по
 третям затухает (компрессия трендов с 2024).
 
-Логика (раз в сутки на закрытии дневной свечи, только по закрытым свечам):
+Логика (на закрытии дневной свечи и повторно каждые recheck_interval_minutes,
+только по закрытым свечам):
   1. Сигнал = знак доходности за lookback_days: mom = close[-1]/close[-1-L]-1.
        desired = LONG если mom>0, SHORT если mom<0 (long_short), либо FLAT вместо
        SHORT (long_flat).
@@ -82,6 +83,14 @@ class TsMomentumStrategy(BaseStrategy):
         # моментума вход через несколько часов ничего не меняет, поэтому сутки:
         # иначе рестарт после 01:00 UTC пропускал целый день (было 3600).
         'max_signal_age_seconds': 86400,
+        # повторная сверка внутри дня (сигнал тот же — по закрытым свечам): после
+        # стопа/трейлинга монета снова может войти, а не ждёт следующих суток
+        # или рестарта. 0 = сверка только раз в сутки.
+        'recheck_interval_minutes': 60,
+        # пауза нового входа по монете после закрытия по безубытку или в минус
+        # (прибыльное закрытие паузы не даёт; считает трейдер каждого
+        # пользователя, см. SimpleTrader._handle_target). 0 = без паузы.
+        'reentry_pause_minutes': 30,
     }
 
     def __init__(self, event_bus: EventBus, config: dict, bingx_client=None):
@@ -97,6 +106,7 @@ class TsMomentumStrategy(BaseStrategy):
             self._params = self._parse_params(self.DEFAULT_PARAMS)
 
         self._last_bucket: Dict[str, int] = {}
+        self._last_check_at: Dict[str, float] = {}
         self._last_price: Dict[str, float] = {}
         self._inflight: Set[str] = set()
         self._retry_after: Dict[str, float] = {}
@@ -145,7 +155,8 @@ class TsMomentumStrategy(BaseStrategy):
                 raise ValueError(f"{key} must be > 0, got {p[key]!r}")
             p[key] = float(p[key])
 
-        for key in ('trail_breakeven_roi', 'trail_start_roi', 'trail_gap_roi'):
+        for key in ('trail_breakeven_roi', 'trail_start_roi', 'trail_gap_roi', 'recheck_interval_minutes',
+                    'reentry_pause_minutes'):
             if isinstance(p[key], bool) or not isinstance(p[key], (int, float)) or float(p[key]) < 0:
                 raise ValueError(f"{key} must be >= 0, got {p[key]!r}")
             p[key] = float(p[key])
@@ -242,7 +253,9 @@ class TsMomentumStrategy(BaseStrategy):
         bucket = int(time.time() * 1000) // tf_ms
         previous_bucket = self._last_bucket.get(symbol)
 
-        if bucket == previous_bucket or symbol in self._inflight:
+        if symbol in self._inflight:
+            return None
+        if bucket == previous_bucket and not self._recheck_due(symbol):
             return None
         if time.time() < self._retry_after.get(symbol, 0.0):
             return None
@@ -253,12 +266,20 @@ class TsMomentumStrategy(BaseStrategy):
         # не сработать вовсе). Сверка идемпотентна: позиция в нужной стороне
         # уже есть -> HOLD, так что повторная проверка ничего не открывает.
         self._last_bucket[symbol] = bucket
+        self._last_check_at[symbol] = time.time()
 
         self._inflight.add(symbol)
         task = asyncio.create_task(self._evaluate(symbol, bucket, previous_bucket, tf_ms))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return None
+
+    def _recheck_due(self, symbol: str) -> bool:
+        minutes = self._params['recheck_interval_minutes']
+        if minutes <= 0:
+            return False
+        return time.time() - self._last_check_at.get(symbol, 0.0) >= minutes * 60
+
 
     async def _evaluate(self, symbol: str, bucket: int, previous_bucket: int, tf_ms: int) -> None:
         retry_seconds: Optional[float] = None
@@ -305,6 +326,7 @@ class TsMomentumStrategy(BaseStrategy):
                         self._last_bucket.pop(symbol, None)
                     else:
                         self._last_bucket[symbol] = previous_bucket
+                    self._last_check_at.pop(symbol, None)
                     self._retry_after[symbol] = time.time() + retry_seconds
             self._inflight.discard(symbol)
 
@@ -353,6 +375,7 @@ class TsMomentumStrategy(BaseStrategy):
             'trail_meta': self._trail_meta(),
             'momentum_pct': mom * 100.0,
             'refresh_only': False,
+            'reentry_pause_minutes': p['reentry_pause_minutes'],
         }
         if desired is None:
             logger.info(f"[{symbol}] TsMomentum TARGET flat: mom({p['lookback_days']}d)={mom*100:+.2f}%")

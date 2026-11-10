@@ -97,6 +97,46 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
         event = s.event_bus._queue.get_nowait()
         self.assertEqual(event.data['side'], 'LONG')
 
+    async def _tick(self, s):
+        import asyncio
+        await s.analyze('BTC-USDT', 139.0)
+        await asyncio.gather(*list(s._tasks))
+
+    async def test_no_recheck_before_interval(self):
+        s = _strategy([100 + i for i in range(40)])
+        await self._tick(s)
+        await self._tick(s)
+        self.assertEqual(s.bingx_client.klines_calls, 1)
+
+    async def test_recheck_enters_after_interval_without_restart(self):
+        # регресія 10.11: після стопу монета чекала наступної доби або редеплою
+        s = _strategy([100 + i for i in range(40)])
+        await self._tick(s)
+        s.event_bus._queue.get_nowait()
+        s._last_check_at['BTC-USDT'] -= 3601
+        await self._tick(s)
+        self.assertEqual(s.bingx_client.klines_calls, 2)
+        target = s.event_bus._queue.get_nowait().data
+        self.assertEqual((target['action'], target['side']), ('TARGET', 'LONG'))
+        self.assertEqual(target['reentry_pause_minutes'], 30)
+
+    async def test_recheck_can_be_disabled(self):
+        s = _strategy([100 + i for i in range(40)])
+        s._params['recheck_interval_minutes'] = 0.0
+        await self._tick(s)
+        s._last_check_at['BTC-USDT'] -= 86400
+        await self._tick(s)
+        self.assertEqual(s.bingx_client.klines_calls, 1)
+
+    async def test_failed_recheck_is_retried(self):
+        s = _strategy([100 + i for i in range(40)])
+        await self._tick(s)
+        s._last_check_at['BTC-USDT'] -= 3601
+        s._reconcile = mock.AsyncMock(side_effect=RuntimeError('boom'))
+        await self._tick(s)
+        self.assertNotIn('BTC-USDT', s._last_check_at)
+        self.assertGreater(s._retry_after['BTC-USDT'], 0)
+
     async def test_open_long_on_positive_momentum(self):
         # зростаючий ряд -> mom>0 -> LONG; позиції немає -> OPEN
         closes = [100 + i for i in range(40)]
@@ -141,7 +181,48 @@ class TestTraderTargetReconcile(unittest.IsolatedAsyncioTestCase):
         trader._handle_signal_open = None
         trader.open_position = mock.AsyncMock(return_value=True)
         trader.settings_manager = None
+        trader._last_close_at = {}
+        trader._loss_close_at = {}
         return trader
+
+    async def _closed(self, trader, net_pnl, roe, strategy='TsMomentumStrategy'):
+        from core.events import Event, EventType
+        await trader._remember_close(Event(type=EventType.POSITION_CLOSED, data={
+            'symbol': 'BTC-USDT', 'strategy': strategy, 'net_pnl': net_pnl, 'roe_percent': roe,
+        }))
+
+    async def test_pause_after_loss_and_breakeven_only(self):
+        for net_pnl, roe, paused in [(-1.0, -10.0, True), (0.05, 1.5, True), (-0.03, 0.7, True), (1.2, 12.0, False)]:
+            trader = self._trader({})
+            await self._closed(trader, net_pnl, roe)
+            await trader._handle_target(self._target('LONG', reentry_pause_minutes=30))
+            self.assertEqual(trader.open_position.await_count, 0 if paused else 1, (net_pnl, roe))
+
+    async def test_pause_expires(self):
+        import time
+        trader = self._trader({})
+        await self._closed(trader, -1.0, -10.0)
+        trader._loss_close_at[('BTC-USDT', 'TsMomentumStrategy')] = time.time() - 1801
+        await trader._handle_target(self._target('LONG', reentry_pause_minutes=30))
+        trader.open_position.assert_awaited_once()
+
+    async def test_pause_is_per_strategy_and_can_be_disabled(self):
+        trader = self._trader({})
+        await self._closed(trader, -1.0, -10.0, strategy='WallBreakoutStrategy')
+        await trader._handle_target(self._target('LONG', reentry_pause_minutes=30))
+        trader.open_position.assert_awaited_once()
+        trader = self._trader({})
+        await self._closed(trader, -1.0, -10.0)
+        await trader._handle_target(self._target('LONG', reentry_pause_minutes=0))
+        trader.open_position.assert_awaited_once()
+
+    async def test_pause_does_not_block_flip_close(self):
+        from core.common.position_math import position_key
+        pos = {'strategy': 'TsMomentumStrategy', 'side': 'SHORT', 'order_id': 'o1'}
+        trader = self._trader({position_key('BTC-USDT', 'SHORT'): pos})
+        await self._closed(trader, -1.0, -10.0)
+        await trader._handle_target(self._target('LONG', reentry_pause_minutes=30))
+        trader.close_position.assert_awaited_once()
 
     def _target(self, side, **extra):
         return {'action': 'TARGET', 'symbol': 'BTC-USDT', 'side': side, 'strategy': 'TsMomentumStrategy',
@@ -247,8 +328,8 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(candidates[0][2], 103.0)
 
     async def test_no_loop_when_stop_already_at_breakeven(self):
-        # регресія 06.11: стоп на безубитку (8.179171 = 0.99999...% ROI) при
-        # цілі 1.0% переставлявся на кожен тік — 10 000 переносів і повідомлень
+        # регресія 06.11: стоп на безубитку (0.99999...% ROI при цілі 1.0%)
+        # переставлявся на кожен тік — 10 000 переносів і повідомлень
         from core.risk.trailing_stop_manager import TrailingStopManager
         from core.risk.trailing_state import TrailState
         tsm = TrailingStopManager.__new__(TrailingStopManager)
@@ -256,7 +337,7 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
         tsm._retry_after = {}
         tsm.move_retry_cooldown_seconds = 10
         position = {'symbol': 'AVAX-USDT', 'side': 'LONG', 'entry_price': 8.171, 'leverage': 10,
-                    'stop_loss_price': 8.179170999999998, 'sl_order_id': 'sl1', 'trail_meta': dict(self.META)}
+                    'stop_loss_price': 8.187341999999999, 'sl_order_id': 'sl1', 'trail_meta': dict(self.META)}
         tsm.trader = mock.MagicMock()
         tsm.trader.open_positions = {'k': position}
         tsm._move_stop_loss = mock.AsyncMock(return_value=1)
@@ -264,6 +345,25 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
         for price in (8.30, 8.31, 8.32):  # ROI ~16-18%: безубиток досягнуто, трейлінг ще ні
             await tsm._process_roi_gap_position('k', position, state, price, 10.0)
         tsm._move_stop_loss.assert_not_awaited()
+
+    async def test_breakeven_stop_has_slippage_reserve(self):
+        from core.risk.trailing_stop_manager import TrailingStopManager
+        from core.risk.trailing_state import TrailState
+        for old_stop in (88.0, 100.1):  # початковий стоп і старий безубиток +1% ROI
+            tsm = TrailingStopManager.__new__(TrailingStopManager)
+            tsm.taker_fee_rate = 0.0005
+            tsm._retry_after = {}
+            tsm.move_retry_cooldown_seconds = 10
+            position = {'symbol': 'BTC-USDT', 'side': 'LONG', 'entry_price': 100.0, 'leverage': 10,
+                        'stop_loss_price': old_stop, 'sl_order_id': 'sl1', 'trail_meta': dict(self.META)}
+            tsm.trader = mock.MagicMock()
+            tsm.trader.open_positions = {'k': position}
+            tsm._move_stop_loss = mock.AsyncMock(return_value=1)
+            # ціна 101.5 при 10x = +15% ROI: безубиток досягнуто, трейлінг ще ні
+            await tsm._process_roi_gap_position('k', position, TrailState(), 101.5, 10.0)
+            _, target_roi, target_price = tsm._move_stop_loss.call_args.args[3][0]
+            self.assertAlmostEqual(target_roi, 2.0)
+            self.assertAlmostEqual(target_price, 100.2)
 
     async def test_cooldown_between_moves(self):
         from core.risk.trailing_stop_manager import TrailingStopManager

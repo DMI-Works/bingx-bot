@@ -27,6 +27,10 @@ from .protective_orders import ProtectiveOrderPlacer
 
 logger = logging.getLogger(__name__)
 
+# закриття з ROE (до комісій) не вище цього — «по безубитку»: стоп безубитку
+# стоїть близько +2% ROI, а трейлінг фіксує від +10%
+_BREAKEVEN_CLOSE_MAX_ROE = 5.0
+
 # тип закриваючого ордера -> close_reason у trade_analytics
 _CLOSE_REASON_BY_ORDER_TYPE = {
     'STOP_MARKET': 'stop_loss',
@@ -75,6 +79,8 @@ class SimpleTrader:
         self.event_bus.subscribe(EventType.ORDER_FILLED, self._handle_order_update)
         self.event_bus.subscribe(EventType.HANDLE_ACCOUNT_INFO_UPDATE, self._handle_account_update)
         self.event_bus.subscribe(EventType.POSITION_CLOSED, self._remember_close)
+        # (symbol, strategy) -> час закриття в мінус або по безубитку
+        self._loss_close_at: dict = {}
 
         # Відновлюємо активні позиції з БД при старті (переживають рестарт бота)
         self._restore_open_positions()
@@ -190,7 +196,13 @@ class SimpleTrader:
     async def _remember_close(self, event: Event) -> None:
         data = event.data or {}
         if data.get('symbol') and data.get('strategy'):
-            self._last_close_at[(data['symbol'], data['strategy'])] = time.time()
+            key = (data['symbol'], data['strategy'])
+            self._last_close_at[key] = time.time()
+            net_pnl, roe = data.get('net_pnl'), data.get('roe_percent')
+            if (net_pnl is not None and net_pnl <= 0) or (roe is not None and roe <= _BREAKEVEN_CLOSE_MAX_ROE):
+                self._loss_close_at[key] = time.time()
+            else:
+                self._loss_close_at.pop(key, None)
 
     def _strategy_side(self, symbol: str, strategy: str) -> Optional[str]:
         for side in ('LONG', 'SHORT'):
@@ -236,6 +248,13 @@ class SimpleTrader:
             # входи заборонені (стратегію вимкнено / доступ закінчився) —
             # закриття по розвороту вище все одно спрацювало б
             return
+        pause_minutes = target.get('reentry_pause_minutes') or 0
+        closed_at = self._loss_close_at.get((symbol, strategy))
+        if pause_minutes > 0 and closed_at is not None:
+            left = closed_at + pause_minutes * 60 - time.time()
+            if left > 0:
+                logger.info(f"[{symbol}] {strategy}: вхід {desired} на паузі ще {left / 60:.0f} хв")
+                return
         await self._handle_signal(Event(
             type=EventType.SIGNAL_GENERATED,
             data={**target, 'action': 'OPEN'},

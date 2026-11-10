@@ -170,6 +170,7 @@ class TestReentryPerUser(unittest.IsolatedAsyncioTestCase):
         trader = st.SimpleTrader.__new__(st.SimpleTrader)
         trader.settings_manager = None
         trader._last_close_at = {}
+        trader._loss_close_at = {}
         trader.open_position = mock.AsyncMock(return_value=True)
         signal = {
             "action": "OPEN", "symbol": "KAIA-USDT", "side": "LONG", "strategy": "W", "quantity": 1,
