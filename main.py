@@ -1,6 +1,8 @@
 import os
+import signal
 import sys
 import asyncio
+import contextlib
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -65,6 +67,18 @@ def setup_logging(config: ConfigLoader) -> None:
 
     logger = logging.getLogger(__name__)
     logger.info("Logging initialized")
+
+
+class WebAppServer(uvicorn.Server):
+    """uvicorn перехоплював SIGTERM і зупиняв лише веб-сервер, а бот працював
+    далі (редеплой доходив до примусового SIGKILL). Сигнали обробляє run_bot."""
+
+    def install_signal_handlers(self) -> None:
+        pass
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield
 
 
 async def main():
@@ -239,7 +253,9 @@ async def run_bot(config: ConfigLoader) -> None:
         state.signal_tracker = signal_activity_tracker
 
         port = int(os.getenv('PORT', config.get('webapp.port', 8000)))
-        webapp_server = uvicorn.Server(uvicorn.Config(webapp_app, host='0.0.0.0', port=port, log_level='warning'))
+        webapp_server = WebAppServer(uvicorn.Config(
+            webapp_app, host='0.0.0.0', port=port, log_level='warning', timeout_graceful_shutdown=5,
+        ))
         webapp_task = asyncio.create_task(webapp_server.serve())
         logger.info(f"[OK] Web App API started on port {port}")
 
@@ -250,12 +266,14 @@ async def run_bot(config: ConfigLoader) -> None:
             f"Стратегій увімкнено: {sum(1 for s in strategies if getattr(s, 'enabled', False))}/{len(strategies)}"
         ))
 
+    stop_requested = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop_requested.set)
+
     logger.info("Ruflo Trading Bot is running")
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        logger.info("Shutdown signal received")
+    await stop_requested.wait()
+    logger.info("Shutdown signal received")
 
     if webapp_server:
         webapp_server.should_exit = True

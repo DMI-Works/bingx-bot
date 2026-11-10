@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Bell, Power, KeyRound } from "lucide-react";
+import { Power, KeyRound } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api";
 import { EmptyRow, ToggleRow, LinkRow } from "../common";
 import StrategyCard from "./StrategyCard";
@@ -104,17 +104,6 @@ export default function SettingsTab() {
           ))}
         </div>
       )}
-
-      <div className="section">
-        <div className="section-head">
-          <span className="section-title">Уведомления</span>
-        </div>
-        <div className="list">
-          <ToggleRow icon={Bell} title="Открытие / закрытие позиций" defaultOn />
-          <ToggleRow icon={Bell} title="Срабатывание SL / TP" defaultOn />
-          <ToggleRow icon={Bell} title="Ошибки и сбои" defaultOn />
-        </div>
-      </div>
 
       <div className="section">
         <div className="section-head">
