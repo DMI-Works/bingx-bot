@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 @register_strategy('WallBreakoutStrategy')
 class WallBreakoutStrategy(BaseStrategy):
     DEFAULT_PARAMS: Dict[str, object] = {
-        'position_size': 100,
+        'position_size': 200,
         'leverage': 20,
-        'stop_loss_percent': 20,  
+        'stop_loss_percent': 15,  
         'cooldown_seconds': 10,
         # Пауза на новий вхід у ту саму монету після ЗАКРИТТЯ угоди по ній.
         # Тестнет 09-14.10: повторні входи <15 хв після попередньої угоди —
@@ -46,7 +46,7 @@ class WallBreakoutStrategy(BaseStrategy):
         # Пороги трейлинг-стопа в % ROI. Сами стратегией не используются —
         # их читает TrailingStopManager (см. StrategyManager.subscribe_params
         # и main.py). Единственный источник значения: здесь + БД/мини-апп.
-        'trail_levels_percent': [10, 16, 32, 64, 120, 200, 250, 300, 350, 400],
+        'trail_levels_percent': [6, 10, 20, 32, 64, 120, 200, 250, 300, 350, 400],
     }
 
     def __init__(self, event_bus: EventBus, config: dict):

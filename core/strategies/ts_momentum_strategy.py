@@ -61,7 +61,7 @@ _TICKERS_TTL_SECONDS = 900.0
 class TsMomentumStrategy(BaseStrategy):
     DEFAULT_PARAMS: Dict[str, object] = {
         'leverage': 10,                      # потолок плеча (vol-target ограничен им)
-        'risk_per_trade_percent': 1.0,       # % equity на сделку (vol-target)
+        'risk_per_trade_percent': 2.0,       # % equity на сделку (vol-target)
         'timeframe': '1d',
         'lookback_days': 60,                 # окно моментума (лучшее по бэктесту)
         'mode': 'long_short',                # 'long_short' | 'long_flat'

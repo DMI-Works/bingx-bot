@@ -65,7 +65,7 @@ class TrendSupertrendStrategy(BaseStrategy):
     DEFAULT_PARAMS: Dict[str, object] = {
         'leverage': 10,
         # % від equity, який ризикуємо на угоду (SimpleTrader -> RiskManager)
-        'risk_per_trade_percent': 1.0,
+        'risk_per_trade_percent': 2.0,
         'trend_timeframe': '1h',
         'entry_timeframe': '15m',
         'ema_period': 200,

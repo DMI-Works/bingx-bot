@@ -147,7 +147,7 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(sig.get('take_profit_levels'))
         self.assertLess(sig['stop_loss_price'], sig['reference_price'])  # SL нижче для LONG
         self.assertEqual(sig['leverage'], 10)
-        self.assertEqual(sig['risk_percent'], 1.0)
+        self.assertEqual(sig['risk_percent'], 2.0)
         self.assertIsNone(sig['quantity'])
 
     async def test_open_short_on_negative_momentum(self):

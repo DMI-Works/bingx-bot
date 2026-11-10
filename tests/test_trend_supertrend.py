@@ -151,7 +151,7 @@ class TestStrategySignal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(signal['action'], 'OPEN')
         self.assertEqual(signal['side'], 'LONG')
         self.assertIsNone(signal['quantity'])                 # рахує SimpleTrader по risk_percent
-        self.assertEqual(signal['risk_percent'], 1.0)
+        self.assertEqual(signal['risk_percent'], 2.0)
         self.assertNotIn('take_profit_levels', signal)         # БЕЗ тейк-профіту
         meta = signal['trail_meta']
         self.assertEqual(meta['mode'], 'atr_3step')
