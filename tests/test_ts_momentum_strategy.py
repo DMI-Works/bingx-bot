@@ -101,6 +101,91 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
         event = s.event_bus._queue.get_nowait()
         self.assertEqual(event.data['side'], 'LONG')
 
+    async def _tick(self, s):
+        import asyncio
+        await s.analyze('BTC-USDT', 139.0)
+        await asyncio.gather(*list(s._tasks))
+
+    async def test_no_recheck_before_interval(self):
+        s = _strategy([100 + i for i in range(40)], position_for=lambda sym, side: None)
+        await self._tick(s)
+        await self._tick(s)
+        self.assertEqual(s.bingx_client.klines_calls, 1)
+
+    async def test_recheck_enters_after_interval_without_restart(self):
+        # регресія 10.11: після стопу монета чекала наступної доби або редеплою
+        s = _strategy([100 + i for i in range(40)], position_for=lambda sym, side: None)
+        await self._tick(s)
+        s.event_bus._queue.get_nowait()
+        s._last_check_at['BTC-USDT'] -= 3601
+        await self._tick(s)
+        self.assertEqual(s.bingx_client.klines_calls, 2)
+        self.assertEqual(s.event_bus._queue.get_nowait().data['side'], 'LONG')
+
+    async def test_recheck_holds_existing_position(self):
+        pos = {'strategy': 'TsMomentumStrategy'}
+        s = _strategy([100 + i for i in range(40)], position_for=lambda sym, side: pos if side == 'LONG' else None)
+        await self._tick(s)
+        s._last_check_at['BTC-USDT'] -= 3601
+        await self._tick(s)
+        self.assertEqual(s.bingx_client.klines_calls, 2)
+        self.assertTrue(s.event_bus._queue.empty())
+
+    async def test_recheck_can_be_disabled(self):
+        s = _strategy([100 + i for i in range(40)], position_for=lambda sym, side: None)
+        s._params['recheck_interval_minutes'] = 0.0
+        await self._tick(s)
+        s._last_check_at['BTC-USDT'] -= 86400
+        await self._tick(s)
+        self.assertEqual(s.bingx_client.klines_calls, 1)
+
+    async def test_failed_recheck_is_retried(self):
+        s = _strategy([100 + i for i in range(40)], position_for=lambda sym, side: None)
+        await self._tick(s)
+        s._last_check_at['BTC-USDT'] -= 3601
+        s._reconcile = mock.AsyncMock(side_effect=RuntimeError('boom'))
+        await self._tick(s)
+        self.assertNotIn('BTC-USDT', s._last_check_at)
+        self.assertGreater(s._retry_after['BTC-USDT'], 0)
+
+    async def _close(self, s, net_pnl, roe, strategy='TsMomentumStrategy'):
+        from core.events import Event, EventType
+        await s._on_position_closed(Event(type=EventType.POSITION_CLOSED, data={
+            'symbol': 'BTC-USDT', 'strategy': strategy, 'net_pnl': net_pnl, 'roe_percent': roe,
+        }))
+
+    async def test_pause_after_loss_and_breakeven_only(self):
+        cases = [(-1.0, -10.0, True), (0.05, 1.5, True), (-0.03, 0.7, True), (1.2, 12.0, False)]
+        for net_pnl, roe, paused in cases:
+            s = _strategy([100 + i for i in range(40)], position_for=lambda sym, side: None)
+            await self._close(s, net_pnl, roe)
+            self.assertEqual('BTC-USDT' in s._reentry_pause_until, paused, (net_pnl, roe))
+
+    async def test_pause_ignores_other_strategies(self):
+        s = _strategy([100 + i for i in range(40)], position_for=lambda sym, side: None)
+        await self._close(s, -1.0, -10.0, strategy='WallBreakoutStrategy')
+        self.assertEqual(s._reentry_pause_until, {})
+
+    async def test_pause_blocks_entry_then_checks_at_expiry(self):
+        s = _strategy([100 + i for i in range(40)], position_for=lambda sym, side: None)
+        await self._close(s, -1.0, -10.0)
+        await self._tick(s)  # вхід заблоковано паузою
+        self.assertTrue(s.event_bus._queue.empty())
+        s._reentry_pause_until['BTC-USDT'] -= 1801  # пауза минула; часовий круг ще ні
+        await self._tick(s)
+        self.assertEqual(s.bingx_client.klines_calls, 2)
+        self.assertEqual(s.event_bus._queue.get_nowait().data['side'], 'LONG')
+        self.assertEqual(s._reentry_pause_until, {})
+
+    async def test_pause_does_not_block_flip_close(self):
+        closer = mock.AsyncMock()
+        pos = {'strategy': 'TsMomentumStrategy'}
+        s = _strategy([100 + i for i in range(40)],
+                      position_for=lambda sym, side: pos if side == 'SHORT' else None, closer=closer)
+        await self._close(s, -1.0, -10.0)
+        await self._tick(s)
+        closer.assert_awaited_once()
+
     async def test_open_long_on_positive_momentum(self):
         # зростаючий ряд -> mom>0 -> LONG; позиції немає -> OPEN
         closes = [100 + i for i in range(40)]

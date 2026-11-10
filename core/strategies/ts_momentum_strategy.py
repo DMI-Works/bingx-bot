@@ -7,7 +7,8 @@ vol-target дало +16%/год, Sharpe 0.64, плюс во всех трёх т
 риск-премия с УМЕРЕННЫМ ожиданием, не «грааль»: Sharpe скромный, доходность по
 третям затухает (компрессия трендов с 2024).
 
-Логика (раз в сутки на закрытии дневной свечи, только по закрытым свечам):
+Логика (на закрытии дневной свечи и повторно каждые recheck_interval_minutes,
+только по закрытым свечам):
   1. Сигнал = знак доходности за lookback_days: mom = close[-1]/close[-1-L]-1.
        desired = LONG если mom>0, SHORT если mom<0 (long_short), либо FLAT вместо
        SHORT (long_flat).
@@ -52,6 +53,9 @@ _MAX_NOT_READY_ATTEMPTS = 5
 _NOT_READY_RETRY_SECONDS = 3.0
 _ERROR_RETRY_SECONDS = 10.0
 _TICKERS_TTL_SECONDS = 900.0
+# закриття з ROE (до комісій) не вище цього — «по безубитку»: стоп безубитку
+# стоїть близько +2% ROI, а трейлінг фіксує від +10%
+_BREAKEVEN_CLOSE_MAX_ROE = 5.0
 
 
 @register_strategy('TsMomentumStrategy')
@@ -80,6 +84,13 @@ class TsMomentumStrategy(BaseStrategy):
         # моментума вход через несколько часов ничего не меняет, поэтому сутки:
         # иначе рестарт после 01:00 UTC пропускал целый день (было 3600).
         'max_signal_age_seconds': 86400,
+        # повторная сверка внутри дня (сигнал тот же — по закрытым свечам): после
+        # стопа/трейлинга монета снова может войти, а не ждёт следующих суток
+        # или рестарта. 0 = сверка только раз в сутки.
+        'recheck_interval_minutes': 60,
+        # пауза нового входа по монете после закрытия по безубытку или в минус
+        # (прибыльное закрытие паузы не даёт). 0 = без паузы.
+        'reentry_pause_minutes': 30,
     }
 
     def __init__(self, event_bus: EventBus, config: dict, bingx_client=None):
@@ -95,6 +106,8 @@ class TsMomentumStrategy(BaseStrategy):
             self._params = self._parse_params(self.DEFAULT_PARAMS)
 
         self._last_bucket: Dict[str, int] = {}
+        self._last_check_at: Dict[str, float] = {}
+        self._reentry_pause_until: Dict[str, float] = {}
         self._last_price: Dict[str, float] = {}
         self._inflight: Set[str] = set()
         self._retry_after: Dict[str, float] = {}
@@ -107,6 +120,7 @@ class TsMomentumStrategy(BaseStrategy):
         self._tasks: Set[asyncio.Task] = set()
         self._klines_semaphore = asyncio.Semaphore(3)
         self._warned_no_client = False
+        self.event_bus.subscribe(EventType.POSITION_CLOSED, self._on_position_closed)
 
         # Набор символов СВОЕГО стабильного пула (см. main.py).
         self._symbol_pool_provider: Optional[Callable[[], Set[str]]] = None
@@ -144,7 +158,8 @@ class TsMomentumStrategy(BaseStrategy):
                 raise ValueError(f"{key} must be > 0, got {p[key]!r}")
             p[key] = float(p[key])
 
-        for key in ('trail_breakeven_roi', 'trail_start_roi', 'trail_gap_roi'):
+        for key in ('trail_breakeven_roi', 'trail_start_roi', 'trail_gap_roi', 'recheck_interval_minutes',
+                    'reentry_pause_minutes'):
             if isinstance(p[key], bool) or not isinstance(p[key], (int, float)) or float(p[key]) < 0:
                 raise ValueError(f"{key} must be >= 0, got {p[key]!r}")
             p[key] = float(p[key])
@@ -253,7 +268,9 @@ class TsMomentumStrategy(BaseStrategy):
         bucket = int(time.time() * 1000) // tf_ms
         previous_bucket = self._last_bucket.get(symbol)
 
-        if bucket == previous_bucket or symbol in self._inflight:
+        if symbol in self._inflight:
+            return None
+        if bucket == previous_bucket and not self._recheck_due(symbol):
             return None
         if time.time() < self._retry_after.get(symbol, 0.0):
             return None
@@ -264,12 +281,38 @@ class TsMomentumStrategy(BaseStrategy):
         # не сработать вовсе). Сверка идемпотентна: позиция в нужной стороне
         # уже есть -> HOLD, так что повторная проверка ничего не открывает.
         self._last_bucket[symbol] = bucket
+        self._last_check_at[symbol] = time.time()
 
         self._inflight.add(symbol)
         task = asyncio.create_task(self._evaluate(symbol, bucket, previous_bucket, tf_ms))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return None
+
+    def _recheck_due(self, symbol: str) -> bool:
+        minutes = self._params['recheck_interval_minutes']
+        if minutes <= 0:
+            return False
+        # пауза закончилась — проверяем сразу, а не на следующем часовом круге
+        until = self._reentry_pause_until.get(symbol)
+        if until is not None and time.time() >= until:
+            del self._reentry_pause_until[symbol]
+            return True
+        return time.time() - self._last_check_at.get(symbol, 0.0) >= minutes * 60
+
+    async def _on_position_closed(self, event: Event) -> None:
+        data = event.data
+        symbol = data.get('symbol')
+        minutes = self._params['reentry_pause_minutes']
+        if not symbol or data.get('strategy') != self.name or minutes <= 0:
+            return
+        net_pnl = data.get('net_pnl')
+        roe = data.get('roe_percent')
+        losing = net_pnl is not None and net_pnl <= 0
+        at_breakeven = roe is not None and roe <= _BREAKEVEN_CLOSE_MAX_ROE
+        if losing or at_breakeven:
+            self._reentry_pause_until[symbol] = time.time() + minutes * 60
+            logger.info(f"[{symbol}] TsMomentum: пауза входа {minutes:g} мин (net={net_pnl}, ROE={roe})")
 
     async def _evaluate(self, symbol: str, bucket: int, previous_bucket: int, tf_ms: int) -> None:
         retry_seconds: Optional[float] = None
@@ -316,6 +359,7 @@ class TsMomentumStrategy(BaseStrategy):
                         self._last_bucket.pop(symbol, None)
                     else:
                         self._last_bucket[symbol] = previous_bucket
+                    self._last_check_at.pop(symbol, None)
                     self._retry_after[symbol] = time.time() + retry_seconds
             self._inflight.discard(symbol)
 
@@ -385,7 +429,7 @@ class TsMomentumStrategy(BaseStrategy):
                     await self._close_callback(symbol, current, 'tsmom_flip')
                 except Exception:
                     logger.error(f"[{symbol}] TsMomentum: close_callback failed", exc_info=True)
-            return None  # противоположную откроем на следующей дневной сверке
+            return None  # противоположную откроем на следующей сверке
 
         # 2) уже в нужной стороне или нет сигнала -> ничего
         if current is not None and current == desired:
@@ -395,6 +439,11 @@ class TsMomentumStrategy(BaseStrategy):
                 f"[{symbol}] TsMomentum HOLD: mom({p['lookback_days']}d)={mom*100:+.2f}%, "
                 f"desired={desired}, current={current}"
             )
+            return None
+
+        pause_left = self._reentry_pause_until.get(symbol, 0.0) - time.time()
+        if pause_left > 0:
+            logger.info(f"[{symbol}] TsMomentum: вход {desired} на паузе ещё {pause_left / 60:.0f} мин")
             return None
 
         # 3) позиции нет, есть сигнал -> OPEN с vol-target сайзингом
