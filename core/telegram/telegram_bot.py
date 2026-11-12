@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -156,6 +157,14 @@ class TelegramBot:
         ))
 
 
+def versioned_webapp_url(url: str, version: int) -> str:
+    """Мітка версії в адресі Mini App (змінюється з кожним запуском бота):
+    Telegram бачить нову адресу і не бере стару сторінку з кешу."""
+    if not url:
+        return url
+    return f"{url}{'&' if '?' in url else '?'}v={version}"
+
+
 class TelegramGateway:
     """Єдиний бот Telegram на процес: polling, команди /start і /emergency.
     Команди діють для того, хто їх надіслав (сесія за Telegram user id)."""
@@ -163,7 +172,7 @@ class TelegramGateway:
     def __init__(self, token: str, session_lookup, admin_chat_id: Optional[str] = None,
                  shared_event_bus: Optional[EventBus] = None):
         self.token = token
-        self.webapp_url = os.getenv('WEBAPP_URL', '')
+        self.webapp_url = versioned_webapp_url(os.getenv('WEBAPP_URL', ''), int(time.time()))
         self.session_lookup = session_lookup  # user_id(str) -> UserSession | None
         self.admin_chat_id = admin_chat_id
         self.application: Optional[Application] = None

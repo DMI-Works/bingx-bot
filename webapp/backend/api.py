@@ -42,7 +42,20 @@ app.add_middleware(
 for module in (account, admin, trades, analytics, profile, settings, symbols):
     app.include_router(module.router)
 
+class MiniAppStaticFiles(StaticFiles):
+    """index.html не кешується: інакше Telegram показував стару версію Mini App
+    зі старими полями API. Файли в assets/ мають хеш у назві — їх кешуємо надовго."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if path.startswith("assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # Зібраний фронт (npm run build кладе файли в static/) — монтується
 # останнім, щоб "/" не перехоплював /api/*
 if STATIC_DIR.exists():
-    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+    app.mount("/", MiniAppStaticFiles(directory=STATIC_DIR, html=True), name="static")

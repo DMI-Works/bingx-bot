@@ -1,5 +1,6 @@
-"""/api/admin — список користувачів і блокування (лише адмін)."""
+"""/api/admin — список користувачів, картка користувача і блокування (лише адмін)."""
 
+import asyncio
 import logging
 from typing import Any, Dict
 
@@ -7,8 +8,11 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from core.common.market_data import extract_account_balance, filter_open_positions, to_float
 from core.database.mongo_config import db_name_for
 from core.users import public_view
+
+from ..services.user_stats import summarize_user_trades
 
 from ..deps import require_admin, require_billing, require_sessions, require_users
 
@@ -17,8 +21,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin")
 
 
+# запит до біржі для картки не повинен вішати адмінку
+_EXCHANGE_TIMEOUT_SECONDS = 8.0
+_STAT_FIELDS = {"net_pnl": 1, "realized_pnl": 1, "closed_at": 1, "commission_usdt": 1, "strategy": 1, "_id": 0}
+
+
 def _closed_pnl_by_user(client, testnet: bool) -> Dict[str, dict]:
-    rows = client[db_name_for(testnet)].positions.aggregate([
+    # trade_analytics — та сама історія, з якої рахується картка користувача
+    rows = client[db_name_for(testnet)].trade_analytics.aggregate([
         {"$match": {"status": "CLOSED", "user_id": {"$exists": True}}},
         {"$group": {
             "_id": "$user_id",
@@ -40,15 +50,85 @@ def list_users(request: Request, admin: dict = Depends(require_admin)):
     result = []
     for user in users.list_all():
         session = sessions.get(user["_id"])
+        current = (testnet if user.get("testnet", True) else live).get(user["_id"]) or {}
         result.append({
             **public_view(user),
             "session_active": session is not None,
             "open_positions": len(session.trader.open_positions) if session is not None else 0,
-            "live_net_pnl": round((live.get(user["_id"]) or {}).get("net_pnl") or 0.0, 2),
-            "live_trades": (live.get(user["_id"]) or {}).get("trades", 0),
-            "testnet_net_pnl": round((testnet.get(user["_id"]) or {}).get("net_pnl") or 0.0, 2),
+            # результат у поточному режимі користувача (testnet або live)
+            "net_pnl": round(current.get("net_pnl") or 0.0, 2),
+            "trades": current.get("trades", 0),
         })
     return {"users": result}
+
+
+async def _account_snapshot(session) -> dict:
+    """Баланс і відкриті позиції з біржі; при збої — те, що відомо боту."""
+    account = {"equity": None, "balance": None, "unrealized_pnl": None, "error": None}
+    live_positions = []
+    try:
+        balance = extract_account_balance(await asyncio.wait_for(
+            session.exchange.get_account_balance(), _EXCHANGE_TIMEOUT_SECONDS,
+        ))
+        if balance:
+            account.update({
+                "equity": to_float(balance.get("equity", 0)),
+                "balance": to_float(balance.get("balance", 0)),
+                "unrealized_pnl": to_float(balance.get("unrealizedProfit", 0)),
+            })
+        live_positions = filter_open_positions(await asyncio.wait_for(
+            session.exchange.get_positions(), _EXCHANGE_TIMEOUT_SECONDS,
+        ))
+    except Exception as e:
+        logger.warning(f"Admin card: exchange snapshot failed for {session.user_id}: {e}")
+        account["error"] = "Биржа не ответила"
+        if account["equity"] is None:
+            account["equity"] = getattr(session.risk_manager, "last_equity", None)
+
+    live_by_key = {(p.get("symbol"), p.get("positionSide")): p for p in live_positions}
+    positions = []
+    for pos in session.trader.open_positions.values():
+        live = live_by_key.get((pos.get("symbol"), pos.get("side")))
+        positions.append({
+            "symbol": pos.get("symbol"),
+            "side": pos.get("side"),
+            "strategy": pos.get("strategy"),
+            "leverage": pos.get("leverage"),
+            "entry_price": pos.get("entry_price"),
+            "mark_price": to_float(live.get("markPrice")) if live else None,
+            "pnl_usd": to_float(live.get("unrealizedProfit")) if live else None,
+        })
+    return {"account": account, "positions": positions}
+
+
+@router.get("/users/{user_id}")
+async def get_user_card(user_id: str, request: Request, admin: dict = Depends(require_admin)):
+    """Картка користувача: рахунок, результат, позиції, підписка, ключі."""
+    user = require_users(request).get(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    client = request.app.state.mongo_client
+    stats = {}
+    for mode, testnet in (("live", False), ("testnet", True)):
+        rows = client[db_name_for(testnet)].trade_analytics.find(
+            {"user_id": user_id, "status": "CLOSED"}, _STAT_FIELDS,
+        )
+        stats[mode] = summarize_user_trades(rows)
+
+    session = require_sessions(request).get(user_id)
+    snapshot = await _account_snapshot(session) if session is not None else {"account": None, "positions": []}
+    try:
+        billing = require_billing(request).user_status(user)
+    except HTTPException:
+        billing = None
+    return {
+        **public_view(user),
+        "session_active": session is not None,
+        "mode": "testnet" if user.get("testnet", True) else "live",
+        "stats": stats,
+        **snapshot,
+        "billing": billing,
+    }
 
 
 @router.post("/users/{user_id}/status")

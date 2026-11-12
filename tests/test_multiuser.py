@@ -328,6 +328,53 @@ class TestCoinsReadOnlyForUsers(unittest.TestCase):
             self.assertIn(require_admin, calls, route.path)
 
 
+class TestUserStats(unittest.TestCase):
+    def test_periods_winrate_and_strategies(self):
+        from datetime import datetime, timedelta
+        from webapp.backend.services.user_stats import summarize_user_trades
+        now = datetime(2026, 11, 12, 15, 0)
+        rows = [
+            {"net_pnl": 2.0, "closed_at": now - timedelta(hours=2), "commission_usdt": -0.1, "strategy": "A"},
+            {"net_pnl": -1.0, "closed_at": now - timedelta(days=3), "commission_usdt": -0.1, "strategy": "A"},
+            {"net_pnl": None, "realized_pnl": 4.0, "closed_at": now - timedelta(days=20), "strategy": "B"},
+            {"net_pnl": -0.5, "closed_at": now - timedelta(days=60), "strategy": "B"},
+        ]
+        s = summarize_user_trades(rows, now)
+        self.assertEqual((s["today"], s["d7"], s["d30"], s["net_pnl"]), (2.0, 1.0, 5.0, 4.5))
+        self.assertEqual((s["trades"], s["wins"], s["winrate"]), (4, 2, 50.0))
+        self.assertEqual((s["best"], s["worst"], s["fees"]), (4.0, -1.0, -0.2))
+        self.assertEqual(s["last_trade_at"], now - timedelta(hours=2))
+        self.assertEqual([x["strategy"] for x in s["by_strategy"]], ["B", "A"])
+
+    def test_no_trades(self):
+        from webapp.backend.services.user_stats import summarize_user_trades
+        s = summarize_user_trades([])
+        self.assertEqual((s["trades"], s["winrate"], s["net_pnl"], s["by_strategy"]), (0, None, 0.0, []))
+
+
+class TestMiniAppCache(unittest.IsolatedAsyncioTestCase):
+    def test_versioned_webapp_url(self):
+        from core.telegram.telegram_bot import versioned_webapp_url
+        self.assertEqual(versioned_webapp_url("https://x.app", 5), "https://x.app?v=5")
+        self.assertEqual(versioned_webapp_url("https://x.app/?a=1", 5), "https://x.app/?a=1&v=5")
+        self.assertEqual(versioned_webapp_url("", 5), "")
+
+    async def test_index_not_cached_assets_cached(self):
+        import tempfile
+        from pathlib import Path
+        from webapp.backend.api import MiniAppStaticFiles
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "assets").mkdir()
+            Path(tmp, "index.html").write_text("<html></html>")
+            Path(tmp, "assets", "app-1.js").write_text("1")
+            files = MiniAppStaticFiles(directory=tmp, html=True)
+            scope = {"type": "http", "method": "GET", "headers": [], "path": "/"}
+            index = await files.get_response(".", scope)
+            asset = await files.get_response("assets/app-1.js", scope)
+        self.assertEqual(index.headers["Cache-Control"], "no-cache")
+        self.assertIn("immutable", asset.headers["Cache-Control"])
+
+
 class TestAdminId(unittest.TestCase):
     def test_admin_only_from_admin_telegram_id(self):
         from core.users.repository import admin_telegram_id

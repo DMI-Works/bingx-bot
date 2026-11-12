@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Ban, Check, Gift } from "lucide-react";
+import { Check, Gift } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api";
-import { fmtDate, fmtUsd, fmtUsdPlain } from "../../lib/format";
+import { fmtDate, fmtUsdPlain } from "../../lib/format";
 import { EmptyRow, Spinner } from "../common";
 import RiskNumberRow from "../settings/RiskNumberRow";
+import UserCard from "./UserCard";
 
 export default function AdminTab() {
   const [users, setUsers] = useState(null);
@@ -88,40 +89,10 @@ export default function AdminTab() {
           {users && <span className="section-count">{users.length}</span>}
         </div>
         {!users && !error && <div className="hero-loading"><Spinner /></div>}
-        {users && (
-          <div className="list">
-            {!users.length && <EmptyRow text="Пока никого нет" />}
-            {users.map((u) => (
-              <div className="row" key={u.id}>
-                <div className="row-main">
-                  <div className="row-title-line">
-                    <span className="symbol">{u.username ? `@${u.username}` : (u.first_name || u.id)}</span>
-                    <span className={`mode-badge ${u.testnet ? "mode-testnet" : "mode-live"}`}>
-                      {u.testnet ? "Testnet" : "Live"}
-                    </span>
-                    {u.role === "admin" && <span className="tag tag-success">админ</span>}
-                    {u.status === "blocked" && <span className="tag tag-danger">заблокирован</span>}
-                  </div>
-                  <div className="row-sub">
-                    {u.session_active ? "торгует" : "нет сессии"}
-                    {"  ·  "}позиций {u.open_positions}
-                    {"  ·  "}live {fmtUsd(u.live_net_pnl)} ({u.live_trades})
-                  </div>
-                </div>
-                {u.role !== "admin" && (
-                  <button
-                    className={`icon-btn ${u.status === "active" ? "icon-btn-danger" : "icon-btn-success"}`}
-                    disabled={busyId === u.id}
-                    title={u.status === "active" ? "Заблокировать новые входы" : "Разблокировать"}
-                    onClick={() => toggleBlock(u)}
-                  >
-                    {u.status === "active" ? <Ban size={15} /> : <Check size={15} />}
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+        {users && !users.length && <div className="list"><EmptyRow text="Пока никого нет" /></div>}
+        {users?.map((u) => (
+          <UserCard key={u.id} user={u} busy={busyId === u.id} onToggleBlock={toggleBlock} />
+        ))}
       </div>
     </div>
   );
