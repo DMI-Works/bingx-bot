@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { apiPost } from "../../lib/api";
 
-// Числовая риск-настройка из /api/settings/risk (min_margin_usdt,
+// Числовая риск-настройка из /api/settings/risk (min/max_margin_usdt,
 // max_stop_roi_percent). Бэкенд валидирует диапазон и возвращает все значения.
 export default function RiskNumberRow({ field, title, sub, value, format, onSaved }) {
   const [editing, setEditing] = useState(false);

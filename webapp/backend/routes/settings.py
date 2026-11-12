@@ -97,6 +97,7 @@ def get_settings(request: Request, session=Depends(require_session)):
     return {
         "trading_enabled": settings_manager.get_trading_enabled(),
         "min_margin_usdt": settings_manager.get_min_margin_usdt(),
+        "max_margin_usdt": settings_manager.get_max_margin_usdt(),
         "max_stop_roi_percent": settings_manager.get_max_stop_roi_percent(),
         "max_open_positions": session.risk_manager.effective_max_open_positions(),
         "testnet": session.testnet,
@@ -164,7 +165,8 @@ async def set_trading_enabled(payload: Dict[str, Any] = Body(...), session=Depen
 @router.post("/risk")
 async def set_risk_settings(payload: Dict[str, Any] = Body(...), session=Depends(require_session)):
     """Глобальні ризик-налаштування угод (застосовуються до наступних входів
-    без рестарту): min_margin_usdt — мінімальна маржа (0 = вимкнено);
+    без рестарту): min_margin_usdt / max_margin_usdt — мінімальна і максимальна
+    маржа угоди (0 = вимкнено, мінімум не може бути більшим за максимум);
     max_stop_roi_percent — найбільший збиток на стопі в % ROI (1..90);
     max_open_positions — скільки позицій може бути відкрито одночасно."""
     settings_manager = session.settings_manager
@@ -175,13 +177,25 @@ async def set_risk_settings(payload: Dict[str, Any] = Body(...), session=Depends
             raise HTTPException(status_code=422, detail=f"'{key}' must be a number")
         return float(value)
 
-    if not {"min_margin_usdt", "max_stop_roi_percent", "max_open_positions"} & payload.keys():
+    if not {"min_margin_usdt", "max_margin_usdt", "max_stop_roi_percent", "max_open_positions"} & payload.keys():
         raise HTTPException(status_code=422, detail="nothing to update")
-    if "min_margin_usdt" in payload:
-        value = _number("min_margin_usdt")
-        if value < 0:
-            raise HTTPException(status_code=422, detail="'min_margin_usdt' must be >= 0")
-        await settings_manager.set_min_margin_usdt(value)
+    margins = {}
+    for key in ("min_margin_usdt", "max_margin_usdt"):
+        if key in payload:
+            margins[key] = _number(key)
+            if margins[key] < 0:
+                raise HTTPException(status_code=422, detail=f"'{key}' must be >= 0")
+    new_min = margins.get("min_margin_usdt", settings_manager.get_min_margin_usdt())
+    new_max = margins.get("max_margin_usdt", settings_manager.get_max_margin_usdt())
+    if new_min > 0 and new_max > 0 and new_min > new_max:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Минимальная маржа ({new_min:g}) больше максимальной ({new_max:g})",
+        )
+    if "min_margin_usdt" in margins:
+        await settings_manager.set_min_margin_usdt(margins["min_margin_usdt"])
+    if "max_margin_usdt" in margins:
+        await settings_manager.set_max_margin_usdt(margins["max_margin_usdt"])
     if "max_stop_roi_percent" in payload:
         value = _number("max_stop_roi_percent")
         if not 1 <= value <= MAX_STOP_ROI_LIMIT:
@@ -198,6 +212,7 @@ async def set_risk_settings(payload: Dict[str, Any] = Body(...), session=Depends
     logger.info(f"Risk settings updated via mini app: {payload} (user={session.user_id})")
     return {
         "min_margin_usdt": settings_manager.get_min_margin_usdt(),
+        "max_margin_usdt": settings_manager.get_max_margin_usdt(),
         "max_stop_roi_percent": settings_manager.get_max_stop_roi_percent(),
         "max_open_positions": session.risk_manager.effective_max_open_positions(),
     }

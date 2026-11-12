@@ -80,6 +80,14 @@ export default function SettingsTab() {
             onSaved={saveRisk}
           />
           <RiskNumberRow
+            field="max_margin_usdt"
+            title="Максимальная маржа сделки, USDT"
+            sub="Если стратегия посчитала маржу больше — объём уменьшается до этой суммы (для всех стратегий). Важнее минимальной маржи. 0 — выключено."
+            value={settings?.max_margin_usdt}
+            format={(v) => (v > 0 ? `$${v}` : "выкл.")}
+            onSaved={saveRisk}
+          />
+          <RiskNumberRow
             field="max_stop_roi_percent"
             title="Максимальный стоп, % ROI"
             sub="Если стоп стратегии дальше — бот подтягивает его ближе, плечо не меняется. Ликвидация наступает примерно на 100% ROI, поэтому максимум 90. При 10x: 70% ROI = 7% от цены."

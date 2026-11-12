@@ -273,6 +273,62 @@ def _bucket_now():
     return int(time.time() * 1000) // DAY
 
 
+class TestMaxMargin(unittest.TestCase):
+    def _trader(self, max_margin):
+        import core.trading.simple_trader as st
+        trader = st.SimpleTrader.__new__(st.SimpleTrader)
+        trader.settings_manager = mock.MagicMock()
+        trader.settings_manager.get_max_margin_usdt.return_value = max_margin
+        return trader
+
+    def test_big_margin_cut_to_maximum(self):
+        # 20 * 100 / 10 = 200 USDT маржі -> до 100 USDT: 100 * 10 / 100 = 10
+        qty = self._trader(100.0)._apply_max_margin('X-USDT', 'LONG', 20.0, 10, 100.0)
+        self.assertAlmostEqual(qty, 10.0)
+
+    def test_small_margin_untouched(self):
+        self.assertEqual(self._trader(100.0)._apply_max_margin('X-USDT', 'LONG', 5.0, 10, 100.0), 5.0)
+
+    def test_zero_disables_cap(self):
+        self.assertEqual(self._trader(0.0)._apply_max_margin('X-USDT', 'LONG', 20.0, 10, 100.0), 20.0)
+
+
+class TestRiskSettingsMargins(unittest.IsolatedAsyncioTestCase):
+    def _session(self, min_margin=10.0, max_margin=100.0):
+        session = mock.MagicMock()
+        sm = session.settings_manager
+        sm.get_min_margin_usdt.return_value = min_margin
+        sm.get_max_margin_usdt.return_value = max_margin
+        sm.get_max_stop_roi_percent.return_value = 30.0
+        sm.set_min_margin_usdt = mock.AsyncMock()
+        sm.set_max_margin_usdt = mock.AsyncMock()
+        session.risk_manager.effective_max_open_positions.return_value = 3
+        return session
+
+    async def test_saves_max_margin(self):
+        from webapp.backend.routes.settings import set_risk_settings
+        session = self._session()
+        await set_risk_settings({"max_margin_usdt": 50}, session)
+        session.settings_manager.set_max_margin_usdt.assert_awaited_once_with(50.0)
+
+    async def test_min_above_max_rejected(self):
+        from fastapi import HTTPException
+        from webapp.backend.routes.settings import set_risk_settings
+        session = self._session()
+        with self.assertRaises(HTTPException):
+            await set_risk_settings({"min_margin_usdt": 150}, session)
+        with self.assertRaises(HTTPException):
+            await set_risk_settings({"max_margin_usdt": 5}, session)
+        session.settings_manager.set_min_margin_usdt.assert_not_awaited()
+        session.settings_manager.set_max_margin_usdt.assert_not_awaited()
+
+    async def test_zero_max_disables_check(self):
+        from webapp.backend.routes.settings import set_risk_settings
+        session = self._session(max_margin=0.0)
+        await set_risk_settings({"min_margin_usdt": 150}, session)
+        session.settings_manager.set_min_margin_usdt.assert_awaited_once_with(150.0)
+
+
 class TestMinMargin(unittest.TestCase):
     def _trader(self, min_margin):
         import core.trading.simple_trader as st

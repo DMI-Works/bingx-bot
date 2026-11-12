@@ -378,6 +378,33 @@ class SimpleTrader:
         )
         return new_quantity
 
+    def _apply_max_margin(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Optional[float],
+        leverage: int,
+        reference_price: Optional[float],
+    ) -> Optional[float]:
+        """Стеля маржі (trading.max_margin_usdt, мініапп): якщо маржа угоди
+        більша — зменшуємо quantity до max_margin * leverage / ціна. Діє для всіх
+        стратегій і застосовується після мінімальної маржі, тобто важливіша за неї."""
+        if not quantity or quantity <= 0 or not reference_price or reference_price <= 0 or not leverage:
+            return quantity
+        getter = getattr(self.settings_manager, 'get_max_margin_usdt', None)
+        max_margin = getter() if callable(getter) else 0.0
+        if not isinstance(max_margin, (int, float)) or max_margin <= 0:
+            return quantity
+        margin = quantity * reference_price / leverage
+        if margin <= max_margin:
+            return quantity
+        new_quantity = max_margin * leverage / reference_price
+        logger.info(
+            f"Max margin for {symbol} {side}: margin {margin:.2f} USDT > {max_margin:.2f} USDT -> "
+            f"quantity {quantity:.8f} -> {new_quantity:.8f} (leverage={leverage})"
+        )
+        return new_quantity
+
     async def _place_entry_order(self, symbol: str, side: str, quantity: float, leverage: int):
         """Плече + MARKET-ордер. Повертає (order_id, response) або (None, None)."""
         try:
@@ -450,6 +477,7 @@ class SimpleTrader:
             if risk_percent and quantity is None:
                 return False
             quantity = self._apply_min_margin(symbol, side, quantity, leverage, reference_price)
+            quantity = self._apply_max_margin(symbol, side, quantity, leverage, reference_price)
 
             logger.info(f"Opening position: {symbol} {side} {quantity} (strategy={strategy})")
 
