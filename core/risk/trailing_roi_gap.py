@@ -2,7 +2,7 @@
 Режим roi_gap TrailingStopManager (його вмикає TsMomentumStrategy через
 trail_meta сигналу). Усе — у % ROI від маржі (рух ціни × плече):
   1) ROI >= breakeven_roi -> SL на безубиток із комісіями та запасом на
-     проковзування (2 × round-trip комісія, при 10x це +2% ROI);
+     проковзування: breakeven_stop_roi (за замовчуванням +2% ROI);
   2) ROI >= start_roi     -> SL = пік ROI - gap_roi, далі тягнеться за піком.
 SL рухається ТІЛЬКИ в бік прибутку і не частіше, ніж раз на step_roi
 покращення (щоб не смикати біржу на кожен тік).
@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 
 ROI_GAP_MODE = 'roi_gap'
 
-# стоп безубитку = кратне round-trip комісії: рівно 1× не покривав проковзування
-# стопу (до 0.05% ціни) і угоди закривались у невеликий мінус
+# стоп безубитку для позицій без breakeven_stop_roi у trail_meta (старі записи):
+# кратне round-trip комісії. Рівно 1× не покривав проковзування стопу (до 0.05%
+# ціни) і угоди закривались у невеликий мінус
 _BREAKEVEN_FEE_MULTIPLE = 2.0
 # мінімальне покращення стопу (% ROI) для перестановки ордера
 _MIN_STEP_ROI = 5.0
@@ -73,7 +74,11 @@ class RoiGapTrailMixin:
             state.peak_roi_percent = roi_now
         peak = state.peak_roi_percent
 
-        breakeven_sl_roi = _BREAKEVEN_FEE_MULTIPLE * 2.0 * self.taker_fee_rate * leverage * 100.0
+        custom_stop = meta.get('breakeven_stop_roi')
+        if isinstance(custom_stop, (int, float)) and not isinstance(custom_stop, bool):
+            breakeven_sl_roi = float(custom_stop)  # параметр стратегії trail_breakeven_stop_roi
+        else:
+            breakeven_sl_roi = _BREAKEVEN_FEE_MULTIPLE * 2.0 * self.taker_fee_rate * leverage * 100.0
         target_roi = roi_gap_target(meta, peak, breakeven_sl_roi)
         if target_roi is None:
             return

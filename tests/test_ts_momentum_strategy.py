@@ -352,7 +352,7 @@ class TestMinMargin(unittest.TestCase):
 
 
 class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
-    META = {'mode': 'roi_gap', 'breakeven_roi': 10.0, 'start_roi': 30.0, 'gap_roi': 20.0}
+    META = {'mode': 'roi_gap', 'breakeven_roi': 10.0, 'breakeven_stop_roi': 2.0, 'start_roi': 30.0, 'gap_roi': 20.0}
 
     def test_target_levels(self):
         from core.risk.trailing_roi_gap import roi_gap_target
@@ -420,6 +420,39 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
             _, target_roi, target_price = tsm._move_stop_loss.call_args.args[3][0]
             self.assertAlmostEqual(target_roi, 2.0)
             self.assertAlmostEqual(target_price, 100.2)
+
+    async def _breakeven_target(self, meta):
+        from core.risk.trailing_stop_manager import TrailingStopManager
+        from core.risk.trailing_state import TrailState
+        tsm = TrailingStopManager.__new__(TrailingStopManager)
+        tsm.taker_fee_rate = 0.0005
+        tsm._retry_after = {}
+        tsm.move_retry_cooldown_seconds = 10
+        position = {'symbol': 'BTC-USDT', 'side': 'LONG', 'entry_price': 100.0, 'leverage': 10,
+                    'stop_loss_price': 88.0, 'sl_order_id': 'sl1', 'trail_meta': meta}
+        tsm.trader = mock.MagicMock()
+        tsm.trader.open_positions = {'k': position}
+        tsm._move_stop_loss = mock.AsyncMock(return_value=1)
+        await tsm._process_roi_gap_position('k', position, TrailState(), 101.5, 10.0)
+        return tsm._move_stop_loss.call_args.args[3][0]
+
+    async def test_breakeven_stop_from_param(self):
+        _, roi, price = await self._breakeven_target({**self.META, 'breakeven_stop_roi': 3.0})
+        self.assertAlmostEqual(roi, 3.0)
+        self.assertAlmostEqual(price, 100.3)
+
+    async def test_old_meta_without_param_uses_fee_reserve(self):
+        meta = {k: v for k, v in self.META.items() if k != 'breakeven_stop_roi'}
+        _, roi, _ = await self._breakeven_target(meta)
+        self.assertAlmostEqual(roi, 2.0)  # 2 × round-trip комісія при 10x
+
+    def test_breakeven_stop_must_be_below_trigger(self):
+        cfg = TsMomentumStrategy.build_config(None)
+        cfg['trail_breakeven_stop_roi'] = 10.0
+        with self.assertRaises(ValueError):
+            TsMomentumStrategy._parse_params(cfg)
+        cfg['trail_breakeven_stop_roi'] = 3.0
+        self.assertEqual(TsMomentumStrategy._parse_params(cfg)['trail_breakeven_stop_roi'], 3.0)
 
     async def test_cooldown_between_moves(self):
         from core.risk.trailing_stop_manager import TrailingStopManager
