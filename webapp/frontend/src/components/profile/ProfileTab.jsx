@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
-import { KeyRound, LogOut, Repeat } from "lucide-react";
+import { KeyRound, LogOut, Repeat, BookOpen, ChevronRight } from "lucide-react";
 import { apiGet, apiPost, tg } from "../../lib/api";
 import { fmtUsd, fmtUsdPlain, initialsOf } from "../../lib/format";
 import { Spinner } from "../common";
 import ConnectKeys from "../account/ConnectKeys";
 import BillingSection from "./BillingSection";
+import { openGuide } from "../guide/guideEvents";
 
 // Подтверждение: в Telegram — нативное окно, вне его (локальная разработка) — window.confirm.
 function confirmAsync(message) {
@@ -203,6 +204,22 @@ export default function ProfileTab() {
             </div>
           </div>
         )}
+      </div>
+
+      <div className="section">
+        <div className="section-head">
+          <span className="section-title">Помощь</span>
+        </div>
+        <div className="list">
+          <div className="row" style={{ cursor: "pointer" }} onClick={() => openGuide()}>
+            <div className="row-icon"><BookOpen size={17} /></div>
+            <div className="row-main">
+              <span className="settings-title">Инструкция и ответы на вопросы</span>
+              <div className="row-sub">ключи BingX, хедж-режим, настройки, оплата, остановка</div>
+            </div>
+            <ChevronRight size={16} className="chev" />
+          </div>
+        </div>
       </div>
 
       <button className="danger-btn" onClick={() => tg?.close()} disabled={!tg}>

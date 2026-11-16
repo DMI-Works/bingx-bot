@@ -219,14 +219,15 @@ class TelegramGateway:
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard = []
         if self.webapp_url:
-            keyboard.append([InlineKeyboardButton("👤 Профіль", web_app=WebAppInfo(url=self.webapp_url))])
+            keyboard.append([InlineKeyboardButton("🚀 Відкрити застосунок", web_app=WebAppInfo(url=self.webapp_url))])
         else:
-            logger.warning("WEBAPP_URL не задано — кнопка \"Профіль\" прихована")
+            logger.warning("WEBAPP_URL не задано — кнопка застосунку прихована")
         keyboard.append([InlineKeyboardButton("🚨 Аварійна зупинка", callback_data="emergency")])
         await self._reply(
             update,
-            "Панель торгового бота. Відкрийте «Профіль», щоб підключити API-ключі BingX і керувати торгівлею.",
+            messages.start_text(),
             reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML',
         )
 
     async def _cmd_emergency(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

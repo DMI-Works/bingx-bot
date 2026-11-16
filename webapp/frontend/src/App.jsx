@@ -7,6 +7,9 @@ import CoinsTab from "./components/coins/CoinsTab";
 import AnalyticsTab from "./components/analytics/AnalyticsTab";
 import AdminTab from "./components/admin/AdminTab";
 import ConnectKeys from "./components/account/ConnectKeys";
+import GuideScreen from "./components/guide/GuideScreen";
+import Welcome from "./components/guide/Welcome";
+import { GUIDE_EVENT } from "./components/guide/guideEvents";
 import { Spinner } from "./components/common";
 import { apiGet } from "./lib/api";
 import "./styles/global.css";
@@ -35,6 +38,15 @@ export default function App() {
 
   useEffect(() => { loadMe(); }, [loadMe]);
 
+  // Інструкцію можна відкрити з будь-якого екрана (openGuide у guideEvents.js)
+  const [guide, setGuide] = useState(null);
+  useEffect(() => {
+    const onOpen = (e) => setGuide({ section: e.detail?.section ?? null });
+    window.addEventListener(GUIDE_EVENT, onOpen);
+    return () => window.removeEventListener(GUIDE_EVENT, onOpen);
+  }, []);
+  const guideOverlay = guide && <GuideScreen section={guide.section} onClose={() => setGuide(null)} />;
+
   if (error) {
     const text = error.status === 401
       ? "Откройте приложение через бота в Telegram."
@@ -49,8 +61,10 @@ export default function App() {
     return (
       <div className="app-root">
         <div className="tab-pane">
+          <Welcome />
           <ConnectKeys onDone={setMe} />
         </div>
+        {guideOverlay}
       </div>
     );
   }
@@ -61,6 +75,7 @@ export default function App() {
         <div className="error-banner">Новые сделки остановлены: {me.can_open_reason}. Открытые позиции сопровождаются.</div>
       )}
       <ActiveTab />
+      {guideOverlay}
 
       <nav className="tabbar">
         {tabs.map((t) => {

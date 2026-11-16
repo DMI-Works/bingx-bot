@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { KeyRound } from "lucide-react";
+import { KeyRound, HelpCircle } from "lucide-react";
 import { apiPost } from "../../lib/api";
 import { Spinner } from "../common";
+import { openGuide } from "../guide/guideEvents";
 
 // Подключение API-ключа BingX. Без пропа testnet пользователь сам выбирает
 // режим (первый вход); с пропом — ключ для указанного режима (Профиль).
@@ -36,9 +37,12 @@ export default function ConnectKeys({ testnet: fixedTestnet, onDone }) {
         <div className="row">
           <div className="row-main">
             <div className="row-sub">
-              Создайте API-ключ на BingX с правами на чтение и торговлю фьючерсами и вставьте его сюда.
-              Ключ проверяется на бирже и хранится в зашифрованном виде.
+              Создайте API-ключ на BingX с правами на чтение и торговлю фьючерсами (без вывода средств)
+              и вставьте его сюда. Ключ проверяется на бирже и хранится в зашифрованном виде.
             </div>
+            <button className="link-btn" onClick={() => openGuide("keys")}>
+              <HelpCircle size={14} /> Где взять ключ и что включить на бирже
+            </button>
             {canChooseMode && (
               <div className="param-edit-line">
                 <button className="param-save-btn" disabled={testnet} onClick={() => setTestnet(true)}>Testnet</button>
