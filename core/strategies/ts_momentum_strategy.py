@@ -77,6 +77,9 @@ class TsMomentumStrategy(BaseStrategy):
         # от маржи; 0 = шаг выключен ---
         # ROI >= N -> стоп на безубыток с комиссиями
         'trail_breakeven_roi': 10.0,
+        # куда ставится стоп безубытка (% ROI от входа): покрывает комиссии
+        # (~1% ROI при 10x) и проскальзывание стопа
+        'trail_breakeven_stop_roi': 2.0,
         # ROI >= N -> стоп тянется за пиком ROI с отступом trail_gap_roi
         'trail_start_roi': 30.0,
         'trail_gap_roi': 20.0,
@@ -158,11 +161,16 @@ class TsMomentumStrategy(BaseStrategy):
                 raise ValueError(f"{key} must be > 0, got {p[key]!r}")
             p[key] = float(p[key])
 
-        for key in ('trail_breakeven_roi', 'trail_start_roi', 'trail_gap_roi', 'recheck_interval_minutes',
-                    'reentry_pause_minutes'):
+        for key in ('trail_breakeven_roi', 'trail_breakeven_stop_roi', 'trail_start_roi', 'trail_gap_roi',
+                    'recheck_interval_minutes', 'reentry_pause_minutes'):
             if isinstance(p[key], bool) or not isinstance(p[key], (int, float)) or float(p[key]) < 0:
                 raise ValueError(f"{key} must be >= 0, got {p[key]!r}")
             p[key] = float(p[key])
+        if p['trail_breakeven_roi'] > 0 and p['trail_breakeven_stop_roi'] >= p['trail_breakeven_roi']:
+            raise ValueError(
+                f"trail_breakeven_stop_roi ({p['trail_breakeven_stop_roi']:g}) must be < trail_breakeven_roi "
+                f"({p['trail_breakeven_roi']:g}), иначе стоп окажется выше цены в момент переноса"
+            )
         if p['trail_start_roi'] > 0 and p['trail_gap_roi'] >= p['trail_start_roi']:
             raise ValueError(
                 f"trail_gap_roi ({p['trail_gap_roi']:g}) must be < trail_start_roi ({p['trail_start_roi']:g}), "
@@ -201,6 +209,7 @@ class TsMomentumStrategy(BaseStrategy):
         return {
             'mode': 'roi_gap',
             'breakeven_roi': p['trail_breakeven_roi'],
+            'breakeven_stop_roi': p['trail_breakeven_stop_roi'],
             'start_roi': p['trail_start_roi'],
             'gap_roi': p['trail_gap_roi'],
         }
