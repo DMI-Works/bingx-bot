@@ -48,6 +48,8 @@ class SessionManager:
         self.targets_provider = targets_provider
 
         self.sessions: Dict[str, UserSession] = {}
+        # остання ціна угоди по символу (@trade) — для живих цифр у Mini App без REST
+        self.last_prices: Dict[str, float] = {}
         self._trail_levels = None
         self._lock = asyncio.Lock()
 
@@ -168,6 +170,7 @@ class SessionManager:
         if tick is None:
             return
         symbol = tick[0]
+        self.last_prices[symbol] = tick[1]
         for session in list(self.sessions.values()):
             if symbol in session.held_symbols():
                 await session.deliver(event)

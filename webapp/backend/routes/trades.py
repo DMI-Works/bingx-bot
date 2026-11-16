@@ -6,10 +6,10 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from core.common.market_data import extract_account_balance, filter_open_positions, to_float
-from core.common.position_math import position_key
+from core.common.position_math import position_key, side_sign
 from core.common.position_metadata import load_metadata
 
-from ..deps import require_session
+from ..deps import require_session, require_sessions
 from ..services.trade_stats import (
     closed_row_to_trade,
     in_period,
@@ -90,6 +90,36 @@ async def get_stats(period: str = Query("1W"), session=Depends(require_session))
         "period_change_pct": _pct_of(period_change_usd, account_equity),
         "period_pnl_pct": _pct_of(summary["total_net_pnl"], account_equity),
     }
+
+
+@router.get("/api/live")
+def get_live(request: Request, session=Depends(require_session)):
+    """Живі цифри для Mini App (опитується кожні 2 с): позиції з пам'яті бота
+    та остання ціна з ринкового сокета, без запитів до біржі. close_seq і склад
+    позицій підказують фронту, коли перезавантажити статистику."""
+    prices = getattr(require_sessions(request), "last_prices", {}) or {}
+    positions = []
+    for pos in list(session.trader.open_positions.values()):
+        symbol, side = pos.get("symbol"), pos.get("side")
+        entry = to_float(pos.get("entry_price"))
+        quantity = to_float(pos.get("remaining_quantity") or pos.get("quantity"))
+        leverage = to_float(pos.get("leverage")) or None
+        price = prices.get(symbol)
+        pnl_usd = pnl_pct = None
+        if price and entry and quantity:
+            pnl_usd = round((price - entry) * quantity * side_sign(side), 4)
+            margin = entry * quantity / leverage if leverage else None
+            pnl_pct = round(pnl_usd / margin * 100, 2) if margin else None
+        positions.append({
+            "order_id": pos.get("order_id"),
+            "symbol": symbol,
+            "side": side,
+            "price": price,
+            "pnl_usd": pnl_usd,
+            "pnl_pct": pnl_pct,
+            "stop_loss_price": pos.get("stop_loss_price"),
+        })
+    return {"positions": positions, "close_seq": getattr(session.trader, "close_seq", 0)}
 
 
 @router.get("/api/positions")

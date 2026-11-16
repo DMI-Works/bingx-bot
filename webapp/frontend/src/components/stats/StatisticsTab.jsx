@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import {
   AreaChart, Area, XAxis, Tooltip, ResponsiveContainer,
 } from "recharts";
@@ -38,6 +38,8 @@ function confirmAsync(message) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// як часто оновлюються ціни й PnL відкритих позицій
+const LIVE_POLL_MS = 2000;
 
 export default function StatisticsTab() {
   const [period, setPeriod] = useState("1W");
@@ -49,6 +51,60 @@ export default function StatisticsTab() {
   const [error, setError] = useState(null);
 
   const TRADES_PAGE_SIZE = 50;
+
+  // Тихе перезавантаження без спінерів: позиція відкрилась/закрилась.
+  const periodRef = useRef(period);
+  periodRef.current = period;
+  const refreshSilently = async () => {
+    const p = periodRef.current;
+    try {
+      const [s, pos, t] = await Promise.all([
+        apiGet(`/stats?period=${p}`),
+        apiGet("/positions"),
+        apiGet(`/trades?limit=${TRADES_PAGE_SIZE}&offset=0&period=${p}`),
+      ]);
+      if (p !== periodRef.current) return;
+      setStats(s);
+      setPositions(pos);
+      setTrades(t.trades);
+      setTradesTotal(t.total ?? t.trades.length);
+    } catch { /* наступне опитування спробує ще раз */ }
+  };
+  const refreshRef = useRef(refreshSilently);
+  refreshRef.current = refreshSilently;
+
+  // Живі ціни: /live читає пам'ять бота (ціни з сокета біржі), без запитів до BingX.
+  const liveRef = useRef({ ids: null, closeSeq: null });
+  useEffect(() => {
+    let stopped = false;
+    const tick = async () => {
+      if (document.hidden) return;
+      try {
+        const live = await apiGet("/live");
+        if (stopped) return;
+        const ids = live.positions.map((x) => x.order_id).sort().join(",");
+        const prev = liveRef.current;
+        liveRef.current = { ids, closeSeq: live.close_seq };
+        if (prev.ids !== null && (prev.ids !== ids || prev.closeSeq !== live.close_seq)) {
+          refreshRef.current();
+          return;
+        }
+        const byId = Object.fromEntries(live.positions.map((x) => [x.order_id, x]));
+        setPositions((cur) => cur && cur.map((x) => {
+          const l = byId[x.order_id];
+          if (!l) return x;
+          const next = { ...x, stop_loss_price: l.stop_loss_price ?? x.stop_loss_price };
+          // mark_price == null — позиції немає на біржі, таку не «оживляємо»
+          if (l.price != null && x.mark_price != null) {
+            Object.assign(next, { mark_price: l.price, pnl_usd: l.pnl_usd, pnl_pct: l.pnl_pct });
+          }
+          return next;
+        }));
+      } catch { /* тихо: мережа/сервер, спробуємо через 2 с */ }
+    };
+    const id = setInterval(tick, LIVE_POLL_MS);
+    return () => { stopped = true; clearInterval(id); };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,7 +139,7 @@ export default function StatisticsTab() {
       const res = await apiPost("/positions/close", { order_id: p.order_id });
       // закрытие финализируется событием биржи — даём ему пару секунд
       if (res.status === "closing") await sleep(2500);
-      setPositions(await apiGet("/positions"));
+      await refreshSilently();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -122,19 +178,32 @@ export default function StatisticsTab() {
   const hasMoreTrades = !!trades && trades.length < tradesTotal;
 
 
-  const chartData = useMemo(
-    () => (stats?.equity || []).map((p, i) => ({ i, v: p.v })),
-    [stats]
-  );
+  // Нереалізований PnL рахуємо з живих позицій, а не зі знімка /stats
+  const openPnl = positions
+    ? positions.reduce((sum, x) => sum + (x.pnl_usd ?? 0), 0)
+    : (stats?.open_unrealized_pnl ?? 0);
+
+  const chartData = useMemo(() => {
+    const points = (stats?.equity || []).map((p, i) => ({ i, v: p.v }));
+    // остання «жива» точка: закриті угоди + відкриті позиції зараз
+    if (points.length && positions?.length) {
+      points.push({ i: points.length, v: Math.round((points[points.length - 1].v + openPnl) * 100) / 100, live: true });
+    }
+    return points;
+  }, [stats, positions, openPnl]);
 
   const periodPnl = stats?.total_net_pnl ?? 0;
   const up = periodPnl >= 0;
   const fundingPeriod = stats?.funding_fees_period ?? 0;
   const changePct = stats?.period_pnl_pct;
 
-  const openPnl = stats?.open_unrealized_pnl ?? 0;
   const fundingTotal = stats?.funding_fees_total ?? 0;
-  const totalPnl = stats?.total_pnl ?? stats?.cumulative_pnl ?? 0;
+  const snapshotTotal = stats?.total_pnl ?? stats?.cumulative_pnl ?? 0;
+  const totalPnl = stats ? snapshotTotal - (stats.open_unrealized_pnl ?? 0) + openPnl : 0;
+  // % від балансу: база = знімок total_pnl / його % (перераховуємо під живий PnL)
+  const totalPnlPct = stats?.total_pnl_pct
+    ? (totalPnl / (snapshotTotal / (stats.total_pnl_pct / 100))) * 100
+    : stats?.total_pnl_pct;
   const totalUp = totalPnl >= 0;
 
   const avgTrade = stats && stats.total_trades ? stats.total_net_pnl / stats.total_trades : 0;
@@ -207,7 +276,7 @@ export default function StatisticsTab() {
                     color: "#EDEFF3",
                   }}
                   labelFormatter={() => ""}
-                  formatter={(v) => [`$${v.toLocaleString()}`, "Накопл. PnL"]}
+                  formatter={(v, _n, item) => [`$${v.toLocaleString()}`, item?.payload?.live ? "С открытыми сейчас" : "Накопл. PnL"]}
                 />
                 <Area
                   type="monotone"
@@ -244,8 +313,8 @@ export default function StatisticsTab() {
             <StatRow label="Итого">
               <span className={totalUp ? "text-profit" : "text-loss"}>
                 {fmtUsd(totalPnl)}
-                {stats.total_pnl_pct != null && (
-                  <span className="stat-value-sub"> ({fmtPct(stats.total_pnl_pct)} от баланса)</span>
+                {totalPnlPct != null && Number.isFinite(totalPnlPct) && (
+                  <span className="stat-value-sub"> ({fmtPct(totalPnlPct)} от баланса)</span>
                 )}
               </span>
             </StatRow>
@@ -360,7 +429,7 @@ export default function StatisticsTab() {
                     </div>
                     <div className="row-sub">
                       вход {p.entry_price?.toLocaleString() ?? "—"}
-                      {p.mark_price != null && <> · маркировка {p.mark_price.toLocaleString()}</>}
+                      {p.mark_price != null && <> · цена {p.mark_price.toLocaleString()}</>}
                     </div>
                     {(p.stop_loss_price || tpLabel) && (
                       <div className="row-sub row-sub-faint">

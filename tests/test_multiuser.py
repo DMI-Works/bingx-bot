@@ -375,6 +375,38 @@ class TestMiniAppCache(unittest.IsolatedAsyncioTestCase):
         self.assertIn("immutable", asset.headers["Cache-Control"])
 
 
+class TestLiveEndpoint(unittest.IsolatedAsyncioTestCase):
+    async def test_price_cached_and_live_pnl(self):
+        from core.engine.session_manager import SessionManager
+        from webapp.backend.routes.trades import get_live
+        manager = SessionManager(
+            users=mock.MagicMock(), mongo_client=mock.MagicMock(), config=mock.MagicMock(),
+            shared_bus=EventBus(), strategy_settings=mock.MagicMock(),
+        )
+        await manager._on_price(Event(type=EventType.PRICE_UPDATED, data={"s": "BTC-USDT", "p": "105"}))
+        self.assertEqual(manager.last_prices["BTC-USDT"], 105.0)
+
+        session = mock.MagicMock()
+        session.trader.close_seq = 3
+        session.trader.open_positions = {"k": {
+            "order_id": "o1", "symbol": "BTC-USDT", "side": "SHORT", "entry_price": 100.0,
+            "quantity": 2.0, "leverage": 10, "stop_loss_price": 110.0,
+        }}
+        request = mock.MagicMock()
+        request.app.state.sessions = manager
+        live = get_live(request, session)
+        pos = live["positions"][0]
+        self.assertEqual(live["close_seq"], 3)
+        self.assertEqual((pos["price"], pos["pnl_usd"], pos["pnl_pct"]), (105.0, -10.0, -50.0))
+
+    async def test_close_increments_seq(self):
+        import core.trading.simple_trader as st
+        trader = st.SimpleTrader.__new__(st.SimpleTrader)
+        trader._last_close_at, trader._loss_close_at, trader.close_seq = {}, {}, 0
+        await trader._remember_close(Event(type=EventType.POSITION_CLOSED, data={"symbol": "X-USDT"}))
+        self.assertEqual(trader.close_seq, 1)
+
+
 class TestAdminId(unittest.TestCase):
     def test_admin_only_from_admin_telegram_id(self):
         from core.users.repository import admin_telegram_id

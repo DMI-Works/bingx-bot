@@ -74,6 +74,8 @@ class SimpleTrader:
         # (symbol, strategy) -> час закриття: пауза перед повторним входом
         # (reentry_cooldown_seconds у сигналі) рахується окремо для користувача
         self._last_close_at: dict = {}
+        # зростає з кожним закриттям — Mini App по ньому розуміє, що статистика змінилась
+        self.close_seq: int = 0
 
         self.event_bus.subscribe(EventType.SIGNAL_GENERATED, self._handle_signal)
         self.event_bus.subscribe(EventType.ORDER_FILLED, self._handle_order_update)
@@ -195,6 +197,7 @@ class SimpleTrader:
 
     async def _remember_close(self, event: Event) -> None:
         data = event.data or {}
+        self.close_seq = getattr(self, 'close_seq', 0) + 1
         if data.get('symbol') and data.get('strategy'):
             key = (data['symbol'], data['strategy'])
             self._last_close_at[key] = time.time()
