@@ -9,7 +9,7 @@ from core.common.market_data import extract_account_balance, filter_open_positio
 from core.common.position_math import position_key, side_sign
 from core.common.position_metadata import load_metadata
 
-from ..deps import require_session, require_sessions
+from ..deps import limit_exchange, require_session, require_sessions
 from ..services.trade_stats import (
     closed_row_to_trade,
     in_period,
@@ -59,7 +59,7 @@ def _pct_of(value: float, base: Optional[float]) -> Optional[float]:
     return round(value / base * 100, 2) if base else None
 
 
-@router.get("/api/stats")
+@router.get("/api/stats", dependencies=[Depends(limit_exchange)])
 async def get_stats(period: str = Query("1W"), session=Depends(require_session)):
     db = session.db
     cutoff = period_cutoff(period)
@@ -122,7 +122,7 @@ def get_live(request: Request, session=Depends(require_session)):
     return {"positions": positions, "close_seq": getattr(session.trader, "close_seq", 0)}
 
 
-@router.get("/api/positions")
+@router.get("/api/positions", dependencies=[Depends(limit_exchange)])
 async def get_positions(session=Depends(require_session)):
     """Відкриті позиції: метадані з БД + live-цифри з біржі."""
     db = session.db
@@ -167,7 +167,7 @@ async def get_positions(session=Depends(require_session)):
     return result
 
 
-@router.post("/api/positions/close")
+@router.post("/api/positions/close", dependencies=[Depends(limit_exchange)])
 async def close_position(
     payload: Dict[str, Any] = Body(...),
     session=Depends(require_session),
@@ -215,7 +215,7 @@ async def close_position(
 
 
 @router.get("/api/trades")
-def get_trades(limit: int = 50, offset: int = 0, period: str = Query("ALL"), session=Depends(require_session)):
+def get_trades(limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0), period: str = Query("ALL"), session=Depends(require_session)):
     """Пагінована історія закритих угод з урахуванням періоду."""
     db = session.db
 

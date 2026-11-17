@@ -238,6 +238,16 @@ class BingXClient:
     async def get_account_balance(self) -> Dict[str, Any]:
         return await self._request('GET', '/openApi/swap/v2/user/balance', signed=True)
 
+    async def get_api_permissions(self) -> Dict[str, Any]:
+        """Права цього API-ключа: {"permissions": [коди], ...restrictions}.
+        Коди BingX: 1 спот, 2 читання, 3 ф'ючерси, 4 універсальний переказ,
+        5 виведення коштів. restrictions — прапорці enableFutures, permitsUniversalTransfer тощо."""
+        permissions = await self._request('GET', '/openApi/v1/account/apiPermissions', signed=True)
+        restrictions = await self._request('GET', '/openApi/v1/account/apiRestrictions', signed=True)
+        permissions = permissions.get('data', permissions) if isinstance(permissions, dict) else {}
+        restrictions = restrictions.get('data', restrictions) if isinstance(restrictions, dict) else {}
+        return {**(restrictions or {}), "permissions": list((permissions or {}).get("permissions") or [])}
+
     async def get_positions(self) -> List[Dict[str, Any]]:
         response = await self._request('GET', '/openApi/swap/v2/user/positions', signed=True)
         return response.get("data", [])

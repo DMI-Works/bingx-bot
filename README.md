@@ -123,7 +123,7 @@ Multi-stage `Dockerfile` собирает фронтенд (node:20-slim), за�
 
 ```bash
 cd webapp/frontend
-npm install
+npm ci          # ровно версии из package-lock.json
 npm run dev     # Vite на :5173, /api проксируется на http://localhost:8000
 npm run build   # сборка в webapp/backend/static, FastAPI отдаёт её по /
 ```
@@ -250,7 +250,11 @@ python -m unittest tests.test_trend_supertrend.TestIndicators.test_atr_wilder -v
 
 ## Безопасность
 
-- Давайте API-ключам только права на торговлю, без вывода средств.
+- Давайте API-ключам только права на торговлю, без вывода средств. Mini App проверяет это сам: ключ с правом вывода (или без права торговли фьючерсами) не принимается.
+- Ограничение частоты запросов (`webapp/backend/rate_limit.py`): общий лимит на пользователя, отдельный — на эндпоинты, которые ходят на биржу, 5 попыток сохранения ключа за 10 минут, лимит неудачных входов на IP. Превышение — 429 с `Retry-After`.
+- Отказы авторизации (401/403) пишутся в лог с меткой `[AUTH]` и IP.
+- Ответы сервера содержат заголовки безопасности (CSP, HSTS, `nosniff`), CORS выключен, `/docs` и `/openapi.json` закрыты (`webapp/backend/security.py`).
+- Версии Python-пакетов зафиксированы в `requirements.txt`, фронтенд собирается `npm ci` по `package-lock.json`.
 - Включите IP whitelist на бирже.
 - Проверяйте изменения на testnet и начинайте с малых сумм.
 - Не коммитьте `.env`.

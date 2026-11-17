@@ -11,7 +11,7 @@ from core.exchange.errors import BingXAPIError
 from core.users import SecretsKeyMissing, public_view
 from core.users.access import can_open_new
 
-from ..deps import require_billing, require_sessions, require_user, require_users
+from ..deps import limit_keys, require_billing, require_sessions, require_user, require_users
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +45,36 @@ def _key_field(payload: Dict[str, Any], name: str) -> str:
     return value.strip()
 
 
+# коди прав ключа BingX (GET /openApi/v1/account/apiPermissions)
+PERMISSION_FUTURES = 3
+PERMISSION_WITHDRAW = 5
+
+
+def check_key_permissions(perms: Dict[str, Any]) -> None:
+    """Ключ із правом виведення не приймаємо: при витоку бази разом із
+    SECRETS_KEY ним можна вивести гроші користувача. Без ф'ючерсів бот не
+    зможе торгувати — кажемо одразу, а не при першій угоді."""
+    codes = set(perms.get("permissions") or [])
+    withdraw_flags = [k for k, v in perms.items() if "withdraw" in k.lower() and v is True]
+    if PERMISSION_WITHDRAW in codes or withdraw_flags:
+        raise HTTPException(
+            status_code=400,
+            detail="У ключа включён вывод средств — создайте ключ без права «Вывод» (Withdraw)",
+        )
+    if PERMISSION_FUTURES not in codes and perms.get("enableFutures") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="У ключа нет права торговли фьючерсами — включите «Бессрочные фьючерсы» при создании ключа",
+        )
+
+
 async def _verify_keys(api_key: str, api_secret: str, testnet: bool) -> None:
-    """Ключ зберігаємо лише якщо біржа реально його прийняла."""
+    """Ключ зберігаємо лише якщо біржа реально його прийняла і в нього немає
+    права виведення коштів."""
     client = BingXClient(api_key=api_key, api_secret=api_secret, testnet=testnet)
     try:
         balance = await client.get_account_balance()
+        perms = await client.get_api_permissions()
     except BingXAPIError as e:
         raise HTTPException(status_code=400, detail=f"Биржа отклонила ключ: {e.code} {e.msg}")
     except Exception as e:
@@ -59,6 +84,7 @@ async def _verify_keys(api_key: str, api_secret: str, testnet: bool) -> None:
         await client.close()
     if extract_account_balance(balance) is None:
         raise HTTPException(status_code=400, detail="Биржа не вернула баланс по этому ключу")
+    check_key_permissions(perms)
 
 
 def _guard_open_positions(session, testnet: bool) -> None:
@@ -74,7 +100,7 @@ def _guard_open_positions(session, testnet: bool) -> None:
         )
 
 
-@router.post("/api/account/keys")
+@router.post("/api/account/keys", dependencies=[Depends(limit_keys)])
 async def save_keys(
     request: Request,
     payload: Dict[str, Any] = Body(...),
@@ -90,7 +116,7 @@ async def save_keys(
     _guard_open_positions(sessions.get(user["_id"]), testnet)
     await _verify_keys(api_key, api_secret, testnet)
     try:
-        users.save_keys(user["_id"], testnet, api_key, api_secret, can_withdraw=False)
+        users.save_keys(user["_id"], testnet, api_key, api_secret, can_withdraw=False)  # перевірено в _verify_keys
     except SecretsKeyMissing:
         logger.critical("SECRETS_KEY is not set — cannot store user API keys")
         raise HTTPException(status_code=503, detail="Сервис временно недоступен")
@@ -108,7 +134,7 @@ async def save_keys(
     return _me(request, users.get(user["_id"]))
 
 
-@router.delete("/api/account/keys")
+@router.delete("/api/account/keys", dependencies=[Depends(limit_keys)])
 async def delete_keys(request: Request, testnet: bool, user: dict = Depends(require_user)):
     users = require_users(request)
     sessions = require_sessions(request)

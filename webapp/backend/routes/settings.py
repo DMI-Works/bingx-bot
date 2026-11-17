@@ -23,6 +23,7 @@ from core.state.settings_manager import MAX_OPEN_POSITIONS_LIMIT, MAX_STOP_ROI_L
 from core.strategies.registry import STRATEGY_REGISTRY
 
 from ..deps import (
+    limit_exchange,
     require_admin,
     require_session,
     require_sessions,
@@ -106,7 +107,7 @@ def get_settings(request: Request, session=Depends(require_session)):
     }
 
 
-@router.post("/mode")
+@router.post("/mode", dependencies=[Depends(limit_exchange)])
 async def set_mode(
     request: Request,
     payload: Dict[str, Any] = Body(...),

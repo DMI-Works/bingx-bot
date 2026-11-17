@@ -10,14 +10,18 @@ sessions, пул монет, параметри стратегій) main.py кл
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .security import install_security_headers
 from .routes import account, admin, analytics, profile, settings, symbols, trades
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-app = FastAPI(title="Ruflo Mini App API")
+app = FastAPI(
+    title="Ruflo Mini App API",
+    # публічна карта API не потрібна: Mini App знає свої ендпоінти
+    docs_url=None, redoc_url=None, openapi_url=None,
+)
 
 # Опційні: якщо main.py їх не проставить (webapp.enabled=False, тести),
 # відповідні ендпоінти відповідатимуть 503, решта API працює.
@@ -32,12 +36,8 @@ app.state.strategy_manager = None
 app.state.symbol_selector = None
 app.state.signal_tracker = None
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["*"],
-)
+# Заголовки безпеки; CORS вимкнено навмисно — див. security.py
+install_security_headers(app)
 
 for module in (account, admin, trades, analytics, profile, settings, symbols):
     app.include_router(module.router)

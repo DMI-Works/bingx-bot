@@ -5,9 +5,16 @@
 Спільні об'єкти (app.state) проставляє main.py; якщо їх ще немає — 503.
 """
 
+import logging
+
 from fastapi import Depends, Header, HTTPException, Request
 
 from .auth import validate_init_data
+from .rate_limit import (
+    AUTH_FAIL_IP_LIMIT, EXCHANGE_LIMIT, KEYS_LIMIT, USER_API_LIMIT, client_ip, enforce,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _require_state(request: Request, attr: str, detail: str):
@@ -49,7 +56,12 @@ def require_user(request: Request, x_telegram_init_data: str = Header(default=""
     """Документ користувача; при першому вході створюється."""
     tg_user = validate_init_data(x_telegram_init_data)
     if tg_user is None or not tg_user.get("id"):
+        ip = client_ip(request)
+        logger.warning(f"[AUTH] 401 invalid init data: {request.method} {request.url.path} ip={ip}")
+        # забагато невдалих спроб з однієї адреси — 429 замість 401
+        enforce("auth_fail", ip, AUTH_FAIL_IP_LIMIT)
         raise HTTPException(status_code=401, detail="Invalid Telegram init data")
+    enforce("user", str(tg_user["id"]), USER_API_LIMIT)
     return require_users(request).ensure_user(tg_user)
 
 
@@ -65,7 +77,19 @@ def require_session(request: Request, user: dict = Depends(require_user)):
     return session
 
 
-def require_admin(user: dict = Depends(require_user)) -> dict:
+def require_admin(user: dict = Depends(require_user), request: Request = None) -> dict:
     if user.get("role") != "admin":
+        where = f"{request.method} {request.url.path} ip={client_ip(request)}" if request else ""
+        logger.warning(f"[AUTH] 403 admin-only: user={user['_id']} @{user.get('username')} {where}")
         raise HTTPException(status_code=403, detail="Только для администратора")
     return user
+
+
+def limit_exchange(user: dict = Depends(require_user)) -> None:
+    """Ендпоінти, що на кожен виклик ходять на біржу."""
+    enforce("exchange", user["_id"], EXCHANGE_LIMIT)
+
+
+def limit_keys(user: dict = Depends(require_user)) -> None:
+    """Збереження/видалення API-ключів: перевірка ключа — запит на біржу."""
+    enforce("keys", user["_id"], KEYS_LIMIT)

@@ -15,7 +15,7 @@ One process serves many users. `main.py` builds one shared market layer (live `B
 - Users are in the `users` collection of the base DB (`core/users/`). `_id` is the Telegram user id; API keys are Fernet-encrypted with env `SECRETS_KEY`; each user has their own `testnet` mode.
 - `Database(testnet, user_id, client)` wraps collections in `ScopedDatabase` (`core/database/scoped.py`), which adds `user_id` to every filter, insert and aggregate. Strategy params (`strategy_settings`) are shared and use `db.raw`. Shared pool whitelist/blacklist use `user_id="__global__"`.
 - `core/users/migration.py` runs at startup and assigns legacy rows to the admin (`ADMIN_TELEGRAM_ID`, the admin's personal Telegram id; it is skipped when unset).
-- Webapp: every endpoint depends on `require_user`/`require_session` (the caller's data only) or `require_admin` (strategy params, shared coin pool).
+- Webapp: every endpoint depends on `require_user`/`require_session` (the caller's data only) or `require_admin` (strategy params, shared coin pool). `rate_limit.py` limits requests per user (`require_user`), exchange-hitting endpoints (`limit_exchange`), key saves (`limit_keys`) and auth failures per IP. Keys with withdraw permission (or without futures) are rejected in `routes/account.py`. `security.py` adds security headers; CORS and `/docs` are intentionally off. Python deps are pinned in `requirements.txt`; bump deliberately and rerun tests.
 - Billing (`core/billing`): `BillingService` runs hourly, closes each user's 7-day periods after the trial and writes `invoices` (base DB). Fee is % of net live PnL with loss carry-over (`calculator.py`). `users.billing.unpaid` blocks new entries through `can_open_new`; call `sessions.refresh_user` after changing it. Settlement is manual for now; automatic BingX collection should end in `mark_paid(method='bingx')`.
 - Strategies must not read positions of an account. TsMomentum publishes `action: 'TARGET'` signals and each `SimpleTrader._handle_target` reconciles its own positions; `no_open` blocks entries but still lets flips close.
 
@@ -30,8 +30,8 @@ python -m unittest discover tests -v
 python -m unittest tests.test_trend_supertrend -v
 python -m unittest tests.test_trend_supertrend.TestIndicators.test_atr_wilder -v
 
-# Mini App frontend (webapp/frontend, yarn.lock present; npm also used in Dockerfile)
-cd webapp/frontend && npm install
+# Mini App frontend (webapp/frontend, package-lock.json; Dockerfile uses npm ci)
+cd webapp/frontend && npm ci
 npm run dev      # Vite on :5173, proxies /api -> http://localhost:8000
 npm run build    # outputs into webapp/backend/static (served by FastAPI at /)
 ```

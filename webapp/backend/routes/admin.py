@@ -14,7 +14,7 @@ from core.users import public_view
 
 from ..services.user_stats import summarize_user_trades
 
-from ..deps import require_admin, require_billing, require_sessions, require_users
+from ..deps import limit_exchange, require_admin, require_billing, require_sessions, require_users
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ async def _account_snapshot(session) -> dict:
     return {"account": account, "positions": positions}
 
 
-@router.get("/users/{user_id}")
+@router.get("/users/{user_id}", dependencies=[Depends(limit_exchange)])
 async def get_user_card(user_id: str, request: Request, admin: dict = Depends(require_admin)):
     """Картка користувача: рахунок, результат, позиції, підписка, ключі."""
     user = require_users(request).get(user_id)

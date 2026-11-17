@@ -6,14 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from core.common.market_data import extract_account_balance, to_float
 
-from ..deps import require_session
+from ..deps import limit_exchange, require_session
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-@router.get("/api/profile")
+@router.get("/api/profile", dependencies=[Depends(limit_exchange)])
 async def get_profile(session=Depends(require_session)):
     exchange = session.exchange
 

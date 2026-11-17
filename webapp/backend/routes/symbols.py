@@ -12,6 +12,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from core.common.market_data import held_symbols
 
 from ..deps import (
+    limit_exchange,
     require_admin,
     require_global_settings,
     require_market_exchange,
@@ -48,7 +49,7 @@ def _subscribed(exchange) -> set:
     return set(getattr(exchange, "subscribed_symbols", set()) or set())
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(limit_exchange)])
 async def get_symbols(request: Request, session=Depends(require_session)):
     """Спільний пул монет + особистий чорний список і позиції користувача."""
     db = session.db
@@ -81,7 +82,7 @@ async def get_symbols(request: Request, session=Depends(require_session)):
     return {"symbols": result, "can_edit_pool": _can_edit_pool(session)}
 
 
-@router.get("/candidates")
+@router.get("/candidates", dependencies=[Depends(limit_exchange)])
 async def get_symbol_candidates(
     request: Request, limit: int = Query(50, ge=1, le=200), session=Depends(require_session),
 ):

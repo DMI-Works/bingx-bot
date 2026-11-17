@@ -263,9 +263,14 @@ class TestEveryEndpointRequiresAuth(unittest.TestCase):
     def test_all_api_routes_reject_missing_init_data(self):
         from fastapi.testclient import TestClient
         from webapp.backend.api import app
+        from webapp.backend.rate_limit import limiter
         client = TestClient(app, raise_server_exceptions=True)
+        # маршрути беремо з роутерів модулів: app.routes у нових FastAPI
+        # містить обгортки _IncludedRouter замість самих маршрутів
+        from webapp.backend.routes import account, admin, analytics, profile, settings, symbols, trades
+        routes = [r for m in (account, admin, analytics, profile, settings, symbols, trades) for r in m.router.routes]
         checked = 0
-        for route in app.routes:
+        for route in routes:
             path = getattr(route, "path", "")
             if not path.startswith("/api"):
                 continue
@@ -274,6 +279,7 @@ class TestEveryEndpointRequiresAuth(unittest.TestCase):
             for method in route.methods - {"HEAD", "OPTIONS"}:
                 query = "?testnet=true" if path == "/api/account/keys" and method == "DELETE" else ""
                 body = {"json": {}} if method == "POST" else {}
+                limiter.reset()  # інакше після 30 невдалих спроб з однієї адреси — 429
                 response = client.request(method, url + query, **body)
                 self.assertEqual(response.status_code, 401, f"{method} {path} -> {response.status_code}")
                 checked += 1
