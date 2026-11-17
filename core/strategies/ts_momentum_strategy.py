@@ -21,9 +21,14 @@ vol-target дало +16%/год, Sharpe 0.64, плюс во всех трёх т
          откроем на следующей сверке (без гонки close+open в одном тике);
        знак совпал -> держим (и обновляем trail_meta).
   3. Сайзинг = vol-target через риск-сайзинг: quantity=None + risk_percent +
-     stop_loss_price = entry ∓ disaster_stop_atr*ATR. При стопе ∝ ATR размер
-     ∝ 1/волатильность = vol-target. Дизастер-стоп широкий — только страховка от
-     гэпа, не рабочий выход. TP нет.
+     stop_loss_price = entry ∓ disaster_stop_atr*ATR (3 ATR). При стопе ∝ ATR
+     размер ∝ 1/волатильность = vol-target. Плечо (fit_leverage) трейдер
+     подбирает так, чтобы стоп влез в «Макс. стоп» пользователя, — стоп не
+     сжимается. TP нет.
+  4. Фиксация прибыли (roi_gap в единицах ATR входа): от +12 ATR стоп тянется за
+     пиком с отступом 7 ATR (первый перенос — на +5 ATR). Перенос редкий, только
+     при большом плюсе, мелкие откаты позицию не выбивают. После такой фиксации
+     вход в ту же сторону — не раньше чем через 14 суток.
 
 Как и TrendSupertrendStrategy: analyze() возвращает None, а работа идёт в фоновой
 задаче (REST за свечами нельзя делать синхронно в обработчике шины). За
@@ -59,41 +64,65 @@ _TICKERS_TTL_SECONDS = 900.0
 
 @register_strategy('TsMomentumStrategy')
 class TsMomentumStrategy(BaseStrategy):
+    # Версия набора параметров: при её росте StrategySettingsStore один раз
+    # перезаписывает активные параметры заводскими (старые ключи уходят).
+    # 2 (17.11): стоп 3*ATR без сжатия, трейлинг в ATR (12/7), риск 3%, пауза
+    # сутки после убытка и 14 суток после фиксации прибыли — см.
+    # scripts/tsmom_exit_grid.py.
+    PARAMS_VERSION = 2
+
     DEFAULT_PARAMS: Dict[str, object] = {
-        'leverage': 10,                      # потолок плеча (vol-target ограничен им)
-        'risk_per_trade_percent': 2.0,       # % equity на сделку (vol-target)
+        # ПОТОЛОК плеча. Фактическое плечо подбирает трейдер пользователя: самое
+        # большое, при котором стоп укладывается в его «Макс. стоп, % ROI», —
+        # стоп при этом НЕ сжимается (сжатый стоп выбивался дневным шумом:
+        # 05–16.11 95 из 98 сделок закрылись по стопу 3% цены за ~8 ч).
+        'leverage': 10,
+        # % equity на сделку: убыток по стопу = этот процент (размер ∝ 1/ATR —
+        # vol-target). Бэктест 4 года, 13 монет, max 4 позиции, эти дефолты:
+        # 2% -> CAGR ~25%, просадка ~20%; 3% -> ~35% / ~28%. Для маленького
+        # депозита — 3%.
+        'risk_per_trade_percent': 3.0,
         'timeframe': '1d',
         'lookback_days': 60,                 # окно моментума (лучшее по бэктесту)
         'mode': 'long_short',                # 'long_short' | 'long_flat'
         'atr_period': 14,
-        # дизастер-стоп (× ATR) — страховка от гэпа, НЕ рабочий выход; он же
-        # задаёт дистанцию для риск-сайзинга, т.е. vol-target размер позиции
-        'disaster_stop_atr': 4.0,
+        # стоп = N * дневной ATR от входа. Рабочий, но широкий: основной выход —
+        # разворот сигнала. Бэктест: 3 лучше 2 (шум) и 4 (дорогой риск).
+        'disaster_stop_atr': 3.0,
         # фильтры монеты (как в TrendSupertrendStrategy)
         'min_quote_volume_24h_usdt': 20_000_000,
         'excluded_symbol_prefixes': 'NCFX,NCCO,NCSK,NCSI',
-        # --- фиксация прибыли (TrailingStopManager, режим roi_gap), всё в % ROI
-        # от маржи; 0 = шаг выключен ---
-        # ROI >= N -> стоп на безубыток с комиссиями
-        'trail_breakeven_roi': 10.0,
-        # куда ставится стоп безубытка (% ROI от входа): покрывает комиссии
-        # (~1% ROI при 10x) и проскальзывание стопа
-        'trail_breakeven_stop_roi': 2.0,
-        # ROI >= N -> стоп тянется за пиком ROI с отступом trail_gap_roi
-        'trail_start_roi': 20.0,
-        'trail_gap_roi': 10.0,
+        # --- фиксация прибыли, в кратных дневного ATR на момент входа (не в ROI:
+        # плечо у каждого пользователя своё). 0 = шаг выключен ---
+        # Отдельный перенос в плюс: прибыль >= N*ATR -> стоп на +profit_lock_stop_atr*ATR.
+        # По умолчанию ВЫКЛЮЧЕН: в бэктесте (scripts/tsmom_exit_grid.py) любой
+        # фиксированный перенос (7–9 ATR -> +3–5) хуже трейлинга ниже — медиана
+        # CAGR 27% против 41%, просадка 38% против 31%.
+        'profit_lock_trigger_atr': 0.0,
+        'profit_lock_stop_atr': 0.0,
+        # Трейлинг: прибыль >= 12*ATR (4 риска при стопе 3 ATR) -> стоп на +5 ATR
+        # (≈1.7 риска гарантировано), дальше стоп = пик - 7 ATR. Отступ большой,
+        # чтобы обычный откат тренда не закрывал позицию.
+        'profit_trail_start_atr': 12.0,
+        'profit_trail_gap_atr': 7.0,
+        # после закрытия трейлингом в прибыль не входить в ту же сторону N минут
+        # (14 суток): иначе вход в уже растянутый тренд на вершине -> стоп.
+        # Разворот в другую сторону паузой не блокируется. 0 = без паузы.
+        'reentry_pause_after_profit_minutes': 20160,
         # сигнал живёт N секунд после закрытия дневной свечи. Для 60-дневного
         # моментума вход через несколько часов ничего не меняет, поэтому сутки:
         # иначе рестарт после 01:00 UTC пропускал целый день (было 3600).
         'max_signal_age_seconds': 86400,
         # повторная сверка внутри дня (сигнал тот же — по закрытым свечам): после
-        # стопа/трейлинга монета снова может войти, а не ждёт следующих суток
-        # или рестарта. 0 = сверка только раз в сутки.
+        # паузы монета снова может войти, а не ждёт следующих суток или рестарта.
+        # 0 = сверка только раз в сутки.
         'recheck_interval_minutes': 60,
         # пауза нового входа по монете после закрытия по безубытку или в минус
         # (прибыльное закрытие паузы не даёт; считает трейдер каждого
-        # пользователя, см. SimpleTrader._handle_target). 0 = без паузы.
-        'reentry_pause_minutes': 30,
+        # пользователя, см. SimpleTrader._handle_target). Сутки: повторный вход
+        # в тот же отскок давал серии стопов (15.11 — 7 стопов за 8 ч), в
+        # бэктесте пауза 1 день — CAGR 10% -> 23%. 0 = без паузы.
+        'reentry_pause_minutes': 1440,
     }
 
     def __init__(self, event_bus: EventBus, config: dict, bingx_client=None):
@@ -158,20 +187,21 @@ class TsMomentumStrategy(BaseStrategy):
                 raise ValueError(f"{key} must be > 0, got {p[key]!r}")
             p[key] = float(p[key])
 
-        for key in ('trail_breakeven_roi', 'trail_breakeven_stop_roi', 'trail_start_roi', 'trail_gap_roi',
-                    'recheck_interval_minutes', 'reentry_pause_minutes'):
+        for key in ('profit_lock_trigger_atr', 'profit_lock_stop_atr', 'profit_trail_start_atr',
+                    'profit_trail_gap_atr', 'recheck_interval_minutes', 'reentry_pause_minutes',
+                    'reentry_pause_after_profit_minutes'):
             if isinstance(p[key], bool) or not isinstance(p[key], (int, float)) or float(p[key]) < 0:
                 raise ValueError(f"{key} must be >= 0, got {p[key]!r}")
             p[key] = float(p[key])
-        if p['trail_breakeven_roi'] > 0 and p['trail_breakeven_stop_roi'] >= p['trail_breakeven_roi']:
+        if p['profit_lock_trigger_atr'] > 0 and p['profit_lock_stop_atr'] >= p['profit_lock_trigger_atr']:
             raise ValueError(
-                f"trail_breakeven_stop_roi ({p['trail_breakeven_stop_roi']:g}) must be < trail_breakeven_roi "
-                f"({p['trail_breakeven_roi']:g}), иначе стоп окажется выше цены в момент переноса"
+                f"profit_lock_stop_atr ({p['profit_lock_stop_atr']:g}) must be < profit_lock_trigger_atr "
+                f"({p['profit_lock_trigger_atr']:g}), иначе стоп окажется за ценой в момент переноса"
             )
-        if p['trail_start_roi'] > 0 and p['trail_gap_roi'] >= p['trail_start_roi']:
+        if p['profit_trail_start_atr'] > 0 and p['profit_trail_gap_atr'] >= p['profit_trail_start_atr']:
             raise ValueError(
-                f"trail_gap_roi ({p['trail_gap_roi']:g}) must be < trail_start_roi ({p['trail_start_roi']:g}), "
-                f"иначе стоп на старте окажется в минусе"
+                f"profit_trail_gap_atr ({p['profit_trail_gap_atr']:g}) must be < profit_trail_start_atr "
+                f"({p['profit_trail_start_atr']:g}), иначе стоп на старте окажется в минусе"
             )
 
         if p['risk_per_trade_percent'] > 10:
@@ -206,9 +236,9 @@ class TsMomentumStrategy(BaseStrategy):
         трейдеры обновят trail_meta своих позиций (refresh_only — без входов/выходов)."""
         if not self.last_targets:
             return
-        meta = self._trail_meta()
         for _bucket, target in list(self.last_targets.values()):
-            refresh = {**target, 'trail_meta': dict(meta), 'refresh_only': True}
+            atr_value = (target.get('trail_meta') or {}).get('atr')
+            refresh = {**target, 'trail_meta': self._trail_meta(atr_value), 'refresh_only': True}
             try:
                 asyncio.get_running_loop().create_task(self.event_bus.publish(Event(
                     type=EventType.SIGNAL_GENERATED, data=refresh, source=self.name,
@@ -216,15 +246,23 @@ class TsMomentumStrategy(BaseStrategy):
             except RuntimeError:
                 return  # нет event loop (тесты/скрипты)
 
-    def _trail_meta(self) -> dict:
+    def _trail_meta(self, atr_value: Optional[float] = None) -> dict:
+        """Фиксация прибыли для TrailingStopManager (режим roi_gap в единицах ATR):
+        трейлинг сам переводит кратные ATR в ROI по плечу конкретной позиции.
+        atr — дневной ATR на момент входа (у уже открытой позиции трейдер
+        сохраняет свой, см. SimpleTrader._handle_target)."""
         p = self._params
-        return {
+        meta = {
             'mode': 'roi_gap',
-            'breakeven_roi': p['trail_breakeven_roi'],
-            'breakeven_stop_roi': p['trail_breakeven_stop_roi'],
-            'start_roi': p['trail_start_roi'],
-            'gap_roi': p['trail_gap_roi'],
+            'unit': 'atr',
+            'lock_trigger_atr': p['profit_lock_trigger_atr'],
+            'lock_stop_atr': p['profit_lock_stop_atr'],
+            'trail_start_atr': p['profit_trail_start_atr'],
+            'trail_gap_atr': p['profit_trail_gap_atr'],
         }
+        if atr_value:
+            meta['atr'] = float(atr_value)
+        return meta
 
     def _refresh_derived_params(self) -> None:
         self._excluded_prefixes = tuple(
@@ -376,22 +414,23 @@ class TsMomentumStrategy(BaseStrategy):
         if desired == 'SHORT' and p['mode'] == 'long_flat':
             desired = None  # в long_flat шортов нет — остаёмся/выходим в кэш
 
+        atr_value = atr(highs, lows, closes, p['atr_period'])[-1]
         target = {
             'action': 'TARGET',
             'symbol': symbol,
             'side': desired,
             'strategy': self.name,
-            'trail_meta': self._trail_meta(),
+            'trail_meta': self._trail_meta(atr_value),
             'momentum_pct': mom * 100.0,
             'refresh_only': False,
             'reentry_pause_minutes': p['reentry_pause_minutes'],
+            'reentry_pause_after_profit_minutes': p['reentry_pause_after_profit_minutes'],
         }
         if desired is None:
             logger.info(f"[{symbol}] TsMomentum TARGET flat: mom({p['lookback_days']}d)={mom*100:+.2f}%")
             return self._remember_target(symbol, bucket, target)
 
         # 3) позиции нет, есть сигнал -> OPEN с vol-target сайзингом
-        atr_value = atr(highs, lows, closes, p['atr_period'])[-1]
         if atr_value is None or atr_value <= 0:
             logger.info(f"[{symbol}] TsMomentum: недостаточно истории для ATR — пропускаю")
             return None
@@ -427,13 +466,16 @@ class TsMomentumStrategy(BaseStrategy):
             'quantity': None,  # размер считает SimpleTrader по risk_percent (vol-target)
             'risk_percent': p['risk_per_trade_percent'],
             'leverage': p['leverage'],
+            # плечо подбирает трейдер под «Макс. стоп» пользователя, стоп не
+            # сжимается; минимальная маржа не раздувает размер (риск = risk_percent)
+            'fit_leverage': True,
             'stop_loss_price': stop_loss_price,
-            # take_profit_levels НЕТ: выход — по развороту сигнала, дизастер-стоп
-            # лишь страхует от гэпа; прибыль фиксирует roi_gap (trail_meta)
+            # take_profit_levels НЕТ: выход — по развороту сигнала или стопу;
+            # прибыль фиксирует roi_gap в единицах ATR (trail_meta)
             'reference_price': price,
             'reason': (
                 f"TSMOM {desired}: доходность за {p['lookback_days']}d = {mom*100:+.2f}% "
-                f"(mode={p['mode']}), размер по vol-target, дизастер-SL {p['disaster_stop_atr']:g}*ATR"
+                f"(mode={p['mode']}), размер по vol-target, SL {p['disaster_stop_atr']:g}*ATR"
             ),
         })
         return self._remember_target(symbol, bucket, target)

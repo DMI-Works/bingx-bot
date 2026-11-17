@@ -70,7 +70,8 @@ class StrategySettingsStore:
         strategy_name: str,
         default_params: Dict[str, Any],
         enabled: bool = True,
-        user_id: str = DEFAULT_USER_ID
+        user_id: str = DEFAULT_USER_ID,
+        params_version: Optional[int] = None,
     ) -> None:
         """
         Викликається при старті бота для кожної стратегії з її "заводськими"
@@ -80,15 +81,28 @@ class StrategySettingsStore:
 
         enabled застосовується лише при ПЕРШОМУ створенні активного
         документа. Далі станом enabled керує виключно set_enabled().
+
+        params_version (PARAMS_VERSION стратегії): якщо у документі збережена
+        менша версія (або її немає), заводські параметри переписуються кодом, а
+        активні — ОДИН раз скидаються на них (старі ключі зникають). Так нові
+        «правильні» дефолти доходять до вже розгорнутого бота; далі користувач
+        знову редагує параметри як завжди.
         """
         now = datetime.utcnow()
 
         existing_default = self._get_row(strategy_name, True, user_id)
+        if existing_default and self._outdated(existing_default, params_version):
+            self.collection.update_one({"_id": existing_default["_id"]}, {"$set": {
+                "params": copy.deepcopy(default_params), "params_version": params_version, "updated_at": now,
+            }})
+            logger.info(f"Default params of '{strategy_name}' replaced by code defaults (version {params_version})")
+            existing_default = self._get_row(strategy_name, True, user_id)
         if not existing_default:
             self.collection.insert_one({
                 "user_id": user_id,
                 "strategy_name": strategy_name,
                 "params": default_params,
+                "params_version": params_version,
                 "is_default": True,
                 "enabled": True,
                 "created_at": now,
@@ -100,11 +114,22 @@ class StrategySettingsStore:
             self._add_missing_keys(existing_default, default_params, now)
 
         existing_active = self._get_row(strategy_name, False, user_id)
+        if existing_active and self._outdated(existing_active, params_version):
+            old_version, old_params = existing_active.get('params_version'), copy.deepcopy(existing_active.get('params'))
+            self.collection.update_one({"_id": existing_active["_id"]}, {"$set": {
+                "params": copy.deepcopy(default_params), "params_version": params_version, "updated_at": now,
+            }})
+            logger.warning(
+                f"Active params of '{strategy_name}' reset to new defaults (version "
+                f"{old_version} -> {params_version}); was: {old_params}"
+            )
+            existing_active = self._get_row(strategy_name, False, user_id)
         if not existing_active:
             self.collection.insert_one({
                 "user_id": user_id,
                 "strategy_name": strategy_name,
                 "params": default_params,
+                "params_version": params_version,
                 "is_default": False,
                 "enabled": enabled,
                 "created_at": now,
@@ -116,6 +141,12 @@ class StrategySettingsStore:
             )
         else:
             self._add_missing_keys(existing_active, default_params, now)
+
+    @staticmethod
+    def _outdated(row: dict, params_version: Optional[int]) -> bool:
+        if params_version is None:
+            return False
+        return (row.get("params_version") or 0) < params_version
 
     def _add_missing_keys(self, row: dict, default_params: Dict[str, Any], now: datetime) -> None:
         """

@@ -34,7 +34,10 @@ class StrategyManager:
 
         for name, strategy_cls in STRATEGY_REGISTRY.items():
             default_config = strategy_cls.build_config(self.config)
-            self.store.seed_defaults(name, default_config, enabled=(name in initially_enabled))
+            self.store.seed_defaults(
+                name, default_config, enabled=(name in initially_enabled),
+                params_version=getattr(strategy_cls, 'PARAMS_VERSION', None),
+            )
 
             strategy_config = self.store.get_params(name)
             if strategy_config is None:

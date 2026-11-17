@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime
@@ -30,6 +31,9 @@ logger = logging.getLogger(__name__)
 # закриття з ROE (до комісій) не вище цього — «по безубитку»: стоп безубитку
 # стоїть близько +2% ROI, а трейлінг фіксує від +10%
 _BREAKEVEN_CLOSE_MAX_ROE = 5.0
+# settings-ключ паузи після закриття трейлінгом у прибуток і скільки її тримати
+_PROFIT_PAUSES_KEY = 'trading.profit_exit_pauses'
+_PROFIT_PAUSE_KEEP_SECONDS = 60 * 86400
 
 # тип закриваючого ордера -> close_reason у trade_analytics
 _CLOSE_REASON_BY_ORDER_TYPE = {
@@ -83,9 +87,33 @@ class SimpleTrader:
         self.event_bus.subscribe(EventType.POSITION_CLOSED, self._remember_close)
         # (symbol, strategy) -> час закриття в мінус або по безубитку
         self._loss_close_at: dict = {}
+        # (symbol, strategy) -> (час, сторона) закриття по стопу В ПРИБУТОК
+        # (трейлінг зафіксував прибуток): пауза входу в ту ж сторону —
+        # reentry_pause_after_profit_minutes у цілі TsMomentum. Пауза довга
+        # (дні), тож переживає рестарт: зберігається в settings.
+        self._profit_close_at: dict = self._load_profit_pauses()
 
         # Відновлюємо активні позиції з БД при старті (переживають рестарт бота)
         self._restore_open_positions()
+
+    def _load_profit_pauses(self) -> dict:
+        try:
+            raw = self.db.get_setting(_PROFIT_PAUSES_KEY) if self.db is not None else None
+            data = json.loads(raw) if raw else {}
+            return {tuple(k.split('|', 1)): (float(v[0]), v[1]) for k, v in data.items()}
+        except Exception as e:
+            logger.warning(f"Не вдалося прочитати {_PROFIT_PAUSES_KEY}: {e}")
+            return {}
+
+    def _save_profit_pauses(self) -> None:
+        cutoff = time.time() - _PROFIT_PAUSE_KEEP_SECONDS
+        self._profit_close_at = {k: v for k, v in self._profit_close_at.items() if v[0] >= cutoff}
+        try:
+            self.db.save_setting(_PROFIT_PAUSES_KEY, json.dumps(
+                {f"{k[0]}|{k[1]}": [v[0], v[1]] for k, v in self._profit_close_at.items()}
+            ))
+        except Exception as e:
+            logger.warning(f"Не вдалося зберегти {_PROFIT_PAUSES_KEY}: {e}")
 
     def _restore_open_positions(self) -> None:
         """Підтягуємо з БД позиції, які залишились OPEN з попереднього запуску"""
@@ -187,6 +215,7 @@ class SimpleTrader:
             trail_meta=signal.get('trail_meta'),
             signal_context=signal.get('analytics_context'),
             leverage=signal.get('leverage', 10),
+            fit_leverage=bool(signal.get('fit_leverage')),
             stop_loss_price=signal.get('stop_loss_price'),
             take_profit_levels=signal.get('take_profit_levels'),
             strategy=signal.get('strategy'),
@@ -206,6 +235,9 @@ class SimpleTrader:
                 self._loss_close_at[key] = time.time()
             else:
                 self._loss_close_at.pop(key, None)
+                if data.get('close_order_type') == 'STOP_MARKET' and data.get('side') and hasattr(self, '_profit_close_at'):
+                    self._profit_close_at[key] = (time.time(), data['side'])
+                    self._save_profit_pauses()
 
     def _strategy_side(self, symbol: str, strategy: str) -> Optional[str]:
         for side in ('LONG', 'SHORT'):
@@ -231,6 +263,10 @@ class SimpleTrader:
         if current is not None and current == desired:
             pos = self.open_positions.get(position_key(symbol, current))
             meta = target.get('trail_meta')
+            old_meta = (pos or {}).get('trail_meta') or {}
+            if meta and meta.get('unit') == 'atr' and old_meta.get('unit') == 'atr' and old_meta.get('atr'):
+                # рівні фіксації — від ATR на момент ВХОДУ, а не сьогоднішнього
+                meta = {**meta, 'atr': old_meta['atr']}
             if pos is not None and meta and pos.get('trail_meta') != meta:
                 pos['trail_meta'] = dict(meta)
                 persist_position_metadata(self.db, pos, context="trail_meta refresh")
@@ -258,6 +294,17 @@ class SimpleTrader:
             if left > 0:
                 logger.info(f"[{symbol}] {strategy}: вхід {desired} на паузі ще {left / 60:.0f} хв")
                 return
+        # після фіксації прибутку трейлінгом не заходимо одразу знову в той самий,
+        # уже розтягнутий тренд (бектест: інакше вхід на вершині і стоп)
+        profit_pause = target.get('reentry_pause_after_profit_minutes') or 0
+        profit_close = getattr(self, '_profit_close_at', {}).get((symbol, strategy))
+        if profit_pause > 0 and profit_close is not None and profit_close[1] == desired:
+            left = profit_close[0] + profit_pause * 60 - time.time()
+            if left > 0:
+                logger.info(
+                    f"[{symbol}] {strategy}: вхід {desired} після фіксації прибутку на паузі ще {left / 3600:.0f} год"
+                )
+                return
         await self._handle_signal(Event(
             type=EventType.SIGNAL_GENERATED,
             data={**target, 'action': 'OPEN'},
@@ -273,8 +320,12 @@ class SimpleTrader:
         stop_loss_price: Optional[float],
         reference_price: Optional[float],
         risk_percent: Optional[float],
+        margin_cap: bool = True,
     ) -> Optional[float]:
-        """Розмір позиції. None — позицію відкривати НЕ можна."""
+        """Розмір позиції. None — позицію відкривати НЕ можна.
+        margin_cap=False — без стелі max_margin_percent_per_trade (для fit_leverage:
+        стоп широкий, розмір і так помірний, а стеля 5% equity на малому
+        депозиті різала угоду нижче запланованого ризику)."""
         if risk_percent:
             # Стратегія ЯВНО запросила ризик на угоду — працює незалежно від
             # глобального use_risk_based_sizing і БЕЗ fallback на quantity
@@ -287,6 +338,7 @@ class SimpleTrader:
                     stop_loss_price=stop_loss_price,
                     risk_percent=risk_percent,
                     leverage=leverage,  # вмикає комісію в ризику і стелю маржі
+                    margin_cap=margin_cap,
                 )
             if not risk_quantity or risk_quantity <= 0:
                 logger.warning(
@@ -320,6 +372,38 @@ class SimpleTrader:
                 f"falling back to strategy quantity={quantity}"
             )
         return quantity
+
+    def _fit_leverage_to_stop(
+        self,
+        symbol: str,
+        side: str,
+        max_leverage: int,
+        stop_loss_price: Optional[float],
+        reference_price: Optional[float],
+    ) -> int:
+        """Найбільше плече (<= max_leverage), за якого збиток на стопі вкладається
+        в trading.max_stop_roi_percent. Стоп не чіпаємо: на результат угоди плече
+        не впливає (розмір рахується від ризику), лише на зайняту маржу. Якщо
+        стоп не влазить навіть на 1x — повертаємо 1, а стоп стисне
+        _clamp_stop_to_max_roi."""
+        max_leverage = max(1, int(max_leverage or 1))
+        if not stop_loss_price or not reference_price or reference_price <= 0:
+            return max_leverage
+        getter = getattr(self.settings_manager, 'get_max_stop_roi_percent', None)
+        max_roi = getter() if callable(getter) else None
+        if not isinstance(max_roi, (int, float)) or max_roi <= 0:
+            return max_leverage
+        stop_fraction = abs(reference_price - stop_loss_price) / reference_price
+        if stop_fraction <= 0:
+            return max_leverage
+        fitted = int(max_roi / 100.0 / stop_fraction + 1e-9)
+        leverage = max(1, min(max_leverage, fitted))
+        if leverage != max_leverage:
+            logger.info(
+                f"Leverage for {symbol} {side}: {max_leverage}x -> {leverage}x — стоп {stop_fraction * 100:.2f}% "
+                f"ціни = {stop_fraction * leverage * 100:.0f}% ROI (макс. {max_roi:g}%)"
+            )
+        return leverage
 
     def _clamp_stop_to_max_roi(
         self,
@@ -460,6 +544,7 @@ class SimpleTrader:
         risk_percent: Optional[float] = None,
         trail_meta: Optional[dict] = None,
         signal_context: Optional[dict] = None,
+        fit_leverage: bool = False,
     ) -> bool:
         try:
             positions_info_message = "Позицію відкрито."
@@ -472,14 +557,21 @@ class SimpleTrader:
             if strategy:
                 positions_info_message = f"{positions_info_message} | Стратегія: {strategy}"
 
+            if fit_leverage:
+                # плече під стоп замість стиснення стопу (TsMomentum)
+                leverage = self._fit_leverage_to_stop(symbol, side, leverage, stop_loss_price, reference_price)
             stop_loss_price = self._clamp_stop_to_max_roi(symbol, side, leverage, stop_loss_price, reference_price)
 
             quantity = await self._resolve_quantity(
-                symbol, side, quantity, leverage, stop_loss_price, reference_price, risk_percent
+                symbol, side, quantity, leverage, stop_loss_price, reference_price, risk_percent,
+                margin_cap=not fit_leverage,
             )
             if risk_percent and quantity is None:
                 return False
-            quantity = self._apply_min_margin(symbol, side, quantity, leverage, reference_price)
+            if not fit_leverage:
+                # для fit_leverage розмір = рівно risk_percent: підлога маржі
+                # роздувала б ризик (05–16.11: 15 USDT x10 = 5–7% equity на угоду)
+                quantity = self._apply_min_margin(symbol, side, quantity, leverage, reference_price)
             quantity = self._apply_max_margin(symbol, side, quantity, leverage, reference_price)
 
             logger.info(f"Opening position: {symbol} {side} {quantity} (strategy={strategy})")

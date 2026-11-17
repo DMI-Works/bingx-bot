@@ -10,6 +10,9 @@ from ..events import EventBus, Event, EventType, publish_error
 
 logger = logging.getLogger(__name__)
 
+# fit_leverage-угоди (без стелі max_margin_percent_per_trade): маржа <= 50% equity
+_UNCAPPED_MAX_MARGIN_FRACTION = 0.5
+
 
 class RiskManager:
     def __init__(self, db: Database, event_bus: EventBus, exchange, config: dict, settings_manager=None):
@@ -227,7 +230,7 @@ class RiskManager:
 
     async def compute_risk_based_quantity(
         self, entry_price: float, stop_loss_price: float, risk_percent: Optional[float] = None,
-        leverage: Optional[float] = None,
+        leverage: Optional[float] = None, margin_cap: bool = True,
     ) -> Optional[float]:
         """
         quantity = (equity * risk_percent%) / (|entry_price - stop_loss_price| + комісія round-trip на 1 шт.)
@@ -284,7 +287,7 @@ class RiskManager:
             f"-> quantity={quantity:.8f}"
         )
 
-        if leverage and self.max_margin_percent_per_trade > 0:
+        if margin_cap and leverage and self.max_margin_percent_per_trade > 0:
             max_margin = equity * (self.max_margin_percent_per_trade / 100.0)
             max_quantity = max_margin * leverage / entry_price
             if quantity > max_quantity:
@@ -293,6 +296,16 @@ class RiskManager:
                     f"{quantity * entry_price / leverage:.2f} USDT "
                     f"(> {self.max_margin_percent_per_trade}% of equity = {max_margin:.2f} USDT); "
                     f"actual risk is lower than requested {pct}%"
+                )
+                quantity = max_quantity
+        elif leverage and not margin_cap:
+            # без стелі в % (fit_leverage): лише запобіжник від аномально
+            # вузького стопу — маржа угоди не більше половини equity
+            max_quantity = equity * _UNCAPPED_MAX_MARGIN_FRACTION * leverage / entry_price
+            if quantity > max_quantity:
+                logger.warning(
+                    f"RiskManager: quantity {quantity:.8f} capped to {max_quantity:.8f} — margin > "
+                    f"{_UNCAPPED_MAX_MARGIN_FRACTION:.0%} of equity; actual risk is lower than requested {pct}%"
                 )
                 quantity = max_quantity
         return quantity

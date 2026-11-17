@@ -118,7 +118,8 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(s.bingx_client.klines_calls, 2)
         target = s.event_bus._queue.get_nowait().data
         self.assertEqual((target['action'], target['side']), ('TARGET', 'LONG'))
-        self.assertEqual(target['reentry_pause_minutes'], 30)
+        self.assertEqual(target['reentry_pause_minutes'], 1440)
+        self.assertEqual(target['reentry_pause_after_profit_minutes'], 20160)
 
     async def test_recheck_can_be_disabled(self):
         s = _strategy([100 + i for i in range(40)])
@@ -147,7 +148,8 @@ class TestSignal(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(sig.get('take_profit_levels'))
         self.assertLess(sig['stop_loss_price'], sig['reference_price'])  # SL нижче для LONG
         self.assertEqual(sig['leverage'], 10)
-        self.assertEqual(sig['risk_percent'], 2.0)
+        self.assertEqual(sig['risk_percent'], 3.0)
+        self.assertTrue(sig['fit_leverage'])
         self.assertIsNone(sig['quantity'])
 
     async def test_open_short_on_negative_momentum(self):
@@ -183,6 +185,7 @@ class TestTraderTargetReconcile(unittest.IsolatedAsyncioTestCase):
         trader.settings_manager = None
         trader._last_close_at = {}
         trader._loss_close_at = {}
+        trader._profit_close_at = {}
         return trader
 
     async def _closed(self, trader, net_pnl, roe, strategy='TsMomentumStrategy'):
@@ -251,6 +254,44 @@ class TestTraderTargetReconcile(unittest.IsolatedAsyncioTestCase):
         await trader._handle_target(self._target('LONG'))
         trader.open_position.assert_awaited_once()
         self.assertEqual(trader.open_position.call_args.kwargs['side'], 'LONG')
+
+    async def test_open_passes_fit_leverage(self):
+        trader = self._trader({})
+        await trader._handle_target(self._target('LONG', fit_leverage=True))
+        self.assertTrue(trader.open_position.call_args.kwargs['fit_leverage'])
+
+    async def test_pause_after_profit_exit_same_side_only(self):
+        from core.events import Event, EventType
+        trader = self._trader({})
+        await trader._remember_close(Event(type=EventType.POSITION_CLOSED, data={
+            'symbol': 'BTC-USDT', 'side': 'LONG', 'strategy': 'TsMomentumStrategy', 'net_pnl': 12.0,
+            'roe_percent': 60.0, 'close_order_type': 'STOP_MARKET'}))
+        trader.db.save_setting.assert_called_once()
+        await trader._handle_target(self._target('LONG', reentry_pause_after_profit_minutes=20160))
+        trader.open_position.assert_not_awaited()
+        await trader._handle_target(self._target('SHORT', reentry_pause_after_profit_minutes=20160))
+        trader.open_position.assert_awaited_once()
+
+    async def test_profit_pause_survives_restart(self):
+        import json
+        import core.trading.simple_trader as st
+        import time as _t
+        trader = self._trader({})
+        trader.db.get_setting.return_value = json.dumps({'BTC-USDT|TsMomentumStrategy': [_t.time(), 'LONG']})
+        trader._profit_close_at = trader._load_profit_pauses()
+        await trader._handle_target(self._target('LONG', reentry_pause_after_profit_minutes=20160))
+        trader.open_position.assert_not_awaited()
+
+    async def test_refresh_keeps_entry_atr(self):
+        from core.common.position_math import position_key
+        old = {'mode': 'roi_gap', 'unit': 'atr', 'atr': 2.0, 'lock_trigger_atr': 8.0, 'lock_stop_atr': 4.0,
+               'trail_start_atr': 15.0, 'trail_gap_atr': 7.0}
+        pos = {'strategy': 'TsMomentumStrategy', 'side': 'LONG', 'trail_meta': dict(old), 'order_id': 'o1'}
+        trader = self._trader({position_key('BTC-USDT', 'LONG'): pos})
+        new = {**old, 'atr': 3.5, 'lock_trigger_atr': 10.0}
+        await trader._handle_target(self._target('LONG', trail_meta=new, refresh_only=True))
+        self.assertEqual(pos['trail_meta']['atr'], 2.0)              # ATR входу
+        self.assertEqual(pos['trail_meta']['lock_trigger_atr'], 10.0)  # нові параметри
 
     async def test_refresh_only_never_opens_or_closes(self):
         from core.common.position_math import position_key
@@ -364,7 +405,15 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
         closes = [100 + i for i in range(40)]
         s = _strategy(closes)
         sig = await s._reconcile('BTC-USDT', _bucket_now(), DAY)
-        self.assertEqual(sig['trail_meta'], {**self.META, 'start_roi': 20.0, 'gap_roi': 10.0})
+        meta = sig['trail_meta']
+        self.assertEqual(
+            {k: v for k, v in meta.items() if k != 'atr'},
+            {'mode': 'roi_gap', 'unit': 'atr', 'lock_trigger_atr': 0.0, 'lock_stop_atr': 0.0,
+             'trail_start_atr': 12.0, 'trail_gap_atr': 7.0},
+        )
+        self.assertAlmostEqual(meta['atr'], sig['analytics_context']['atr'])
+        # стоп = 3 ATR від ціни
+        self.assertAlmostEqual(sig['reference_price'] - sig['stop_loss_price'], 3.0 * meta['atr'])
 
     async def test_manager_moves_stop_to_peak_minus_gap(self):
         from core.risk.trailing_stop_manager import TrailingStopManager
@@ -448,11 +497,15 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
 
     def test_breakeven_stop_must_be_below_trigger(self):
         cfg = TsMomentumStrategy.build_config(None)
-        cfg['trail_breakeven_stop_roi'] = 10.0
+        cfg['profit_lock_trigger_atr'] = 8.0
+        cfg['profit_lock_stop_atr'] = 8.0
         with self.assertRaises(ValueError):
             TsMomentumStrategy._parse_params(cfg)
-        cfg['trail_breakeven_stop_roi'] = 3.0
-        self.assertEqual(TsMomentumStrategy._parse_params(cfg)['trail_breakeven_stop_roi'], 3.0)
+        cfg['profit_lock_stop_atr'] = 3.0
+        self.assertEqual(TsMomentumStrategy._parse_params(cfg)['profit_lock_stop_atr'], 3.0)
+        cfg['profit_trail_gap_atr'] = 15.0
+        with self.assertRaises(ValueError):
+            TsMomentumStrategy._parse_params(cfg)
 
     async def test_cooldown_between_moves(self):
         from core.risk.trailing_stop_manager import TrailingStopManager
@@ -596,3 +649,132 @@ class TestClosePosition(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestAtrProfitLock(unittest.IsolatedAsyncioTestCase):
+    """roi_gap у одиницях ATR: рівні фіксації переводяться в ROI за плечем позиції."""
+    META = {'mode': 'roi_gap', 'unit': 'atr', 'atr': 2.0, 'lock_trigger_atr': 8.0, 'lock_stop_atr': 4.0,
+            'trail_start_atr': 15.0, 'trail_gap_atr': 7.0}
+
+    def _tsm(self, position):
+        from core.risk.trailing_stop_manager import TrailingStopManager
+        tsm = TrailingStopManager.__new__(TrailingStopManager)
+        tsm.taker_fee_rate = 0.0005
+        tsm._retry_after = {}
+        tsm.move_retry_cooldown_seconds = 10
+        tsm.trader = mock.MagicMock()
+        tsm.trader.open_positions = {'k': position}
+        tsm._move_stop_loss = mock.AsyncMock(return_value=1)
+        return tsm
+
+    def _pos(self, leverage, side='LONG', stop=94.0):
+        return {'symbol': 'BTC-USDT', 'side': side, 'entry_price': 100.0, 'leverage': leverage,
+                'stop_loss_price': stop, 'sl_order_id': 'sl1', 'trail_meta': dict(self.META)}
+
+    def test_conversion_depends_on_leverage(self):
+        from core.risk.trailing_roi_gap import atr_meta_to_roi
+        m3 = atr_meta_to_roi(self.META, 100.0, 3)
+        self.assertAlmostEqual(m3['breakeven_roi'], 48.0)       # 8 ATR = 16% ціни × 3
+        self.assertAlmostEqual(m3['breakeven_stop_roi'], 24.0)
+        self.assertAlmostEqual(m3['gap_roi'], 42.0)
+        self.assertAlmostEqual(atr_meta_to_roi(self.META, 100.0, 1)['breakeven_roi'], 16.0)
+        self.assertEqual(atr_meta_to_roi({**self.META, 'atr': None}, 100.0, 3)['breakeven_roi'], 0.0)
+
+    async def test_no_move_before_lock_trigger(self):
+        from core.risk.trailing_state import TrailState
+        pos = self._pos(3)
+        tsm = self._tsm(pos)
+        await tsm._process_roi_gap_position('k', pos, TrailState(), 115.0, 3.0)  # +7.5 ATR
+        tsm._move_stop_loss.assert_not_awaited()
+
+    async def test_lock_moves_stop_to_plus_4_atr(self):
+        from core.risk.trailing_state import TrailState
+        for lev in (1, 3, 7):  # ціна стопу однакова за будь-якого плеча
+            pos = self._pos(lev)
+            tsm = self._tsm(pos)
+            await tsm._process_roi_gap_position('k', pos, TrailState(), 117.0, float(lev))  # +8.5 ATR
+            _, _, price = tsm._move_stop_loss.call_args.args[3][0]
+            self.assertAlmostEqual(price, 108.0)
+
+    async def test_trail_follows_peak_with_7_atr_gap_short(self):
+        from core.risk.trailing_state import TrailState
+        pos = self._pos(3, side='SHORT', stop=106.0)
+        tsm = self._tsm(pos)
+        await tsm._process_roi_gap_position('k', pos, TrailState(), 66.0, 3.0)  # +17 ATR
+        _, _, price = tsm._move_stop_loss.call_args.args[3][0]
+        self.assertAlmostEqual(price, 80.0)  # пік 66 + 7 ATR
+
+
+class TestFitLeverage(unittest.TestCase):
+    def _trader(self, max_roi):
+        from core.trading.simple_trader import SimpleTrader
+        t = SimpleTrader.__new__(SimpleTrader)
+        t.settings_manager = mock.MagicMock()
+        t.settings_manager.get_max_stop_roi_percent.return_value = max_roi
+        return t
+
+    def test_leverage_fits_stop_into_max_roi(self):
+        t = self._trader(30.0)
+        self.assertEqual(t._fit_leverage_to_stop('X', 'LONG', 10, 90.0, 100.0), 3)    # стоп 10% -> 3x
+        self.assertEqual(t._fit_leverage_to_stop('X', 'LONG', 10, 75.0, 100.0), 1)    # 25% -> 1x
+        self.assertEqual(t._fit_leverage_to_stop('X', 'SHORT', 10, 102.0, 100.0), 10) # 2% -> стеля 10x
+        self.assertEqual(self._trader(70.0)._fit_leverage_to_stop('X', 'LONG', 10, 90.0, 100.0), 7)
+
+    def test_stop_not_tightened_after_fit(self):
+        t = self._trader(30.0)
+        lev = t._fit_leverage_to_stop('X', 'LONG', 10, 90.0, 100.0)
+        self.assertEqual(t._clamp_stop_to_max_roi('X', 'LONG', lev, 90.0, 100.0), 90.0)
+        # не влазить навіть на 1x -> 1x і стоп стискається
+        self.assertEqual(t._fit_leverage_to_stop('X', 'LONG', 10, 60.0, 100.0), 1)
+        self.assertAlmostEqual(t._clamp_stop_to_max_roi('X', 'LONG', 1, 60.0, 100.0), 70.0)
+
+
+class TestStrategyParamsVersion(unittest.TestCase):
+    def _store(self, rows):
+        from core.database.strategy_settings import StrategySettingsStore
+        store = StrategySettingsStore.__new__(StrategySettingsStore)
+        coll = mock.MagicMock()
+
+        def find_one(q):
+            for r in rows:
+                if r['strategy_name'] == q['strategy_name'] and r['is_default'] == q['is_default']:
+                    return r
+            return None
+
+        def update_one(q, upd):
+            for r in rows:
+                if r.get('_id') == q.get('_id'):
+                    for k, v in upd['$set'].items():
+                        if '.' in k:
+                            a, b = k.split('.', 1)
+                            r[a][b] = v
+                        else:
+                            r[k] = v
+        coll.find_one.side_effect = find_one
+        coll.update_one.side_effect = update_one
+        store.collection = coll
+        return store
+
+    def test_old_version_resets_active_and_default(self):
+        rows = [
+            {'_id': 1, 'strategy_name': 'S', 'is_default': True, 'params': {'a': 1, 'old': 5}},
+            {'_id': 2, 'strategy_name': 'S', 'is_default': False, 'params': {'a': 7, 'old': 5}, 'enabled': True},
+        ]
+        store = self._store(rows)
+        store.seed_defaults('S', {'a': 2, 'new': 3}, params_version=2)
+        self.assertEqual(rows[0]['params'], {'a': 2, 'new': 3})
+        self.assertEqual(rows[1]['params'], {'a': 2, 'new': 3})
+        self.assertTrue(rows[1]['enabled'])
+        # повторний старт — уже актуальна версія, правки користувача не чіпаємо
+        rows[1]['params']['a'] = 9
+        store.seed_defaults('S', {'a': 2, 'new': 3}, params_version=2)
+        self.assertEqual(rows[1]['params']['a'], 9)
+
+    def test_no_version_keeps_user_params(self):
+        rows = [
+            {'_id': 1, 'strategy_name': 'S', 'is_default': True, 'params': {'a': 1}},
+            {'_id': 2, 'strategy_name': 'S', 'is_default': False, 'params': {'a': 7}},
+        ]
+        store = self._store(rows)
+        store.seed_defaults('S', {'a': 2, 'b': 1})
+        self.assertEqual(rows[1]['params'], {'a': 7, 'b': 1})
