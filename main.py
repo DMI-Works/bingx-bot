@@ -100,7 +100,7 @@ async def run_bot(config: ConfigLoader) -> None:
     """
     logger = logging.getLogger(__name__)
     logger.info("=" * 60)
-    logger.info("Starting Ruflo Trading Bot (multi-user)")
+    logger.info("Starting Velora Trading Bot (multi-user)")
     logger.info("=" * 60)
 
     mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
@@ -271,7 +271,7 @@ async def run_bot(config: ConfigLoader) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop_requested.set)
 
-    logger.info("Ruflo Trading Bot is running")
+    logger.info("Velora Trading Bot is running")
     await stop_requested.wait()
     logger.info("Shutdown signal received")
 
@@ -289,7 +289,7 @@ async def run_bot(config: ConfigLoader) -> None:
     await market.close()
     await shared_bus.stop()
     mongo_client.close()
-    logger.info("Ruflo Trading Bot stopped")
+    logger.info("Velora Trading Bot stopped")
 
 
 if __name__ == "__main__":

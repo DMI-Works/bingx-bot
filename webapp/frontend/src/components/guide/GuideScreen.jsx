@@ -172,7 +172,7 @@ export default function GuideScreen({ section, onClose }) {
         <Step id="keys" n={4} icon={KeyRound} title="Создайте API-ключ">
           <Path items={["Профиль", "Управление API", "Создать API"]} />
           <ol className="guide-list guide-list-num">
-            <li>Название — любое, например <span className="guide-code">Ruflo</span>.</li>
+            <li>Название — любое, например <span className="guide-code">Velora</span>.</li>
             <li>Подтвердите создание кодами из почты / SMS / Google Authenticator.</li>
             <li>Права: оставьте <b>«Чтение»</b> и включите <b>«Торговля бессрочными фьючерсами»</b>.</li>
             <li>Ограничение по IP не включайте: адрес сервера бота может меняться, и ключ перестанет работать.</li>

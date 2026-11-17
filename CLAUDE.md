@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Async Python trading bot for BingX perpetual futures ("Ruflo Trading Bot"), plus a Telegram Mini App (FastAPI backend + React/Vite frontend) used to monitor and configure it. Code comments, log messages and UI strings are in Ukrainian/Russian. Follow that in new code.
+Async Python trading bot for BingX perpetual futures ("Velora Trading Bot"), plus a Telegram Mini App (FastAPI backend + React/Vite frontend) used to monitor and configure it. Code comments, log messages and UI strings are in Ukrainian/Russian. Follow that in new code.
 
 `README.md` (Russian) is the user-facing description. Keep it in sync when you change setup steps, env vars, config keys or strategies. Storage is **MongoDB** (`pymongo`), and the working strategies are `WallBreakoutStrategy`, `TrendSupertrendStrategy` and `TsMomentumStrategy` (daily time-series momentum: holds until the momentum sign flips, exits via `SimpleTrader.close_position` reduce-only market order rather than a price stop; vol-target sizing; its own stable `trading.tsmom_filters` pool). `SimpleTrader.close_position(symbol, side, reason)` is the only programmatic (non-event) close path — it cancels resting SL/TP and sends a reduce-only MARKET order; the normal ORDER_TRADE_UPDATE→`_finalize_close` flow finalizes it (tagged `closed_by=bot`, `close_reason=<reason>`).
 

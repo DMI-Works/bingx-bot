@@ -1,5 +1,5 @@
 """
-Ruflo Mini App backend.
+Velora Mini App backend.
 
 Своєї БД і свого exchange-клієнта не відкриває: спільні об'єкти (users,
 sessions, пул монет, параметри стратегій) main.py кладе в app.state, а дані
@@ -18,7 +18,7 @@ from .routes import account, admin, analytics, profile, settings, symbols, trade
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
-    title="Ruflo Mini App API",
+    title="Velora Mini App API",
     # публічна карта API не потрібна: Mini App знає свої ендпоінти
     docs_url=None, redoc_url=None, openapi_url=None,
 )

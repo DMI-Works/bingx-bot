@@ -20,7 +20,7 @@ export default function Welcome() {
       <div className="welcome-hero">
         <div className="welcome-glow" />
         <div className="guide-hero-icon"><Bot size={30} /></div>
-        <h1 className="welcome-title">Ruflo — торговый бот для BingX</h1>
+        <h1 className="welcome-title">Velora — торговый бот для BingX</h1>
         <p className="welcome-text">
           Автоматическая торговля бессрочными фьючерсами. Деньги остаются на вашем счёте —
           бот только открывает и закрывает сделки.

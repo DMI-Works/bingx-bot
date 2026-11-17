@@ -1,4 +1,4 @@
-# Ruflo Trading Bot
+# Velora Trading Bot
 
 Асинхронный торговый бот для бессрочных фьючерсов **BingX** (USDT-M perpetual) и Telegram Mini App для мониторинга и настройки бота.
 
