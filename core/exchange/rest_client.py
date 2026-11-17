@@ -141,7 +141,7 @@ class RestClient:
                     request_params.setdefault('recvWindow', 60000)
                     request_params['timestamp'] = await self._get_timestamp_ms()
                     params_str = self._parse_param(request_params)
-                    logger.info(f"[SIGN DEBUG] endpoint={endpoint}, params_str={params_str}")
+                    logger.debug(f"[SIGN DEBUG] endpoint={endpoint}, params_str={params_str}")
                     request_params['signature'] = self._generate_signature(params_str)
 
                 query_string = self._parse_param(request_params) if request_params else ""

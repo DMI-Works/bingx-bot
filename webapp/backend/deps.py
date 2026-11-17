@@ -4,9 +4,15 @@
 стартував або webapp запущено окремо) — 503, решта API працює далі.
 """
 
+import logging
+
 from fastapi import Header, HTTPException, Request
 
+from core.common.owner_access import is_owner, owner_ids
+
 from .auth import validate_init_data
+
+logger = logging.getLogger(__name__)
 
 
 def _require_state(request: Request, attr: str, detail: str):
@@ -45,8 +51,20 @@ def require_restart_event(request: Request):
     return _require_state(request, "restart_event", "Bot supervisor not running")
 
 
-def require_telegram_user(x_telegram_init_data: str = Header(default="")) -> dict:
+def require_telegram_user(request: Request, x_telegram_init_data: str = Header(default="")) -> dict:
+    """Підпис Telegram + власник бота. Висить на КОЖНОМУ роутері (api.py):
+    дані й керування реальним рахунком — лише для ADMIN_TELEGRAM_ID."""
+    client_ip = request.client.host if request.client else "?"
     user = validate_init_data(x_telegram_init_data)
     if user is None:
+        logger.warning(f"[AUTH] 401 invalid init data: {request.method} {request.url.path} ip={client_ip}")
         raise HTTPException(status_code=401, detail="Invalid Telegram init data")
+    if not is_owner(user.get("id")):
+        if not owner_ids():
+            logger.critical("[AUTH] ADMIN_TELEGRAM_ID не задано — Mini App закритий для всіх")
+        logger.warning(
+            f"[AUTH] 403 not owner: user={user.get('id')} @{user.get('username')} "
+            f"{request.method} {request.url.path} ip={client_ip}"
+        )
+        raise HTTPException(status_code=403, detail="Доступ только для владельца бота")
     return user

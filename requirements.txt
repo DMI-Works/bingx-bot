@@ -1,19 +1,21 @@
 # Python dependencies
-aiohttp>=3.9.0
-websockets>=12.0
-python-dotenv>=1.0.0
-PyYAML>=6.0
-python-telegram-bot>=21.0
-Pillow>=11.0.0
-qrcode>=8.0.0
+# Версії зафіксовані: кожна збірка на Railway ставить ті самі пакети, що
+# перевірені тестами (python:3.11-slim). Оновлення — свідомо: підняти версію,
+# прогнати python -m unittest discover tests, закомітити.
+aiohttp==3.14.5
+websockets==17.4
+python-dotenv==1.2.4
+PyYAML==6.0.3
+python-telegram-bot==22.8
+Pillow==13.0.0
+qrcode==8.2
 
-# Database (MongoDB Atlas, mongodb+srv:// requires the [srv] extra)
-pymongo[srv]>=4.9,<5
-certifi>=2024.2.2
+# Database (MongoDB Atlas; dnspython для mongodb+srv:// pymongo 4.x тягне сам)
+pymongo==4.20.0
+certifi==2026.10.23
 
-# Optional for enhanced features
-# numpy>=1.24.0  # For advanced calculations
-# pandas>=2.0.0  # For data analysis
+# Шифрування API-ключів користувачів (SECRETS_KEY)
+cryptography==50.0.2
 
-fastapi
-uvicorn[standard]
+fastapi==0.163.1
+uvicorn[standard]==0.54.0

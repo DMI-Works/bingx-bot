@@ -7,7 +7,7 @@ SL, часткові TP, знімок налаштувань стратегії 
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..deps import require_db
 
@@ -27,8 +27,8 @@ def get_analytics_trades(
     strategy: Optional[str] = None,
     mode: Optional[str] = None,
     status: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ):
     rows = require_db(request).get_trade_analytics_list(
         symbol=symbol, strategy=strategy, mode=mode, status=status, limit=limit, offset=offset,

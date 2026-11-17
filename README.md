@@ -61,6 +61,7 @@ BINGX_API_KEY=...
 BINGX_API_SECRET=...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
+ADMIN_TELEGRAM_ID=...
 WEBAPP_URL=https://<домен Mini App>
 MONGO_URI=mongodb+srv://...
 MONGO_DB_NAME=...
@@ -71,6 +72,7 @@ MONGO_DB_NAME=...
 | `BINGX_API_KEY`, `BINGX_API_SECRET` | Ключи BingX (live). Без них бот не стартует |
 | `BINGX_API_KEY_TESTNET`, `BINGX_API_SECRET_TESTNET` | Опциональные ключи для testnet (VST). В режиме testnet бот берёт их; без них — откат на live-ключи (VST-эндпоинты их не примут) |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Бот для уведомлений; токен также нужен для проверки `initData` в Mini App |
+| `ADMIN_TELEGRAM_ID` | **Обязательна для Mini App.** Ваш личный Telegram id (можно несколько через запятую). Mini App и кнопки аварийной остановки доступны только ему. Если `TELEGRAM_CHAT_ID` — личный чат (положительный id), он тоже считается владельцем; групповой чат доступа не даёт. Ни одного id — доступ закрыт для всех |
 | `WEBAPP_URL` | HTTPS-адрес Mini App; без него кнопка «Профіль» в `/start` скрыта |
 | `MONGO_URI` | **Обязательна.** Проверяется при импорте модуля базы данных |
 | `MONGO_DB_NAME` | Имя базы. В режиме testnet к нему добавляется суффикс `_testnet` |
@@ -118,13 +120,13 @@ Multi-stage `Dockerfile` собирает фронтенд (node:20-slim), за�
 - **Налаштування** — глобальный переключатель торговли, включение и параметры стратегий, сброс к значениям по умолчанию.
 - **Профіль**.
 
-Изменяющие запросы к API проверяют Telegram `initData` (заголовок `X-Telegram-Init-Data`).
+Каждый запрос к `/api/*` (включая чтение баланса и позиций) проверяет Telegram `initData` (заголовок `X-Telegram-Init-Data`) и что это владелец бота (`ADMIN_TELEGRAM_ID`): чужой — 403. Кнопки `/start` и аварийной остановки тоже работают только для владельца.
 
 ### Разработка фронтенда
 
 ```bash
 cd webapp/frontend
-npm install
+npm ci          # ровно версии из package-lock.json
 npm run dev     # Vite на :5173, /api проксируется на http://localhost:8000
 npm run build   # сборка в webapp/backend/static, FastAPI отдаёт её по /
 ```
@@ -251,6 +253,9 @@ python -m unittest tests.test_trend_supertrend.TestIndicators.test_atr_wilder -v
 ## Безопасность
 
 - Давайте API-ключам только права на торговлю, без вывода средств.
+- Mini App и аварийные кнопки доступны только `ADMIN_TELEGRAM_ID`; отказы пишутся в лог с меткой `[AUTH]`.
+- Ответы сервера содержат заголовки безопасности (CSP, HSTS, `nosniff`), CORS выключен, `/docs` и `/openapi.json` закрыты (`webapp/backend/security.py`).
+- Версии Python-пакетов зафиксированы в `requirements.txt`, фронтенд собирается `npm ci` по `package-lock.json`.
 - Включите IP whitelist на бирже.
 - Проверяйте изменения на testnet и начинайте с малых сумм.
 - Не коммитьте `.env`.

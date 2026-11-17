@@ -37,7 +37,8 @@ class WebSocketClient:
         self._reconnecting = False
 
     async def connect(self) -> None:
-        logger.info(f"Connecting to WebSocket: {self.url}")
+        # listenKey у URL дає доступ до потоку рахунку — у лог не пишемо
+        logger.info(f"Connecting to WebSocket: {self.url.split('?', 1)[0]}")
 
         try:
             self.ws = await websockets.connect(self.url)

@@ -1,0 +1,16 @@
+# Не тягнемо в образ секрети, історію git і локальні артефакти
+.env
+*.env
+!.env.example
+.git
+.gitignore
+logs/
+**/__pycache__/
+*.py[cod]
+webapp/frontend/node_modules/
+webapp/backend/static/
+.vscode/
+.idea/
+.claude/
+tests/
+*.log

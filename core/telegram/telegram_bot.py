@@ -7,6 +7,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from typing import Optional
 
 from ..common.market_data import extract_account_balance, to_float
+from ..common.owner_access import is_owner
 from ..events import EventBus, Event, EventType
 from ..state import SettingsManager
 from ..diagnostics import generate_pnl_card
@@ -109,7 +110,26 @@ class TelegramBot:
     # Панель: Профіль (мініапп) + Аварійна зупинка
     # ------------------------------------------------------------------
 
+    async def _deny_non_owner(self, update: Update) -> bool:
+        """Панель і аварійні кнопки керують реальним рахунком — лише власнику.
+        Повертає True, якщо запит відхилено."""
+        user = update.effective_user
+        if is_owner(user.id if user else None):
+            return False
+        logger.warning(f"[AUTH] Telegram: доступ заборонено user={user.id if user else None} "
+                       f"@{user.username if user else None}")
+        if update.callback_query:
+            try:
+                await update.callback_query.answer("Доступ лише для власника бота", show_alert=True)
+            except Exception:
+                pass
+        elif update.message:
+            await update.message.reply_text("⛔ Це приватний бот.")
+        return True
+
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self._deny_non_owner(update):
+            return
         keyboard = []
 
         if self.webapp_url:
@@ -123,6 +143,8 @@ class TelegramBot:
         await self._reply(update, "Панель керування торговим ботом", reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def _cmd_emergency(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self._deny_non_owner(update):
+            return
         keyboard = [
             [InlineKeyboardButton("🚨 Тільки зупинити торгівлю", callback_data="emergency_stop_only")],
             [InlineKeyboardButton("🚨 Зупинити і закрити позиції", callback_data="emergency_stop_close")],
@@ -132,6 +154,8 @@ class TelegramBot:
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
+        if await self._deny_non_owner(update):
+            return
 
         try:
             await query.answer()

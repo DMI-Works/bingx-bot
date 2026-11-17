@@ -186,7 +186,7 @@ async def close_position(
 
 
 @router.get("/api/trades")
-def get_trades(request: Request, limit: int = 50, offset: int = 0, period: str = Query("ALL")):
+def get_trades(request: Request, limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0), period: str = Query("ALL")):
     """Пагінована історія закритих угод з урахуванням періоду."""
     db = require_db(request)
 

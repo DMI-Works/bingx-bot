@@ -19,8 +19,8 @@ python -m unittest discover tests -v
 python -m unittest tests.test_trend_supertrend -v
 python -m unittest tests.test_trend_supertrend.TestIndicators.test_atr_wilder -v
 
-# Mini App frontend (webapp/frontend, yarn.lock present; npm also used in Dockerfile)
-cd webapp/frontend && npm install
+# Mini App frontend (webapp/frontend, package-lock.json; Dockerfile uses npm ci)
+cd webapp/frontend && npm ci
 npm run dev      # Vite on :5173, proxies /api -> http://localhost:8000
 npm run build    # outputs into webapp/backend/static (served by FastAPI at /)
 ```
@@ -29,7 +29,7 @@ No linter or formatter is configured. Deployment is the multi-stage `Dockerfile`
 
 ## Environment
 
-`.env` (see `.env.example`): `BINGX_API_KEY`, `BINGX_API_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `WEBAPP_URL`, `MONGO_URI`, `MONGO_DB_NAME`.
+`.env` (see `.env.example`): `BINGX_API_KEY`, `BINGX_API_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADMIN_TELEGRAM_ID` (owner; Mini App and emergency buttons accept only this Telegram id, see `core/common/owner_access.py`), `WEBAPP_URL`, `MONGO_URI`, `MONGO_DB_NAME`.
 
 - `core/database/mongo_config.py` checks `MONGO_URI` **at import time** and raises if it is missing. Anything that imports `core.risk`, `core.trading` or `core.database` needs it set. Tests do `os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")` before importing and never open a real connection. Copy that pattern in new tests.
 - The DB name gets the suffix `_testnet` in testnet mode, so testnet and live data sit in separate databases. `trade_analytics` rows also carry a `mode` field. The runtime mode is **not** just `exchange.testnet` from the YAML: that value is only the default. The source of truth is an override document `control.mode` (`{_id:"mode", testnet}`) in the **base** (non-suffixed) DB, which the Mini App writes and `main.py` reads at startup (`resolve_testnet` / `read_mode_override` in `core/database/mongo_config.py`) before building `Database`/`BingXClient`. Switching mode from the Mini App (Profile tab → `POST /api/settings/mode`) persists the override and sets `app.state.restart_event`; `main.py`'s supervisor loop (`run_bot`) then tears the bot down and rebuilds it in-process with the new mode (no redeploy). `Database(testnet=...)` carries the mode per instance (`self.db_name`, `self.trade_mode`); the module-level `IS_TESTNET`/`MONGO_DB_NAME`/`TRADE_MODE` remain config-default constants for tests/scripts.
@@ -80,7 +80,7 @@ SimpleTrader --POSITION_OPENED/CLOSED, STOP_LOSS_*, ERROR/CRITICAL_ERROR--> Tele
 - **`core/telegram/`**: `telegram_bot.py` handles notifications plus `/start` and `/emergency`, and `messages.py` builds the message texts. Settings management moved to the Mini App.
 - **`webapp/backend/`**:
   - `api.py` only assembles the FastAPI app. Endpoints live in `routes/` (`trades.py`: stats, positions, trades; plus `analytics.py`, `profile.py`, `settings.py`, `symbols.py`).
-  - `deps.py` holds the `app.state` dependencies (503 when missing) and `require_telegram_user`. Mutating endpoints use `Depends(require_telegram_user)`, which validates Telegram `initData` from the `X-Telegram-Init-Data` header.
+  - `deps.py` holds the `app.state` dependencies (503 when missing) and `require_telegram_user`, which validates Telegram `initData` from the `X-Telegram-Init-Data` header and that the caller is the owner (403 otherwise). `api.py` attaches it to **every** router, reads included. `security.py` adds security headers; CORS and `/docs` are intentionally off. Python deps are pinned in `requirements.txt`; bump deliberately and rerun tests.
   - `services/trade_stats.py` holds the pure trade aggregation.
   - Built static files are mounted at `/`.
 
