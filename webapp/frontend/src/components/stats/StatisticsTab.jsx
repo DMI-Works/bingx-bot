@@ -7,6 +7,7 @@ import { apiGet, apiPost, tg } from "../../lib/api";
 import { fmtUsd, fmtUsdPlain, fmtPct, fmtProfitFactor, slRoiPercent } from "../../lib/format";
 import { Spinner, EmptyRow, PnlTag, SideBadge } from "../common";
 import TradeHistoryList from "./TradeHistoryList";
+import { t, tn } from "../../i18n";
 
 const PERIODS = ["1D", "1W", "1M", "ALL"];
 
@@ -21,13 +22,6 @@ function StatRow({ label, hint, children }) {
     </div>
   );
 }
-
-const plural = (n, one, few, many) => {
-  const m10 = n % 10, m100 = n % 100;
-  if (m10 === 1 && m100 !== 11) return one;
-  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
-  return many;
-};
 
 // Подтверждение: в Telegram — нативное окно, вне его — window.confirm.
 function confirmAsync(message) {
@@ -129,9 +123,7 @@ export default function StatisticsTab() {
   // бэкенд просто убирает зависшую запись из открытых.
   const closePosition = async (p) => {
     const stale = p.mark_price == null;
-    const question = stale
-      ? `Позиции ${p.symbol} ${p.side} нет на бирже. Убрать её из открытых?`
-      : `Закрыть ${p.symbol} ${p.side} по рынку?`;
+    const question = t(stale ? "confirm_remove_stale" : "confirm_close", { symbol: p.symbol, side: p.side });
     if (!(await confirmAsync(question))) return;
     setClosingId(p.order_id);
     setError(null);
@@ -215,12 +207,12 @@ export default function StatisticsTab() {
 
   return (
     <div className="tab-pane">
-      {error && <div className="error-banner">Не удалось загрузить данные: {error}</div>}
+      {error && <div className="error-banner">{t("err_load", { msg: error })}</div>}
 
       {/* Hero — реализованный PnL закрытых сделок за выбранный период, не баланс биржи */}
       <div className="hero">
         <div className="hero-top">
-          <span className="hero-label">PnL закрытых сделок</span>
+          <span className="hero-label">{t("hero_label")}</span>
           <div className="period-pills">
             {PERIODS.map((p) => (
               <button
@@ -241,10 +233,10 @@ export default function StatisticsTab() {
             <div className="hero-figure">{fmtUsd(periodPnl)}</div>
             <div className={`hero-change ${up ? "text-profit" : "text-loss"}`}>
               {up ? <TrendingUp size={15} /> : <TrendingDown size={15} />}
-              {changePct != null && <span className="hero-change-pct">{fmtPct(changePct)} от баланса</span>}
+              {changePct != null && <span className="hero-change-pct">{t("of_balance", { pct: fmtPct(changePct) })}</span>}
               <span className="hero-change-period">
-                за {period === "ALL" ? "всё время" : period}
-                {fundingPeriod !== 0 && <> · с фандингом {fmtUsd(stats.period_change_usd)}</>}
+                {t("period_for", { period: period === "ALL" ? t("period_all") : period })}
+                {fundingPeriod !== 0 && <> · {t("with_funding", { usd: fmtUsd(stats.period_change_usd) })}</>}
               </span>
             </div>
           </>
@@ -276,7 +268,7 @@ export default function StatisticsTab() {
                     color: "#EDEFF3",
                   }}
                   labelFormatter={() => ""}
-                  formatter={(v, _n, item) => [`$${v.toLocaleString()}`, item?.payload?.live ? "С открытыми сейчас" : "Накопл. PnL"]}
+                  formatter={(v, _n, item) => [`$${v.toLocaleString()}`, t(item?.payload?.live ? "chart_live" : "chart_cum")]}
                 />
                 <Area
                   type="monotone"
@@ -288,7 +280,7 @@ export default function StatisticsTab() {
               </AreaChart>
             </ResponsiveContainer>
           ) : stats && chartData.length <= 1 ? (
-            <div className="chart-empty">Недостаточно закрытых сделок за период для графика</div>
+            <div className="chart-empty">{t("chart_empty")}</div>
           ) : null}
         </div>
       </div>
@@ -296,25 +288,25 @@ export default function StatisticsTab() {
       {stats && (
         <div className="section">
           <div className="section-head">
-            <span className="section-title">Итого сейчас</span>
+            <span className="section-title">{t("total_now")}</span>
           </div>
           <div className="list">
-            <StatRow label="Закрытые сделки" hint="всё время">
+            <StatRow label={t("closed_trades")} hint={t("all_time")}>
               <span className={stats.cumulative_pnl >= 0 ? "text-profit" : "text-loss"}>
                 {fmtUsd(stats.cumulative_pnl)}
               </span>
             </StatRow>
-            <StatRow label="Открытые позиции" hint="нереализованный PnL сейчас">
+            <StatRow label={t("open_positions")} hint={t("unrealized_now")}>
               <span className={openPnl >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(openPnl)}</span>
             </StatRow>
-            <StatRow label="Фандинг" hint="комиссия за удержание позиций, всё время">
+            <StatRow label={t("funding")} hint={t("funding_hint")}>
               <span className={fundingTotal >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(fundingTotal)}</span>
             </StatRow>
-            <StatRow label="Итого">
+            <StatRow label={t("total")}>
               <span className={totalUp ? "text-profit" : "text-loss"}>
                 {fmtUsd(totalPnl)}
                 {totalPnlPct != null && Number.isFinite(totalPnlPct) && (
-                  <span className="stat-value-sub"> ({fmtPct(totalPnlPct)} от баланса)</span>
+                  <span className="stat-value-sub"> {t("of_balance_paren", { pct: fmtPct(totalPnlPct) })}</span>
                 )}
               </span>
             </StatRow>
@@ -329,11 +321,11 @@ export default function StatisticsTab() {
           <span className="chip-value text-profit">{stats ? `${stats.win_rate}%` : "—"}</span>
         </div>
         <div className="chip">
-          <span className="chip-label">Сделок</span>
+          <span className="chip-label">{t("chip_trades")}</span>
           <span className="chip-value">{stats ? stats.total_trades : "—"}</span>
         </div>
         <div className="chip">
-          <span className="chip-label">Сред. сделка</span>
+          <span className="chip-label">{t("chip_avg")}</span>
           <span className={`chip-value ${avgTrade >= 0 ? "text-profit" : "text-loss"}`}>
             {stats ? fmtUsd(avgTrade) : "—"}
           </span>
@@ -343,53 +335,50 @@ export default function StatisticsTab() {
       {stats && stats.total_trades > 0 && (
         <div className="section">
           <div className="section-head">
-            <span className="section-title">Прибыльность</span>
+            <span className="section-title">{t("profitability")}</span>
           </div>
           <div className="list">
-            <StatRow label="Profit factor" hint="прибыль ÷ убыток, >1 — в плюсе">
+            <StatRow label="Profit factor" hint={t("pf_hint")}>
               <span className={pfClass}>{pfLabel}</span>
             </StatRow>
-            <StatRow label="Средний профит">
+            <StatRow label={t("avg_win")}>
               {stats.avg_win != null ? (
                 <>
                   <span className="text-profit">{fmtUsd(stats.avg_win)}</span>
                   <span className="stat-value-sub">
-                    {stats.winning_trades} {plural(stats.winning_trades, "сделка", "сделки", "сделок")}
+                    {tn("trades_count", stats.winning_trades)}
                   </span>
                 </>
               ) : "—"}
             </StatRow>
-            <StatRow label="Средний убыток">
+            <StatRow label={t("avg_loss")}>
               {stats.avg_loss != null ? (
                 <>
                   <span className="text-loss">{fmtUsd(-stats.avg_loss)}</span>
                   <span className="stat-value-sub">
-                    {stats.losing_trades} {plural(stats.losing_trades, "сделка", "сделки", "сделок")}
+                    {tn("trades_count", stats.losing_trades)}
                   </span>
                 </>
               ) : "—"}
             </StatRow>
-            <StatRow label="Профит / убыток" hint="средний win ÷ средний loss">
+            <StatRow label={t("payoff")} hint={t("payoff_hint")}>
               {stats.payoff_ratio != null ? stats.payoff_ratio.toFixed(2) : "—"}
             </StatRow>
-            <StatRow label="Валовая прибыль">
+            <StatRow label={t("gross_profit")}>
               <span className="text-profit">{fmtUsd(stats.gross_profit)}</span>
             </StatRow>
-            <StatRow label="Валовый убыток">
+            <StatRow label={t("gross_loss")}>
               <span className="text-loss">{stats.gross_loss > 0 ? fmtUsd(-stats.gross_loss) : fmtUsd(0)}</span>
             </StatRow>
-            <StatRow label="Лучшая сделка">
+            <StatRow label={t("best_trade")}>
               <span className={stats.best_trade >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(stats.best_trade)}</span>
             </StatRow>
-            <StatRow label="Худшая сделка">
+            <StatRow label={t("worst_trade")}>
               <span className={stats.worst_trade >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(stats.worst_trade)}</span>
             </StatRow>
           </div>
           {winsHidingLoss && (
-            <div className="stat-note">
-              Win rate {stats.win_rate}%, но убытки перекрывают прибыль: средний убыток
-              больше среднего профита.
-            </div>
+            <div className="stat-note">{t("wins_hiding_loss", { wr: stats.win_rate })}</div>
           )}
         </div>
       )}
@@ -397,21 +386,21 @@ export default function StatisticsTab() {
       {/* Open positions */}
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Открытые позиции</span>
+          <span className="section-title">{t("open_positions")}</span>
           {positions && <span className="section-count">{positions.length}</span>}
         </div>
         <div className="list">
           {!positions ? (
-            <EmptyRow text="Загрузка..." />
+            <EmptyRow text={t("loading")} />
           ) : positions.length === 0 ? (
-            <EmptyRow text="Нет открытых позиций" />
+            <EmptyRow text={t("no_open_positions")} />
           ) : (
             positions.map((p) => {
               const tp = p.take_profit_levels?.[0];
               const tpLabel = !p.take_profit_levels?.length
                 ? null
                 : p.take_profit_levels.length > 1
-                ? `${p.take_profit_levels.length} уровня`
+                ? t("tp_levels", { n: p.take_profit_levels.length })
                 : tp?.price?.toLocaleString();
               // SL в % ROI (с учётом плеча). Если плеча/входа нет — показываем цену.
               const slRoi = slRoiPercent(p);
@@ -424,12 +413,12 @@ export default function StatisticsTab() {
                       <SideBadge side={p.side} />
                       {p.leverage && <span className="row-sub row-sub-faint">{p.leverage}x</span>}
                       {p.margin_usdt != null && (
-                        <span className="row-sub row-sub-faint">маржа {fmtUsdPlain(p.margin_usdt)}</span>
+                        <span className="row-sub row-sub-faint">{t("margin", { v: fmtUsdPlain(p.margin_usdt) })}</span>
                       )}
                     </div>
                     <div className="row-sub">
-                      вход {p.entry_price?.toLocaleString() ?? "—"}
-                      {p.mark_price != null && <> · цена {p.mark_price.toLocaleString()}</>}
+                      {t("entry_at", { v: p.entry_price?.toLocaleString() ?? "—" })}
+                      {p.mark_price != null && <> · {t("price_at", { v: p.mark_price.toLocaleString() })}</>}
                     </div>
                     {(p.stop_loss_price || tpLabel) && (
                       <div className="row-sub row-sub-faint">
@@ -450,7 +439,7 @@ export default function StatisticsTab() {
                   <button
                     className="icon-btn icon-btn-danger"
                     style={{ marginLeft: 8 }}
-                    title={p.mark_price == null ? "Убрать зависшую позицию" : "Закрыть по рынку"}
+                    title={t(p.mark_price == null ? "remove_stale" : "close_market")}
                     disabled={closingId === p.order_id}
                     onClick={() => closePosition(p)}
                   >
@@ -467,7 +456,7 @@ export default function StatisticsTab() {
       {stats && stats.symbol_pnl.length > 0 && (
         <div className="section">
           <div className="section-head">
-            <span className="section-title">PnL по монетам</span>
+            <span className="section-title">{t("pnl_by_coin")}</span>
           </div>
           <div className="list">
             {stats.symbol_pnl.map((s) => (
@@ -484,7 +473,7 @@ export default function StatisticsTab() {
       {stats && stats.strategy_stats.length > 0 && (
         <div className="section">
           <div className="section-head">
-            <span className="section-title">По стратегиям</span>
+            <span className="section-title">{t("by_strategy")}</span>
           </div>
           <div className="list">
             {stats.strategy_stats.map((s) => (
@@ -511,13 +500,13 @@ export default function StatisticsTab() {
           периодом (1D/1W/1M/ALL), что и график/сводка выше */}
       <div className="section">
         <div className="section-head">
-          <span className="section-title">История сделок</span>
+          <span className="section-title">{t("trade_history")}</span>
           {tradesTotal > 0 && <span className="section-count">{trades?.length ?? 0} / {tradesTotal}</span>}
         </div>
         <TradeHistoryList trades={trades} />
         {hasMoreTrades && (
           <button className="load-more-btn" onClick={loadMoreTrades} disabled={tradesLoadingMore}>
-            {tradesLoadingMore ? "Загрузка..." : "Показать ещё"}
+            {tradesLoadingMore ? t("loading") : t("show_more")}
           </button>
         )}
       </div>

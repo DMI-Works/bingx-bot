@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from core.common.market_data import extract_account_balance, to_float
 
 from ..deps import limit_exchange, require_session
+from ..i18n import tr
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ async def get_profile(session=Depends(require_session)):
         balance_data = await exchange.get_account_balance()
     except Exception as e:
         logger.error(f"Failed to fetch balance: {e}", exc_info=True)
-        raise HTTPException(status_code=502, detail="Exchange request failed")
+        raise HTTPException(status_code=502, detail=tr("err_exchange_request"))
 
     b = extract_account_balance(balance_data)
     if b is None:

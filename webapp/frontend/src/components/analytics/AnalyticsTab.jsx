@@ -3,13 +3,15 @@ import { ChevronDown, ChevronUp, Scissors, Target, SlidersHorizontal } from "luc
 import { apiGet } from "../../lib/api";
 import { fmtUsd, fmtPct, fmtDate, fmtTime, fmtDuration } from "../../lib/format";
 import { Spinner, EmptyRow, PnlTag, SideBadge } from "../common";
+import { t, tn } from "../../i18n";
 
 const TRADES_PAGE_SIZE = 30;
 
+// label — ключ перевода
 const STATUS_FILTERS = [
-  { id: "", label: "Все" },
-  { id: "OPEN", label: "Открытые" },
-  { id: "CLOSED", label: "Закрытые" },
+  { id: "", label: "filter_all" },
+  { id: "OPEN", label: "filter_open" },
+  { id: "CLOSED", label: "filter_closed" },
 ];
 
 // trade_analytics.strategy_params — произвольный снимок параметров стратегии
@@ -18,36 +20,36 @@ const STATUS_FILTERS = [
 function renderParamValue(v) {
   if (v == null) return "—";
   if (Array.isArray(v)) return v.join(", ");
-  if (typeof v === "boolean") return v ? "да" : "нет";
+  if (typeof v === "boolean") return t(v ? "yes" : "no");
   return String(v);
 }
 
 function AnalyticsTradeRow({ trade, expanded, onToggle, detail, detailLoading }) {
-  const t = trade;
-  const slCount = t.sl_moves?.length ?? 0;
-  const tpCount = t.tp_fills?.length ?? 0;
+  const tr = trade;
+  const slCount = tr.sl_moves?.length ?? 0;
+  const tpCount = tr.tp_fills?.length ?? 0;
 
   return (
     <div>
       <div className="row row-clickable" onClick={onToggle}>
         <div className="row-main">
           <div className="row-title-line">
-            <span className="symbol">{t.symbol}</span>
-            <SideBadge side={t.side} />
-            {t.status === "OPEN" && <span className="tag tag-info">открыта</span>}
-            {t.mode === "testnet" && <span className="tag">testnet</span>}
+            <span className="symbol">{tr.symbol}</span>
+            <SideBadge side={tr.side} />
+            {tr.status === "OPEN" && <span className="tag tag-info">{t("tag_open")}</span>}
+            {tr.mode === "testnet" && <span className="tag">testnet</span>}
           </div>
           <div className="row-sub">
-            {t.strategy || "вручную"} · {fmtDate(t.opened_at)}
+            {tr.strategy || t("manual")} · {fmtDate(tr.opened_at)}
             {slCount > 0 && <> · <Scissors size={10} style={{ verticalAlign: -1 }} /> {slCount}</>}
             {tpCount > 0 && <> · <Target size={10} style={{ verticalAlign: -1 }} /> {tpCount}</>}
           </div>
         </div>
         <div className="row-end">
-          {t.net_pnl != null && (
-            <span className={`row-usd ${t.net_pnl >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(t.net_pnl)}</span>
+          {tr.net_pnl != null && (
+            <span className={`row-usd ${tr.net_pnl >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(tr.net_pnl)}</span>
           )}
-          {t.roe_percent != null && <PnlTag value={t.net_pnl} pct={t.roe_percent} />}
+          {tr.roe_percent != null && <PnlTag value={tr.net_pnl} pct={tr.roe_percent} />}
         </div>
         {expanded ? <ChevronUp size={16} className="chev" /> : <ChevronDown size={16} className="chev" />}
       </div>
@@ -59,14 +61,14 @@ function AnalyticsTradeRow({ trade, expanded, onToggle, detail, detailLoading })
           {detail && (
             <>
               <div className="kv-row">
-                <span className="kv-label">Вход</span>
+                <span className="kv-label">{t("a_entry")}</span>
                 <span className="kv-value">
                   {detail.entry_price?.toLocaleString()} · {detail.quantity} · {detail.leverage ?? "—"}x
                 </span>
               </div>
               {detail.close_price != null && (
                 <div className="kv-row">
-                  <span className="kv-label">Выход</span>
+                  <span className="kv-label">{t("a_exit")}</span>
                   <span className="kv-value">
                     {detail.close_price.toLocaleString()}
                     {detail.close_reason && <span className="row-sub-faint"> · {detail.close_reason}</span>}
@@ -75,19 +77,19 @@ function AnalyticsTradeRow({ trade, expanded, onToggle, detail, detailLoading })
               )}
               {detail.duration_seconds != null && (
                 <div className="kv-row">
-                  <span className="kv-label">Длительность</span>
+                  <span className="kv-label">{t("a_duration")}</span>
                   <span className="kv-value">{fmtDuration(detail.duration_seconds)}</span>
                 </div>
               )}
               {detail.commission_usdt != null && (
                 <div className="kv-row">
-                  <span className="kv-label">Комиссия</span>
+                  <span className="kv-label">{t("a_commission")}</span>
                   <span className="kv-value">{fmtUsd(-Math.abs(detail.commission_usdt))}</span>
                 </div>
               )}
               {detail.funding_fee != null && detail.funding_fee !== 0 && (
                 <div className="kv-row">
-                  <span className="kv-label">Фандинг</span>
+                  <span className="kv-label">{t("funding")}</span>
                   <span className={`kv-value ${detail.funding_fee >= 0 ? "text-profit" : "text-loss"}`}>
                     {fmtUsd(detail.funding_fee)}
                   </span>
@@ -96,7 +98,7 @@ function AnalyticsTradeRow({ trade, expanded, onToggle, detail, detailLoading })
 
               {detail.sl_moves?.length > 0 && (
                 <div className="analytics-timeline">
-                  <div className="analytics-timeline-title">Перестановки SL</div>
+                  <div className="analytics-timeline-title">{t("sl_moves_title")}</div>
                   {detail.sl_moves.map((m, i) => (
                     <div className="analytics-timeline-item" key={i}>
                       <span className="analytics-timeline-time">{fmtTime(m.at)}</span>
@@ -116,7 +118,7 @@ function AnalyticsTradeRow({ trade, expanded, onToggle, detail, detailLoading })
 
               {detail.tp_fills?.length > 0 && (
                 <div className="analytics-timeline">
-                  <div className="analytics-timeline-title">Срабатывания TP</div>
+                  <div className="analytics-timeline-title">{t("tp_fills_title")}</div>
                   {detail.tp_fills.map((f, i) => (
                     <div className="analytics-timeline-item" key={i}>
                       <span className="analytics-timeline-time">{fmtTime(f.at)}</span>
@@ -129,7 +131,7 @@ function AnalyticsTradeRow({ trade, expanded, onToggle, detail, detailLoading })
 
               {detail.strategy_params && Object.keys(detail.strategy_params).length > 0 && (
                 <div className="analytics-timeline">
-                  <div className="analytics-timeline-title">Параметры стратегии на входе</div>
+                  <div className="analytics-timeline-title">{t("params_title")}</div>
                   {Object.entries(detail.strategy_params).map(([k, v]) => (
                     <div className="kv-row" key={k}>
                       <span className="kv-label">{k}</span>
@@ -221,32 +223,32 @@ export default function AnalyticsTab() {
 
   return (
     <div className="tab-pane">
-      {error && <div className="error-banner">Не удалось загрузить: {error}</div>}
+      {error && <div className="error-banner">{t("err_load_short", { msg: error })}</div>}
 
       {/* Сводка по стратегии+монете: отсортировано бэкендом по total_net_pnl
           по возрастанию — то, что сливает больше всего, сразу наверху. */}
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Сводка по стратегиям</span>
+          <span className="section-title">{t("summary_title")}</span>
           {summary && <span className="section-count">{summary.length}</span>}
         </div>
         <div className="list">
           {!summary ? (
-            <EmptyRow text="Загрузка..." />
+            <EmptyRow text={t("loading")} />
           ) : summary.length === 0 ? (
-            <EmptyRow text="Пока нет закрытых сделок для анализа" />
+            <EmptyRow text={t("no_closed_for_analysis")} />
           ) : (
             summary.map((s) => (
               <div className="row" key={`${s.strategy}-${s.symbol}`}>
                 <div className="row-main">
                   <div className="row-title-line">
                     <span className="symbol">{s.symbol}</span>
-                    <span className="tag tag-info">{s.strategy || "вручную"}</span>
+                    <span className="tag tag-info">{s.strategy || t("manual")}</span>
                   </div>
                   <div className="row-sub">
-                    {s.trades} сделок · {s.wins}W / {s.losses}L
-                    {s.avg_sl_moves > 0.05 && <> · SL x{s.avg_sl_moves.toFixed(1)} в среднем</>}
-                    {s.avg_duration_seconds != null && <> · {fmtDuration(s.avg_duration_seconds)} в среднем</>}
+                    {tn("trades_count", s.trades)} · {s.wins}W / {s.losses}L
+                    {s.avg_sl_moves > 0.05 && <> · {t("avg_sl", { v: s.avg_sl_moves.toFixed(1) })}</>}
+                    {s.avg_duration_seconds != null && <> · {t("avg_value", { v: fmtDuration(s.avg_duration_seconds) })}</>}
                   </div>
                 </div>
                 <div className="row-end">
@@ -254,7 +256,7 @@ export default function AnalyticsTab() {
                     {fmtUsd(s.total_net_pnl)}
                   </span>
                   {s.avg_roe_percent != null && (
-                    <span className="row-value">{fmtPct(s.avg_roe_percent)} ср. ROE</span>
+                    <span className="row-value">{t("avg_roe", { v: fmtPct(s.avg_roe_percent) })}</span>
                   )}
                 </div>
               </div>
@@ -266,7 +268,7 @@ export default function AnalyticsTab() {
       {/* Фильтры + детальная история */}
       <div className="section">
         <div className="section-head">
-          <span className="section-title">История сделок</span>
+          <span className="section-title">{t("trade_history")}</span>
         </div>
 
         <div className="chip-row analytics-filter-row">
@@ -276,7 +278,7 @@ export default function AnalyticsTab() {
               className={`pill ${status === f.id ? "pill-active" : ""}`}
               onClick={() => setStatus(f.id)}
             >
-              {f.label}
+              {t(f.label)}
             </button>
           ))}
         </div>
@@ -288,7 +290,7 @@ export default function AnalyticsTab() {
               className={`pill ${!strategyFilter ? "pill-active" : ""}`}
               onClick={() => setStrategyFilter("")}
             >
-              Все стратегии
+              {t("all_strategies")}
             </button>
             {strategies.map((s) => (
               <button
@@ -304,18 +306,18 @@ export default function AnalyticsTab() {
 
         <div className="list">
           {!trades ? (
-            <EmptyRow text="Загрузка..." />
+            <EmptyRow text={t("loading")} />
           ) : trades.length === 0 ? (
-            <EmptyRow text="Сделок не найдено" />
+            <EmptyRow text={t("no_trades_found")} />
           ) : (
-            trades.map((t) => (
+            trades.map((tr) => (
               <AnalyticsTradeRow
-                key={t.order_id}
-                trade={t}
-                expanded={expandedId === t.order_id}
-                onToggle={() => toggleExpand(t.order_id)}
-                detail={detailCache[t.order_id]}
-                detailLoading={detailLoadingId === t.order_id}
+                key={tr.order_id}
+                trade={tr}
+                expanded={expandedId === tr.order_id}
+                onToggle={() => toggleExpand(tr.order_id)}
+                detail={detailCache[tr.order_id]}
+                detailLoading={detailLoadingId === tr.order_id}
               />
             ))
           )}
@@ -323,7 +325,7 @@ export default function AnalyticsTab() {
 
         {hasMore && (
           <button className="load-more-btn" onClick={loadMore} disabled={loadingMore}>
-            {loadingMore ? "Загрузка..." : "Показать ещё"}
+            {loadingMore ? t("loading") : t("show_more")}
           </button>
         )}
       </div>

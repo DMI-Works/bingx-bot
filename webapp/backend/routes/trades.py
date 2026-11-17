@@ -9,6 +9,7 @@ from core.common.market_data import extract_account_balance, filter_open_positio
 from core.common.position_math import position_key, side_sign
 from core.common.position_metadata import load_metadata
 
+from ..i18n import tr
 from ..deps import limit_exchange, require_session, require_sessions
 from ..services.trade_stats import (
     closed_row_to_trade,
@@ -184,16 +185,16 @@ async def close_position(
         raise HTTPException(status_code=422, detail="'order_id' is required")
     row = next((r for r in db.get_active_positions() if r["order_id"] == order_id), None)
     if row is None:
-        raise HTTPException(status_code=404, detail="Позиция не найдена среди открытых")
+        raise HTTPException(status_code=404, detail=tr("err_position_not_found"))
     symbol, side = row["symbol"], row["side"]
 
     if exchange is None:
-        raise HTTPException(status_code=503, detail="Биржа недоступна")
+        raise HTTPException(status_code=503, detail=tr("err_exchange_unavailable"))
     try:
         live = filter_open_positions(await exchange.get_positions())
     except Exception as e:
         logger.error(f"close_position: failed to fetch live positions: {e}", exc_info=True)
-        raise HTTPException(status_code=502, detail="Не удалось получить позиции с биржи")
+        raise HTTPException(status_code=502, detail=tr("err_positions_fetch"))
     is_live = any(p.get("symbol") == symbol and p.get("positionSide") == side for p in live)
 
     key = position_key(symbol, side)
@@ -207,9 +208,9 @@ async def close_position(
         return {"status": "removed"}
 
     if tracked is None:
-        raise HTTPException(status_code=409, detail="Бот не ведёт эту позицию — закройте её на бирже")
+        raise HTTPException(status_code=409, detail=tr("err_position_not_managed"))
     if not await trader.close_position(symbol, side, "manual_app"):
-        raise HTTPException(status_code=502, detail="Биржа не приняла ордер на закрытие")
+        raise HTTPException(status_code=502, detail=tr("err_close_rejected"))
     logger.info(f"Position {symbol} {side} close requested via mini app (user={session.user_id})")
     return {"status": "closing"}
 

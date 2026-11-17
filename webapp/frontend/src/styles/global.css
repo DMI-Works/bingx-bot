@@ -672,3 +672,6 @@
 .guide-faq-open .guide-faq-chev { transform: rotate(180deg); }
 .guide-faq-a { padding: 0 12px 12px; font-size: 13px; color: var(--text-dim); line-height: 1.55; }
 .guide-footer { text-align: center; font-size: 12px; color: var(--text-faint); margin-top: 18px; }
+
+/* --- выбор языка --- */
+.lang-flag { font-size: 18px; background: transparent; }

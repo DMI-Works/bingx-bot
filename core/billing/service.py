@@ -21,6 +21,7 @@ from bson import ObjectId
 from pymongo import DESCENDING
 from pymongo.errors import DuplicateKeyError
 
+from ..common.i18n import t
 from ..database.mongo_config import base_db_name, db_name_for
 from .calculator import calculate_period
 
@@ -229,11 +230,12 @@ class BillingService:
             if self.sessions is not None:
                 self.sessions.refresh_user(invoice["user_id"])
             if self.notify is not None:
-                await self.notify(invoice["user_id"], (
-                    f"🧾 <b>Рахунок за тиждень: {invoice['amount_usdt']:.2f} USDT</b>\n"
-                    f"Чистий прибуток до оплати: {invoice['chargeable']:.2f} USDT, "
-                    f"комісія {invoice['fee_percent']:g}%.\n"
-                    f"Нові угоди зупинено до оплати. Відкриті позиції супроводжуються далі."
+                lang = (self.users.get(invoice["user_id"]) or {}).get("lang")
+                await self.notify(invoice["user_id"], t(
+                    lang, "invoice_issued",
+                    amount=f"{invoice['amount_usdt']:.2f}",
+                    chargeable=f"{invoice['chargeable']:.2f}",
+                    fee=f"{invoice['fee_percent']:g}",
                 ))
 
     async def _loop(self) -> None:

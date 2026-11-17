@@ -7,6 +7,8 @@
   role         — 'admin' | 'user'
   status       — 'active' | 'blocked'
   testnet      — режим рахунку користувача (у кожного свій)
+  lang         — мова інтерфейсу ('en' | 'ru' | 'uk'); немає — ще не обрана
+                 (Mini App і бот показують вибір, до того — англійська)
   keys.live / keys.testnet — {api_key_enc, api_secret_enc, key_suffix,
                  can_withdraw, verified_at} (секрети зашифровані, див. crypto.py)
   created_at, trial_until
@@ -21,6 +23,7 @@ from typing import Dict, List, Optional
 
 from pymongo import MongoClient
 
+from ..common.i18n import LANGS
 from ..database.mongo_config import base_db_name
 from .crypto import decrypt_secret, encrypt_secret, mask_key
 
@@ -130,6 +133,12 @@ class UsersRepository:
         with self._lock:
             self.collection.update_one({"_id": str(user_id)}, {"$set": {"testnet": bool(testnet)}})
 
+    def set_lang(self, user_id: str, lang: str) -> None:
+        if lang not in LANGS:
+            raise ValueError(f"unknown lang {lang!r}")
+        with self._lock:
+            self.collection.update_one({"_id": str(user_id)}, {"$set": {"lang": lang}})
+
     def set_status(self, user_id: str, status: str) -> None:
         if status not in ("active", "blocked"):
             raise ValueError(f"unknown status {status!r}")
@@ -152,6 +161,7 @@ def public_view(user: dict) -> dict:
         "role": user.get("role", "user"),
         "status": user.get("status", "active"),
         "testnet": bool(user.get("testnet", True)),
+        "lang": user.get("lang") if user.get("lang") in LANGS else None,
         "trial_until": user.get("trial_until"),
         "created_at": user.get("created_at"),
         "keys": {

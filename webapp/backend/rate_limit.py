@@ -18,6 +18,8 @@ from typing import Deque, Dict, Tuple
 
 from fastapi import HTTPException, Request
 
+from .i18n import tr
+
 
 class SlidingWindowLimiter:
     def __init__(self) -> None:
@@ -78,6 +80,6 @@ def enforce(bucket: str, key: str, limit_window: Tuple[int, float]) -> None:
     if retry_after:
         raise HTTPException(
             status_code=429,
-            detail="Слишком много запросов — попробуйте чуть позже",
+            detail=tr("err_rate_limited"),
             headers={"Retry-After": str(math.ceil(retry_after))},
         )

@@ -4,6 +4,8 @@
 без захисту не кидаємо.
 
 Неоплачений рахунок підписки (core/billing) теж забороняє нові входи.
+Причина — код ('user_not_found' | 'blocked' | 'unpaid'): Mini App показує
+його текстом мовою користувача, у логах він і так зрозумілий.
 """
 
 from __future__ import annotations
@@ -13,9 +15,9 @@ from typing import Optional, Tuple
 
 def can_open_new(user: Optional[dict]) -> Tuple[bool, str]:
     if not user:
-        return False, "користувача не знайдено"
+        return False, "user_not_found"
     if user.get("status") != "active":
-        return False, "акаунт заблоковано"
+        return False, "blocked"
     if user.get("role") != "admin" and (user.get("billing") or {}).get("unpaid"):
-        return False, "є неоплачений рахунок"
+        return False, "unpaid"
     return True, ""

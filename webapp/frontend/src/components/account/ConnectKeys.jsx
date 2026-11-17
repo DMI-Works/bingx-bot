@@ -3,6 +3,7 @@ import { KeyRound, HelpCircle } from "lucide-react";
 import { apiPost } from "../../lib/api";
 import { Spinner } from "../common";
 import { openGuide } from "../guide/guideEvents";
+import { t } from "../../i18n";
 
 // Подключение API-ключа BingX. Без пропа testnet пользователь сам выбирает
 // режим (первый вход); с пропом — ключ для указанного режима (Профиль).
@@ -15,7 +16,7 @@ export default function ConnectKeys({ testnet: fixedTestnet, onDone }) {
   const canChooseMode = fixedTestnet === undefined;
 
   const submit = async () => {
-    if (!apiKey.trim() || !apiSecret.trim()) { setErr("Заполните оба поля"); return; }
+    if (!apiKey.trim() || !apiSecret.trim()) { setErr(t("keys_fill_both")); return; }
     setBusy(true);
     setErr(null);
     try {
@@ -30,18 +31,15 @@ export default function ConnectKeys({ testnet: fixedTestnet, onDone }) {
     <div className="section">
       <div className="section-head">
         <span className="section-title">
-          Подключение BingX{canChooseMode ? "" : ` · ${testnet ? "Testnet" : "Live"}`}
+          {t("keys_title")}{canChooseMode ? "" : ` · ${testnet ? "Testnet" : "Live"}`}
         </span>
       </div>
       <div className="list">
         <div className="row">
           <div className="row-main">
-            <div className="row-sub">
-              Создайте API-ключ на BingX с правами на чтение и торговлю фьючерсами (без вывода средств)
-              и вставьте его сюда. Ключ проверяется на бирже и хранится в зашифрованном виде.
-            </div>
+            <div className="row-sub">{t("keys_hint")}</div>
             <button className="link-btn" onClick={() => openGuide("keys")}>
-              <HelpCircle size={14} /> Где взять ключ и что включить на бирже
+              <HelpCircle size={14} /> {t("keys_where")}
             </button>
             {canChooseMode && (
               <div className="param-edit-line">
@@ -74,7 +72,7 @@ export default function ConnectKeys({ testnet: fixedTestnet, onDone }) {
       </div>
       <button className="secondary-btn" onClick={submit} disabled={busy}>
         {busy ? <Spinner /> : <KeyRound size={16} />}
-        {busy ? "Проверяем ключ…" : `Подключить${testnet ? " Testnet" : " Live (реальные деньги)"}`}
+        {busy ? t("keys_checking") : t(testnet ? "keys_connect_testnet" : "keys_connect_live")}
       </button>
     </div>
   );

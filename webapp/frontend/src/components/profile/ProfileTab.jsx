@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { KeyRound, LogOut, Repeat, BookOpen, ChevronRight } from "lucide-react";
+import { t } from "../../i18n";
+import { LanguageList } from "../language/LanguagePicker";
 import { apiGet, apiPost, tg } from "../../lib/api";
 import { fmtUsd, fmtUsdPlain, initialsOf } from "../../lib/format";
 import { Spinner } from "../common";
@@ -17,7 +19,7 @@ function confirmAsync(message) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export default function ProfileTab() {
+export default function ProfileTab({ me, onChangeLang }) {
   const [profile, setProfile] = useState(null);
   const [error, setError] = useState(null);
   // Состояние смены режима: idle | switching; switchMsg — что показать пользователю.
@@ -40,7 +42,7 @@ export default function ProfileTab() {
     if (!res.restarting) return; // уже в этом режиме
     // Перезапускается только сессия этого пользователя; бэкенд уже переключён,
     // опрашиваем /profile, пока баланс нового режима не станет доступен.
-    setSwitchMsg(`Переключение счёта в режим ${target ? "Testnet" : "Live"}…`);
+    setSwitchMsg(t("switching_to", { mode: target ? "Testnet" : "Live" }));
     for (let i = 0; i < 40; i++) {
       await sleep(1500);
       try {
@@ -60,14 +62,12 @@ export default function ProfileTab() {
   async function handleSwitchMode() {
     if (!profile || switching) return;
     const target = !profile.testnet; // куда переключаемся
-    const warn = target
-      ? "Переключить ваш счёт в TESTNET? Бот начнёт торговать на тестовой бирже (виртуальные средства)."
-      : "⚠️ Переключить ваш счёт в LIVE (РЕАЛЬНЫЕ ДЕНЬГИ)? Бот начнёт торговать на реальном счёте.";
+    const warn = t(target ? "confirm_to_testnet" : "confirm_to_live");
     if (!(await confirmAsync(warn))) return;
 
     setSwitching(true);
     setError(null);
-    setSwitchMsg("Переключение режима…");
+    setSwitchMsg(t("switching_mode"));
     try {
       await postMode(target, false);
     } catch (e) {
@@ -75,9 +75,7 @@ export default function ProfileTab() {
         setKeysFor({ testnet: target });
       } else if (e.status === 409) {
         const n = e.detail?.open_positions ?? "?";
-        const ok = await confirmAsync(
-          `Есть ${n} открытых позиций. Они останутся в текущей базе без сопровождения SL/TP до возврата в этот режим. Переключить принудительно?`
-        );
+        const ok = await confirmAsync(t("confirm_force_switch", { n }));
         if (ok) {
           try {
             await postMode(target, true);
@@ -101,7 +99,7 @@ export default function ProfileTab() {
   const tgUser = tg?.initDataUnsafe?.user;
   const displayName = tgUser
     ? [tgUser.first_name, tgUser.last_name].filter(Boolean).join(" ")
-    : "Профиль недоступен";
+    : t("profile_unavailable");
   const handle = tgUser?.username ? `@${tgUser.username}` : "—";
 
   return (
@@ -116,11 +114,11 @@ export default function ProfileTab() {
         </div>
       </div>
 
-      {error && <div className="error-banner">Не удалось загрузить данные: {error}</div>}
+      {error && <div className="error-banner">{t("err_load", { msg: error })}</div>}
 
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Подключение к бирже</span>
+          <span className="section-title">{t("section_exchange")}</span>
         </div>
         <div className="list">
           <div className="row">
@@ -135,8 +133,8 @@ export default function ProfileTab() {
               </div>
               <div className="row-sub">
                 {profile?.api_key_suffix
-                  ? `API-ключ подключён · •••• ${profile.api_key_suffix}`
-                  : "API-ключ подключён"}
+                  ? t("key_connected_suffix", { suffix: profile.api_key_suffix })
+                  : t("key_connected")}
               </div>
             </div>
           </div>
@@ -149,9 +147,7 @@ export default function ProfileTab() {
               disabled={switching}
             >
               {switching ? <Spinner /> : <Repeat size={16} />}
-              {switching
-                ? "Переключение…"
-                : `Переключить в ${profile.testnet ? "Live" : "Testnet"}`}
+              {switching ? t("switching") : t("switch_to", { mode: profile.testnet ? "Live" : "Testnet" })}
             </button>
             {switchMsg && <div className="row-sub" style={{ marginTop: 8 }}>{switchMsg}</div>}
             <button
@@ -159,7 +155,7 @@ export default function ProfileTab() {
               onClick={() => setKeysFor(keysFor ? null : { testnet: profile.testnet })}
             >
               <KeyRound size={16} />
-              {keysFor ? "Скрыть" : "Обновить API-ключ"}
+              {keysFor ? t("hide") : t("update_key")}
             </button>
             {keysFor && (
               <ConnectKeys
@@ -175,7 +171,7 @@ export default function ProfileTab() {
 
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Баланс аккаунта</span>
+          <span className="section-title">{t("section_balance")}</span>
         </div>
         {!profile && !error && (
           <div className="hero-loading"><Spinner /></div>
@@ -183,23 +179,23 @@ export default function ProfileTab() {
         {profile && (
           <div className="list">
             <div className="kv-row">
-              <span className="kv-label">Доступно</span>
+              <span className="kv-label">{t("bal_available")}</span>
               <span className="kv-value">{fmtUsdPlain(profile.available)}</span>
             </div>
             <div className="kv-row">
-              <span className="kv-label">В позициях</span>
+              <span className="kv-label">{t("bal_in_positions")}</span>
               <span className="kv-value">{fmtUsdPlain(profile.used_margin)}</span>
             </div>
             {profile.unrealized_pnl !== 0 && (
               <div className="kv-row">
-                <span className="kv-label">Нереализ. PnL</span>
+                <span className="kv-label">{t("bal_unrealized")}</span>
                 <span className={`kv-value ${profile.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}`}>
                   {fmtUsd(profile.unrealized_pnl)}
                 </span>
               </div>
             )}
             <div className="kv-row">
-              <span className="kv-label">Всего</span>
+              <span className="kv-label">{t("bal_total")}</span>
               <span className="kv-value kv-value-strong">{fmtUsdPlain(profile.equity)}</span>
             </div>
           </div>
@@ -208,14 +204,21 @@ export default function ProfileTab() {
 
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Помощь</span>
+          <span className="section-title">{t("language")}</span>
+        </div>
+        <LanguageList current={me?.lang} onSelect={onChangeLang} />
+      </div>
+
+      <div className="section">
+        <div className="section-head">
+          <span className="section-title">{t("section_help")}</span>
         </div>
         <div className="list">
           <div className="row" style={{ cursor: "pointer" }} onClick={() => openGuide()}>
             <div className="row-icon"><BookOpen size={17} /></div>
             <div className="row-main">
-              <span className="settings-title">Инструкция и ответы на вопросы</span>
-              <div className="row-sub">ключи BingX, хедж-режим, настройки, оплата, остановка</div>
+              <span className="settings-title">{t("help_title")}</span>
+              <div className="row-sub">{t("help_sub")}</div>
             </div>
             <ChevronRight size={16} className="chev" />
           </div>
@@ -224,7 +227,7 @@ export default function ProfileTab() {
 
       <button className="danger-btn" onClick={() => tg?.close()} disabled={!tg}>
         <LogOut size={16} />
-        Закрыть приложение
+        {t("close_app")}
       </button>
     </div>
   );

@@ -1,3 +1,5 @@
+import { locale, t } from "../i18n";
+
 export const fmtUsd = (n) =>
   `${n >= 0 ? "+" : "−"}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -19,7 +21,7 @@ export function fmtVolume(v) {
 
 export function fmtPrice(p) {
   if (p == null) return "—";
-  return p >= 1 ? p.toLocaleString("ru-RU", { maximumFractionDigits: 2 }) : p.toPrecision(3);
+  return p >= 1 ? p.toLocaleString(locale(), { maximumFractionDigits: 2 }) : p.toPrecision(3);
 }
 
 // SL в % ROI (как на бирже и как считает TrailingStopManager):
@@ -44,18 +46,18 @@ export const fmtDate = (iso) => {
   if (!iso) return "—";
   const d = toLocalDate(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString(locale(), { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 };
 
 // Длительность сделки (duration_seconds из trade_analytics) в коротком виде:
-// "2ч 15м", "45м", "<1м".
+// "2h 15m" / "2ч 15м", "45m", "<1m".
 export const fmtDuration = (seconds) => {
   if (seconds == null) return null;
   const totalMin = Math.round(seconds / 60);
-  if (totalMin < 1) return "<1м";
+  if (totalMin < 1) return t("dur_lt_min");
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
-  return h > 0 ? `${h}ч ${m}м` : `${m}м`;
+  return h > 0 ? t("dur_hm", { h, m }) : t("dur_m", { m });
 };
 
 // Только время — используется внутри группы "по дням", где дата уже
@@ -64,7 +66,7 @@ export const fmtTime = (iso) => {
   if (!iso) return "—";
   const d = toLocalDate(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
 };
 
 export function initialsOf(name) {
@@ -86,8 +88,8 @@ export function dayKey(iso) {
   return d.toLocaleDateString("sv-SE"); // YYYY-MM-DD
 }
 
-// Заголовок-разделитель для группы сделок за день: "Сегодня" / "Вчера" /
-// "10 сентября" (год добавляется, только если сделка не за текущий год).
+// Заголовок-разделитель для группы сделок за день: "Today" / "Yesterday" /
+// "10 September" (год добавляется, только если сделка не за текущий год).
 export function fmtDayLabel(iso) {
   if (!iso) return "—";
   const d = toLocalDate(iso);
@@ -97,10 +99,10 @@ export function fmtDayLabel(iso) {
   const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
   const diffDays = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
 
-  if (diffDays === 0) return "Сегодня";
-  if (diffDays === 1) return "Вчера";
+  if (diffDays === 0) return t("today");
+  if (diffDays === 1) return t("yesterday");
 
-  return d.toLocaleDateString("ru-RU", {
+  return d.toLocaleDateString(locale(), {
     day: "2-digit",
     month: "long",
     year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined,

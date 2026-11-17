@@ -11,6 +11,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from core.common.market_data import held_symbols
 
+from ..i18n import tr
 from ..deps import (
     limit_exchange,
     require_admin,
@@ -97,7 +98,7 @@ async def get_symbol_candidates(
         tickers = await exchange.get_all_tickers()
     except Exception as e:
         logger.error(f"Failed to fetch tickers for /api/symbols/candidates: {e}", exc_info=True)
-        raise HTTPException(status_code=502, detail="Exchange request failed")
+        raise HTTPException(status_code=502, detail=tr("err_exchange_request"))
 
     blacklist = _settings_list(session.settings_manager, "get_blacklist_symbols")
     whitelist = _settings_list(global_settings, "get_whitelist_symbols")  # спільний пул
@@ -165,7 +166,7 @@ async def _change_blacklist(request: Request, user: dict, symbol: str, add: bool
     """Чорний список адміна: монета прибирається зі спільного пулу для всіх."""
     session = require_sessions(request).get(user["_id"])
     if session is None:
-        raise HTTPException(status_code=409, detail={"code": "no_session", "message": "Подключите API-ключи BingX"})
+        raise HTTPException(status_code=409, detail={"code": "no_session", "message": tr("err_connect_keys")})
     action = "add" if add else "remove"
     await getattr(session.settings_manager, f"{action}_blacklist_symbol")(symbol)
     await getattr(require_global_settings(request), f"{action}_blacklist_symbol")(symbol)

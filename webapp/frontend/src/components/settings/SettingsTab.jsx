@@ -4,6 +4,7 @@ import { apiGet, apiPost } from "../../lib/api";
 import { EmptyRow, ToggleRow, LinkRow } from "../common";
 import StrategyCard from "./StrategyCard";
 import RiskNumberRow from "./RiskNumberRow";
+import { t } from "../../i18n";
 
 export default function SettingsTab() {
   const [settings, setSettings] = useState(null);
@@ -52,45 +53,45 @@ export default function SettingsTab() {
 
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Торговля</span>
+          <span className="section-title">{t("trading")}</span>
         </div>
         <div className="list">
           <ToggleRow
             icon={Power}
-            title={settings?.trading_enabled ? "Торговля включена" : "Торговля выключена"}
-            sub="Глобальный выключатель: если выключено, стратегии не открывают новые позиции. Уже открытые позиции продолжают сопровождаться (SL/TP)."
+            title={t(settings?.trading_enabled ? "trading_on" : "trading_off")}
+            sub={t("trading_sub")}
             checked={settings ? settings.trading_enabled : false}
             disabled={!settings || tradingBusy}
             onToggle={toggleTrading}
           />
           <RiskNumberRow
             field="max_open_positions"
-            title="Максимум открытых позиций"
-            sub="Сколько сделок может быть открыто одновременно. Новые входы блокируются, пока число позиций на бирже не станет меньше. Уже открытые не закрываются. От 1 до 50."
+            title={t("max_positions_title")}
+            sub={t("max_positions_sub")}
             value={settings?.max_open_positions}
             format={(v) => String(v)}
             onSaved={saveRisk}
           />
           <RiskNumberRow
             field="min_margin_usdt"
-            title="Минимальная маржа сделки, USDT"
-            sub="Если стратегия посчитала маржу меньше — объём увеличивается до этой суммы (для всех стратегий). Реальный риск сделки может быть выше risk% стратегии. 0 — выключено."
+            title={t("min_margin_title")}
+            sub={t("min_margin_sub")}
             value={settings?.min_margin_usdt}
             format={(v) => `$${v}`}
             onSaved={saveRisk}
           />
           <RiskNumberRow
             field="max_margin_usdt"
-            title="Максимальная маржа сделки, USDT"
-            sub="Если стратегия посчитала маржу больше — объём уменьшается до этой суммы (для всех стратегий). Важнее минимальной маржи. 0 — выключено."
+            title={t("max_margin_title")}
+            sub={t("max_margin_sub")}
             value={settings?.max_margin_usdt}
-            format={(v) => (v > 0 ? `$${v}` : "выкл.")}
+            format={(v) => (v > 0 ? `$${v}` : t("off"))}
             onSaved={saveRisk}
           />
           <RiskNumberRow
             field="max_stop_roi_percent"
-            title="Максимальный стоп, % ROI"
-            sub="Если стоп стратегии дальше — бот подтягивает его ближе, плечо не меняется. Ликвидация наступает примерно на 100% ROI, поэтому максимум 90. При 10x: 70% ROI = 7% от цены."
+            title={t("max_stop_title")}
+            sub={t("max_stop_sub")}
             value={settings?.max_stop_roi_percent}
             format={(v) => `−${v}%`}
             onSaved={saveRisk}
@@ -101,11 +102,11 @@ export default function SettingsTab() {
       {settings?.is_admin && (
         <div className="section">
           <div className="section-head">
-            <span className="section-title">Стратегии</span>
+            <span className="section-title">{t("strategies")}</span>
             <span className="section-count">{settings.strategies.length}</span>
           </div>
           {!settings.strategies.length && (
-            <div className="list"><EmptyRow text="Стратегии ещё не инициализированы ботом" /></div>
+            <div className="list"><EmptyRow text={t("strategies_not_init")} /></div>
           )}
           {settings.strategies.map((s) => (
             <StrategyCard key={s.name} strategy={s} onUpdate={updateStrategy} />
@@ -115,12 +116,12 @@ export default function SettingsTab() {
 
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Доступ</span>
+          <span className="section-title">{t("access")}</span>
         </div>
         <div className="list">
           <LinkRow
             icon={KeyRound}
-            title="API-ключ BingX"
+            title={t("api_key_bingx")}
             value={apiKeySuffix ? `•••• ${apiKeySuffix}` : "—"}
           />
         </div>

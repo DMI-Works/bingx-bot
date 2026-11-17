@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { apiPost } from "../../lib/api";
+import { t } from "../../i18n";
 
-// Числовая риск-настройка из /api/settings/risk (min/max_margin_usdt,
-// max_stop_roi_percent). Бэкенд валидирует диапазон и возвращает все значения.
-export default function RiskNumberRow({ field, title, sub, value, format, onSaved }) {
+// Числовая настройка: по умолчанию риск из /api/settings/risk (min/max_margin_usdt,
+// max_stop_roi_percent, max_open_positions); endpoint — другой адрес (комиссия
+// подписки в админке). Бэкенд валидирует диапазон и возвращает все значения.
+export default function RiskNumberRow({ endpoint = "/settings/risk", field, title, sub, value, format, onSaved }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -18,11 +20,11 @@ export default function RiskNumberRow({ field, title, sub, value, format, onSave
 
   const commit = async () => {
     const n = Number(draft);
-    if (draft.trim() === "" || Number.isNaN(n) || n < 0) { setErr("Введите число ≥ 0"); return; }
+    if (draft.trim() === "" || Number.isNaN(n) || n < 0) { setErr(t("enter_number_ge0")); return; }
     setSaving(true);
     setErr(null);
     try {
-      const res = await apiPost("/settings/risk", { [field]: n });
+      const res = await apiPost(endpoint, { [field]: n });
       onSaved(res);
       setEditing(false);
     } catch (e) {

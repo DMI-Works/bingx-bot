@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from .i18n import install_request_lang
 from .security import install_security_headers
 from .routes import account, admin, analytics, profile, settings, symbols, trades
 
@@ -38,6 +39,7 @@ app.state.signal_tracker = None
 
 # Заголовки безпеки; CORS вимкнено навмисно — див. security.py
 install_security_headers(app)
+install_request_lang(app)
 
 for module in (account, admin, trades, analytics, profile, settings, symbols):
     app.include_router(module.router)

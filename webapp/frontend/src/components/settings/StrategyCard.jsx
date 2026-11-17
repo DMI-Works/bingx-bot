@@ -3,6 +3,7 @@ import { ChevronRight, Power, RotateCcw } from "lucide-react";
 import { apiPost } from "../../lib/api";
 import { ToggleRow, EmptyRow } from "../common";
 import ParamRow from "./ParamRow";
+import { t } from "../../i18n";
 
 export default function StrategyCard({ strategy, onUpdate }) {
   const [open, setOpen] = useState(false);
@@ -40,7 +41,7 @@ export default function StrategyCard({ strategy, onUpdate }) {
         <div className="row-main">
           <div className="row-title-line">
             <span className="settings-title">{strategy.name}</span>
-            {strategy.modified && <span className="modified-badge">изменено</span>}
+            {strategy.modified && <span className="modified-badge">{t("modified")}</span>}
           </div>
         </div>
         <ChevronRight size={16} className="chev" style={{ transform: open ? "rotate(90deg)" : "none" }} />
@@ -52,8 +53,8 @@ export default function StrategyCard({ strategy, onUpdate }) {
           <div className="list" style={{ marginBottom: 10 }}>
             <ToggleRow
               icon={Power}
-              title="Стратегия работает"
-              sub="Действует сразу для всех пользователей."
+              title={t("strategy_works")}
+              sub={t("strategy_works_sub")}
               checked={strategy.enabled}
               disabled={busy}
               onToggle={toggleEnabled}
@@ -64,11 +65,11 @@ export default function StrategyCard({ strategy, onUpdate }) {
               ? strategy.params.map((p) => (
                   <ParamRow key={p.key} strategyName={strategy.name} param={p} onSaved={onUpdate} />
                 ))
-              : <EmptyRow text="Нет параметров" />}
+              : <EmptyRow text={t("no_params")} />}
           </div>
           <button className="danger-btn" onClick={reset} disabled={busy}>
             <RotateCcw size={16} />
-            Сбросить к заводским
+            {t("reset_defaults")}
           </button>
         </div>
       )}

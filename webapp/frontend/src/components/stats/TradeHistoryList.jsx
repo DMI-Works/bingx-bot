@@ -1,9 +1,10 @@
 import { fmtUsd, fmtUsdPlain, fmtTime, groupTradesByDay, tradeCommission } from "../../lib/format";
 import { EmptyRow, PnlTag, SideBadge } from "../common";
+import { t } from "../../i18n";
 
 export default function TradeHistoryList({ trades }) {
-  if (!trades) return <div className="list"><EmptyRow text="Загрузка..." /></div>;
-  if (!trades.length) return <div className="list"><EmptyRow text="Нет закрытых сделок за этот период" /></div>;
+  if (!trades) return <div className="list"><EmptyRow text={t("loading")} /></div>;
+  if (!trades.length) return <div className="list"><EmptyRow text={t("no_trades_period")} /></div>;
 
   const groups = groupTradesByDay(trades);
 
@@ -16,45 +17,45 @@ export default function TradeHistoryList({ trades }) {
             <span className="day-sep-end">
               <span className={`day-sep-pnl ${g.pnl >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(g.pnl)}</span>
               {g.commission !== 0 && (
-                <span className="day-sep-commission">комиссия {fmtUsd(g.commission)}</span>
+                <span className="day-sep-commission">{t("commission", { v: fmtUsd(g.commission) })}</span>
               )}
             </span>
           </div>
           <div className="list">
-            {g.items.map((t) => {
-              const commission = tradeCommission(t);
+            {g.items.map((tr) => {
+              const commission = tradeCommission(tr);
               return (
-                <div className="row row-compact" key={t.order_id}>
+                <div className="row row-compact" key={tr.order_id}>
                   <div className="row-main">
                     <div className="row-title-line">
-                      <span className="symbol">{t.symbol}</span>
-                      <SideBadge side={t.side} />
-                      {t.leverage && <span className="row-sub row-sub-faint">{t.leverage}x</span>}
-                      {t.margin_usdt != null && (
-                        <span className="row-sub row-sub-faint">маржа {fmtUsdPlain(t.margin_usdt)}</span>
+                      <span className="symbol">{tr.symbol}</span>
+                      <SideBadge side={tr.side} />
+                      {tr.leverage && <span className="row-sub row-sub-faint">{tr.leverage}x</span>}
+                      {tr.margin_usdt != null && (
+                        <span className="row-sub row-sub-faint">{t("margin", { v: fmtUsdPlain(tr.margin_usdt) })}</span>
                       )}
                     </div>
                     <div className="row-sub">
-                      {fmtTime(t.closed_at)}
+                      {fmtTime(tr.closed_at)}
                       {commission != null && (
                         <>
                           {"  ·  "}
                           <span className="row-sub-faint" title={
-                            t.commission_open != null || t.commission_close != null
-                              ? `открытие ${fmtUsdPlain(t.commission_open ?? 0)} · закрытие ${fmtUsdPlain(t.commission_close ?? 0)}`
+                            tr.commission_open != null || tr.commission_close != null
+                              ? t("commission_split", { open: fmtUsdPlain(tr.commission_open ?? 0), close: fmtUsdPlain(tr.commission_close ?? 0) })
                               : undefined
                           }>
-                            комиссия {fmtUsd(commission)}
+                            {t("commission", { v: fmtUsd(commission) })}
                           </span>
                         </>
                       )}
                     </div>
                   </div>
                   <div className="row-end">
-                    <span className={`row-usd ${t.net_pnl >= 0 ? "text-profit" : "text-loss"}`}>
-                      {fmtUsd(t.net_pnl)}
+                    <span className={`row-usd ${tr.net_pnl >= 0 ? "text-profit" : "text-loss"}`}>
+                      {fmtUsd(tr.net_pnl)}
                     </span>
-                    {t.roe_percent != null && <PnlTag value={t.net_pnl} pct={t.roe_percent} />}
+                    {tr.roe_percent != null && <PnlTag value={tr.net_pnl} pct={tr.roe_percent} />}
                   </div>
                 </div>
               );

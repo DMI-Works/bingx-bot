@@ -15,6 +15,7 @@ from core.users import public_view
 from ..services.user_stats import summarize_user_trades
 
 from ..deps import limit_exchange, require_admin, require_billing, require_sessions, require_users
+from ..i18n import tr
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ async def get_user_card(user_id: str, request: Request, admin: dict = Depends(re
     """Картка користувача: рахунок, результат, позиції, підписка, ключі."""
     user = require_users(request).get(user_id)
     if user is None:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
+        raise HTTPException(status_code=404, detail=tr("err_user_not_found"))
     client = request.app.state.mongo_client
     stats = {}
     for mode, testnet in (("live", False), ("testnet", True)):
@@ -144,10 +145,10 @@ def set_user_status(
     if status not in ("active", "blocked"):
         raise HTTPException(status_code=422, detail="'status' must be 'active' or 'blocked'")
     if user_id == admin["_id"]:
-        raise HTTPException(status_code=422, detail="Нельзя заблокировать самого себя")
+        raise HTTPException(status_code=422, detail=tr("err_block_self"))
     users = require_users(request)
     if users.get(user_id) is None:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
+        raise HTTPException(status_code=404, detail=tr("err_user_not_found"))
     users.set_status(user_id, status)
     require_sessions(request).refresh_user(user_id)
     logger.info(f"User {user_id} status -> {status} (admin={admin['_id']})")
@@ -170,7 +171,7 @@ def set_billing_config(request: Request, payload: Dict[str, Any] = Body(...), ad
     """Новий відсоток діє на наступні рахунки; уже виставлені не змінюються."""
     value = payload.get("fee_percent")
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100:
-        raise HTTPException(status_code=422, detail="Введите процент от 0 до 100")
+        raise HTTPException(status_code=422, detail=tr("err_fee_range"))
     config = require_billing(request).set_fee_percent(value)
     logger.info(f"Billing fee set to {value}% (admin={admin['_id']})")
     return config
@@ -180,12 +181,12 @@ def _close_invoice(request: Request, invoice_id: str, action: str, admin: dict) 
     try:
         ObjectId(invoice_id)
     except (InvalidId, TypeError):
-        raise HTTPException(status_code=404, detail="Счёт не найден")
+        raise HTTPException(status_code=404, detail=tr("err_invoice_not_found"))
     billing = require_billing(request)
     by = str(admin["_id"])
     doc = billing.mark_paid(invoice_id, "manual", by) if action == "paid" else billing.waive(invoice_id, by)
     if doc is None:
-        raise HTTPException(status_code=409, detail="Счёт уже закрыт или не найден")
+        raise HTTPException(status_code=409, detail=tr("err_invoice_closed"))
     logger.info(f"Invoice {invoice_id} -> {action} (admin={by})")
     return {"id": invoice_id, "status": action}
 

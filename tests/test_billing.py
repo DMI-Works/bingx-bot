@@ -144,7 +144,7 @@ class TestAccessWithBilling(unittest.TestCase):
     def test_unpaid_blocks_new_entries(self):
         allowed, reason = can_open_new({"status": "active", "billing": {"unpaid": True}})
         self.assertFalse(allowed)
-        self.assertIn("рахунок", reason)
+        self.assertEqual(reason, "unpaid")
 
     def test_paid_allows(self):
         self.assertTrue(can_open_new({"status": "active", "billing": {"unpaid": False}})[0])

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ChevronRight, Sliders } from "lucide-react";
 import { apiPost } from "../../lib/api";
 import { ToggleRow } from "../common";
+import { t } from "../../i18n";
 
 // Массивы редактируются одной строкой через запятую: "10, 16, 32, 64".
 // item_kind приходит с бэкенда ("number" | "text" | "bool"), так что любой
@@ -15,10 +16,10 @@ const parseList = (text, itemKind) => {
   const parts = text.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
   if (itemKind === "text") return { value: parts };
   if (itemKind === "bool") {
-    return { error: "Списки логических значений не поддерживаются" };
+    return { error: t("list_bool_unsupported") };
   }
   const nums = parts.map((x) => Number(x));
-  if (nums.some((n) => Number.isNaN(n))) return { error: "Введите числа через запятую" };
+  if (nums.some((n) => Number.isNaN(n))) return { error: t("enter_numbers_comma") };
   return { value: nums };
 };
 
@@ -38,7 +39,7 @@ export default function ParamRow({ strategyName, param, onSaved }) {
     let value = draft;
     if (param.kind === "number") {
       const n = Number(draft);
-      if (Number.isNaN(n)) { setErr("Введите число"); return; }
+      if (Number.isNaN(n)) { setErr(t("enter_number")); return; }
       value = n;
     } else if (param.kind === "list") {
       const parsed = parseList(draft, param.item_kind);

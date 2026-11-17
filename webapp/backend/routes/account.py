@@ -1,10 +1,11 @@
-"""/api/me і /api/account/keys — поточний користувач і його API-ключі BingX."""
+"""/api/me, /api/me/lang і /api/account/keys — поточний користувач, його мова і API-ключі BingX."""
 
 import logging
 from typing import Any, Dict
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from core.common.i18n import LANGS
 from core.common.market_data import extract_account_balance
 from core.exchange import BingXClient
 from core.exchange.errors import BingXAPIError
@@ -12,6 +13,7 @@ from core.users import SecretsKeyMissing, public_view
 from core.users.access import can_open_new
 
 from ..deps import limit_keys, require_billing, require_sessions, require_user, require_users
+from ..i18n import tr
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,19 @@ def _me(request: Request, user: dict) -> Dict[str, Any]:
 @router.get("/api/me")
 def get_me(request: Request, user: dict = Depends(require_user)):
     return _me(request, user)
+
+
+@router.post("/api/me/lang")
+def set_lang(request: Request, payload: Dict[str, Any] = Body(...), user: dict = Depends(require_user)):
+    """Мова інтерфейсу: вибір при першому вході або в Профілі. Працююча
+    сесія одразу перечитує користувача — сповіщення підуть новою мовою."""
+    lang = payload.get("lang")
+    if lang not in LANGS:
+        raise HTTPException(status_code=422, detail=tr("err_unknown_lang"))
+    users = require_users(request)
+    users.set_lang(user["_id"], lang)
+    require_sessions(request).refresh_user(user["_id"])
+    return _me(request, users.get(user["_id"]))
 
 
 @router.get("/api/billing")
@@ -59,12 +74,12 @@ def check_key_permissions(perms: Dict[str, Any]) -> None:
     if PERMISSION_WITHDRAW in codes or withdraw_flags:
         raise HTTPException(
             status_code=400,
-            detail="У ключа включён вывод средств — создайте ключ без права «Вывод» (Withdraw)",
+            detail=tr("err_key_withdraw"),
         )
     if PERMISSION_FUTURES not in codes and perms.get("enableFutures") is not True:
         raise HTTPException(
             status_code=400,
-            detail="У ключа нет права торговли фьючерсами — включите «Бессрочные фьючерсы» при создании ключа",
+            detail=tr("err_key_no_futures"),
         )
 
 
@@ -76,14 +91,14 @@ async def _verify_keys(api_key: str, api_secret: str, testnet: bool) -> None:
         balance = await client.get_account_balance()
         perms = await client.get_api_permissions()
     except BingXAPIError as e:
-        raise HTTPException(status_code=400, detail=f"Биржа отклонила ключ: {e.code} {e.msg}")
+        raise HTTPException(status_code=400, detail=tr("err_key_rejected", code=e.code, msg=e.msg))
     except Exception as e:
         logger.error(f"Key verification request failed: {type(e).__name__}")
-        raise HTTPException(status_code=502, detail="Не удалось связаться с биржей")
+        raise HTTPException(status_code=502, detail=tr("err_exchange_unreachable"))
     finally:
         await client.close()
     if extract_account_balance(balance) is None:
-        raise HTTPException(status_code=400, detail="Биржа не вернула баланс по этому ключу")
+        raise HTTPException(status_code=400, detail=tr("err_no_balance"))
     check_key_permissions(perms)
 
 
@@ -94,7 +109,7 @@ def _guard_open_positions(session, testnet: bool) -> None:
             status_code=409,
             detail={
                 "code": "open_positions",
-                "message": "Есть открытые позиции — сначала закройте их",
+                "message": tr("err_close_positions_first"),
                 "open_positions": len(session.trader.open_positions),
             },
         )
@@ -119,7 +134,7 @@ async def save_keys(
         users.save_keys(user["_id"], testnet, api_key, api_secret, can_withdraw=False)  # перевірено в _verify_keys
     except SecretsKeyMissing:
         logger.critical("SECRETS_KEY is not set — cannot store user API keys")
-        raise HTTPException(status_code=503, detail="Сервис временно недоступен")
+        raise HTTPException(status_code=503, detail=tr("err_service_unavailable"))
 
     # перший ключ визначає режим рахунку, якщо для поточного режиму ключів немає
     fresh = users.get(user["_id"])
@@ -129,7 +144,7 @@ async def save_keys(
 
     if bool(fresh.get("testnet", True)) == testnet:
         if await sessions.start_user(user["_id"]) is None:
-            raise HTTPException(status_code=502, detail="Ключ сохранён, но запустить торговлю не удалось")
+            raise HTTPException(status_code=502, detail=tr("err_key_saved_not_started"))
     logger.info(f"API keys updated for user {user['_id']} ({'testnet' if testnet else 'live'})")
     return _me(request, users.get(user["_id"]))
 

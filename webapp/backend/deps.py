@@ -10,6 +10,7 @@ import logging
 from fastapi import Depends, Header, HTTPException, Request
 
 from .auth import validate_init_data
+from .i18n import tr
 from .rate_limit import (
     AUTH_FAIL_IP_LIMIT, EXCHANGE_LIMIT, KEYS_LIMIT, USER_API_LIMIT, client_ip, enforce,
 )
@@ -72,7 +73,7 @@ def require_session(request: Request, user: dict = Depends(require_user)):
     if session is None:
         raise HTTPException(
             status_code=409,
-            detail={"code": "no_session", "message": "Подключите API-ключи BingX"},
+            detail={"code": "no_session", "message": tr("err_connect_keys")},
         )
     return session
 
@@ -81,7 +82,7 @@ def require_admin(user: dict = Depends(require_user), request: Request = None) -
     if user.get("role") != "admin":
         where = f"{request.method} {request.url.path} ip={client_ip(request)}" if request else ""
         logger.warning(f"[AUTH] 403 admin-only: user={user['_id']} @{user.get('username')} {where}")
-        raise HTTPException(status_code=403, detail="Только для администратора")
+        raise HTTPException(status_code=403, detail=tr("err_admin_only"))
     return user
 
 

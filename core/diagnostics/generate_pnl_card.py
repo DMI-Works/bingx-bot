@@ -6,6 +6,7 @@ import qrcode
 from PIL import Image, ImageDraw
 
 from ..common.formatting import price_decimals as default_price_decimals
+from ..common.i18n import t
 from .card_common import (
     BLUE,
     CARD_H,
@@ -71,6 +72,7 @@ def generate_pnl_card(
     logo_crop_center: tuple = (0.5, 0.5),
     price_decimals: Optional[int] = None,
     output_path: Optional[str] = None,
+    lang: Optional[str] = None,
 ) -> io.BytesIO:
     is_opened = card_type == "opened"
     ts = closed_at or datetime.now()
@@ -95,7 +97,7 @@ def generate_pnl_card(
     y = 36
 
     f_label = font(500, 22)
-    top_label = "Позицію відкрито" if is_opened else "Позицію закрито"
+    top_label = t(lang, "card_opened" if is_opened else "card_closed")
     draw.text((pad, y), top_label, font=f_label, fill=TEXT_MUTED)
     y += 40
 
@@ -134,7 +136,7 @@ def generate_pnl_card(
 
     if is_opened:
         f_big_label = font(500, 20)
-        draw.text((pad, y), "МАРЖА", font=f_big_label, fill=TEXT_MUTED)
+        draw.text((pad, y), t(lang, "card_margin"), font=f_big_label, fill=TEXT_MUTED)
         y += 32
 
         f_big = font(800, 56)
@@ -143,18 +145,18 @@ def generate_pnl_card(
         y += 78
 
         entry_str = f"{entry_price:.{price_decimals}f}" if entry_price else "—"
-        draw.text((pad, y), "Ціна входу", font=f_kv_label, fill=TEXT_MUTED)
+        draw.text((pad, y), t(lang, "card_entry"), font=f_kv_label, fill=TEXT_MUTED)
         draw.text((pad + 260, y), entry_str, font=f_kv_val, fill=TEXT_WHITE)
         y += 32
 
         if stop_loss_price:
             sl_str = f"{stop_loss_price:.{price_decimals}f}"
-            draw.text((pad, y), "Стоп-лосс", font=f_kv_label, fill=TEXT_MUTED)
+            draw.text((pad, y), t(lang, "card_sl"), font=f_kv_label, fill=TEXT_MUTED)
             draw.text((pad + 260, y), sl_str, font=f_kv_val, fill=RED)
             y += 32
 
         if take_profit_summary:
-            draw.text((pad, y), "Тейк-профіт", font=f_kv_label, fill=TEXT_MUTED)
+            draw.text((pad, y), t(lang, "card_tp"), font=f_kv_label, fill=TEXT_MUTED)
             draw.text((pad + 260, y), take_profit_summary, font=f_kv_val, fill=GREEN)
             y += 32
 
@@ -179,10 +181,10 @@ def generate_pnl_card(
         close_str = f"{close_price:.{price_decimals}f}" if close_price else "—"
         entry_str = f"{entry_price:.{price_decimals}f}" if entry_price else "—"
 
-        draw.text((pad, y), "Ціна закриття", font=f_kv_label, fill=TEXT_MUTED)
+        draw.text((pad, y), t(lang, "card_close"), font=f_kv_label, fill=TEXT_MUTED)
         draw.text((pad + 260, y), close_str, font=f_kv_val, fill=TEXT_WHITE)
         y += 32
-        draw.text((pad, y), "Ціна входу", font=f_kv_label, fill=TEXT_MUTED)
+        draw.text((pad, y), t(lang, "card_entry"), font=f_kv_label, fill=TEXT_MUTED)
         draw.text((pad + 260, y), entry_str, font=f_kv_val, fill=TEXT_WHITE)
         y += 44
 
@@ -214,7 +216,7 @@ def generate_pnl_card(
         card.paste(qr_img.convert("RGB"), (qr_x, qr_y))
 
         text_right_x = qr_x - 16
-        ref_label = "Реферальний код"
+        ref_label = t(lang, "card_ref")
         ref_val = referral_code
 
         lw = draw.textlength(ref_label, font=f_ref_label)

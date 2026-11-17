@@ -22,6 +22,7 @@ from core.strategies.param_catalog import (
 from core.state.settings_manager import MAX_OPEN_POSITIONS_LIMIT, MAX_STOP_ROI_LIMIT
 from core.strategies.registry import STRATEGY_REGISTRY
 
+from ..i18n import tr
 from ..deps import (
     limit_exchange,
     require_admin,
@@ -130,7 +131,7 @@ async def set_mode(
     if not users.has_keys(user, testnet):
         raise HTTPException(
             status_code=409,
-            detail={"code": "no_keys", "message": f"Нет API-ключей для режима {'Testnet' if testnet else 'Live'}"},
+            detail={"code": "no_keys", "message": tr("err_no_keys_for_mode", mode="Testnet" if testnet else "Live")},
         )
 
     session = sessions.get(user_id)
@@ -140,7 +141,7 @@ async def set_mode(
             status_code=409,
             detail={
                 "code": "open_positions",
-                "message": "Есть открытые позиции — смена режима заблокирована",
+                "message": tr("err_mode_open_positions"),
                 "open_positions": open_count,
             },
         )
@@ -149,7 +150,7 @@ async def set_mode(
     if await sessions.start_user(user_id) is None:
         users.set_testnet(user_id, current)
         await sessions.start_user(user_id)
-        raise HTTPException(status_code=502, detail="Не удалось запустить торговлю в этом режиме")
+        raise HTTPException(status_code=502, detail=tr("err_mode_start_failed"))
 
     logger.info(f"Mode switched to {'testnet' if testnet else 'live'} (force={force}, user={user_id})")
     return {"testnet": testnet, "restarting": True}
@@ -191,7 +192,7 @@ async def set_risk_settings(payload: Dict[str, Any] = Body(...), session=Depends
     if new_min > 0 and new_max > 0 and new_min > new_max:
         raise HTTPException(
             status_code=422,
-            detail=f"Минимальная маржа ({new_min:g}) больше максимальной ({new_max:g})",
+            detail=tr("err_margin_min_gt_max", min=f"{new_min:g}", max=f"{new_max:g}"),
         )
     if "min_margin_usdt" in margins:
         await settings_manager.set_min_margin_usdt(margins["min_margin_usdt"])
@@ -202,13 +203,13 @@ async def set_risk_settings(payload: Dict[str, Any] = Body(...), session=Depends
         if not 1 <= value <= MAX_STOP_ROI_LIMIT:
             raise HTTPException(
                 status_code=422,
-                detail=f"'max_stop_roi_percent' must be between 1 and {MAX_STOP_ROI_LIMIT:g} (ликвидация ~100%)",
+                detail=tr("err_max_stop_range", limit=f"{MAX_STOP_ROI_LIMIT:g}"),
             )
         await settings_manager.set_max_stop_roi_percent(value)
     if "max_open_positions" in payload:
         value = _number("max_open_positions")
         if int(value) != value or not 1 <= value <= MAX_OPEN_POSITIONS_LIMIT:
-            raise HTTPException(status_code=422, detail=f"Введите целое число от 1 до {MAX_OPEN_POSITIONS_LIMIT}")
+            raise HTTPException(status_code=422, detail=tr("err_max_positions_range", limit=MAX_OPEN_POSITIONS_LIMIT))
         await settings_manager.set_max_open_positions(int(value))
     logger.info(f"Risk settings updated via mini app: {payload} (user={session.user_id})")
     return {
@@ -230,7 +231,7 @@ def _validate_strategy_params(name: str, params: Dict[str, Any]) -> None:
     try:
         parse(params)
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=f"Недопустимое значение: {e}")
+        raise HTTPException(status_code=422, detail=tr("err_invalid_value", error=e))
 
 
 @router.post("/strategies/{name}/enabled")

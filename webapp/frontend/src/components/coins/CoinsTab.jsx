@@ -3,6 +3,7 @@ import { Ban, RotateCcw, Plus, Radio, TrendingUp, Check } from "lucide-react";
 import { apiGet, apiPost, apiDelete } from "../../lib/api";
 import { Spinner, EmptyRow } from "../common";
 import { fmtDate, fmtPrice, fmtVolume } from "../../lib/format";
+import { t } from "../../i18n";
 
 export default function CoinsTab() {
   const [symbols, setSymbols] = useState(null);
@@ -129,12 +130,11 @@ export default function CoinsTab() {
 
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Топ монет</span>
+          <span className="section-title">{t("top_coins")}</span>
           {candidates && <span className="section-count">{candidates.length}</span>}
         </div>
         <div className="row-sub row-sub-faint" style={{ padding: "0 14px 8px" }}>
-          Так бот ранжирует монеты по объёму торгов при отборе (см. SymbolSelector).
-          «В торговле» — уже подписан или принудительно добавлен отсюда.
+          {t("top_coins_hint")}
         </div>
 
         {candidatesError && <div className="error-banner">{candidatesError}</div>}
@@ -144,7 +144,7 @@ export default function CoinsTab() {
         )}
 
         {candidates && candidates.length === 0 && (
-          <div className="list"><EmptyRow text="Нет монет, проходящих текущие фильтры" /></div>
+          <div className="list"><EmptyRow text={t("no_coins_filters")} /></div>
         )}
 
         {visibleCandidates && visibleCandidates.length > 0 && (
@@ -161,15 +161,15 @@ export default function CoinsTab() {
                   <div className="row-main">
                     <div className="row-title-line">
                       <span className="symbol">{c.symbol}</span>
-                      {c.held && <span className="tag tag-info">в позиции</span>}
-                      {c.whitelisted && <span className="tag tag-success">добавлена вручную</span>}
+                      {c.held && <span className="tag tag-info">{t("in_position")}</span>}
+                      {c.whitelisted && <span className="tag tag-success">{t("added_manually")}</span>}
                     </div>
                     <div className="row-sub">
                       {fmtPrice(c.price)}
                       {"  ·  "}
                       <span className={changeClass}>{changeSign}{c.change_pct.toFixed(1)}%</span>
                       {"  ·  "}
-                      об. 24ч {fmtVolume(c.volume_24h)}
+                      {t("vol24", { v: fmtVolume(c.volume_24h) })}
                     </div>
                   </div>
                   {inTrading ? (
@@ -178,12 +178,12 @@ export default function CoinsTab() {
                         className="icon-btn"
                         disabled={busyCandidate === c.symbol}
                         onClick={() => removeFromWhitelist(c.symbol)}
-                        title="Убрать из принудительного списка"
+                        title={t("remove_whitelist")}
                       >
                         <RotateCcw size={15} />
                       </button>
                     ) : (
-                      <div className="icon-btn icon-btn-success" title="Уже в торговле (отобран автоматически)">
+                      <div className="icon-btn icon-btn-success" title={t("already_trading")}>
                         <Check size={15} />
                       </div>
                     )
@@ -192,7 +192,7 @@ export default function CoinsTab() {
                       className="icon-btn icon-btn-success"
                       disabled={busyCandidate === c.symbol}
                       onClick={() => addToTrading(c.symbol)}
-                      title="Добавить в торговлю"
+                      title={t("add_to_trading")}
                     >
                       <TrendingUp size={15} />
                     </button>
@@ -209,14 +209,14 @@ export default function CoinsTab() {
             style={{ margin: "10px 14px 0" }}
             onClick={() => setShowAllCandidates((v) => !v)}
           >
-            {showAllCandidates ? "Свернуть" : `Показать ещё ${candidates.length - 10}`}
+            {showAllCandidates ? t("collapse") : t("show_n_more", { n: candidates.length - 10 })}
           </button>
         )}
       </div>
 
       <div className="section">
         <div className="section-head">
-          <span className="section-title">Монеты бота</span>
+          <span className="section-title">{t("bot_coins")}</span>
           {symbols && <span className="section-count">{subscribedCount}</span>}
         </div>
 
@@ -225,7 +225,7 @@ export default function CoinsTab() {
         )}
 
         {symbols && !activeSymbols.length && (
-          <div className="list"><EmptyRow text="Бот пока ни на одну монету не подписан" /></div>
+          <div className="list"><EmptyRow text={t("bot_no_coins")} /></div>
         )}
 
         {activeSymbols.length > 0 && (
@@ -238,12 +238,12 @@ export default function CoinsTab() {
                 <div className="row-main">
                   <div className="row-title-line">
                     <span className="symbol">{s.symbol}</span>
-                    {s.held && <span className="tag tag-info">в позиции</span>}
+                    {s.held && <span className="tag tag-info">{t("in_position")}</span>}
                   </div>
                   <div className="row-sub">
-                    Сигнал: {s.last_signal_at ? fmtDate(s.last_signal_at) : "—"}
+                    {t("last_signal", { v: s.last_signal_at ? fmtDate(s.last_signal_at) : "—" })}
                     {"  ·  "}
-                    Сделка: {s.last_traded_at ? fmtDate(s.last_traded_at) : "—"}
+                    {t("last_trade", { v: s.last_traded_at ? fmtDate(s.last_traded_at) : "—" })}
                   </div>
                 </div>
                 {canEditPool && (
@@ -251,7 +251,7 @@ export default function CoinsTab() {
                     className="icon-btn icon-btn-danger"
                     disabled={busySymbol === s.symbol}
                     onClick={() => blacklistSymbol(s.symbol)}
-                    title="Добавить в чёрный список"
+                    title={t("add_blacklist")}
                   >
                     <Ban size={15} />
                   </button>
@@ -264,7 +264,7 @@ export default function CoinsTab() {
 
       {(canEditPool || blacklistedSymbols.length > 0) && <div className="section">
         <div className="section-head">
-          <span className="section-title">{canEditPool ? "Добавить в чёрный список" : "Чёрный список"}</span>
+          <span className="section-title">{canEditPool ? t("add_blacklist") : t("blacklist")}</span>
         </div>
         {canEditPool && (
           <>
@@ -272,7 +272,7 @@ export default function CoinsTab() {
               <div className="row row-compact">
                 <input
                   className="param-input"
-                  placeholder="Например BTC-USDT"
+                  placeholder={t("blacklist_placeholder")}
                   value={newSymbol}
                   onChange={(e) => setNewSymbol(e.target.value)}
                   disabled={addBusy}
@@ -283,8 +283,7 @@ export default function CoinsTab() {
               </div>
             </form>
             <div className="row-sub row-sub-faint" style={{ padding: "0 14px" }}>
-              Монета не будет выбираться ботом при ротации, даже если сейчас на неё не подписаны.
-              Уже открытые позиции при этом продолжают сопровождаться как обычно.
+              {t("blacklist_hint")}
             </div>
           </>
         )}
@@ -299,12 +298,12 @@ export default function CoinsTab() {
                 <div className="row-main">
                   <div className="row-title-line">
                     <span className="symbol">{s.symbol}</span>
-                    {s.held && <span className="tag tag-info">в позиции</span>}
+                    {s.held && <span className="tag tag-info">{t("in_position")}</span>}
                   </div>
                   <div className="row-sub">
-                    Сигнал: {s.last_signal_at ? fmtDate(s.last_signal_at) : "—"}
+                    {t("last_signal", { v: s.last_signal_at ? fmtDate(s.last_signal_at) : "—" })}
                     {"  ·  "}
-                    Сделка: {s.last_traded_at ? fmtDate(s.last_traded_at) : "—"}
+                    {t("last_trade", { v: s.last_traded_at ? fmtDate(s.last_traded_at) : "—" })}
                   </div>
                 </div>
                 {canEditPool && (
@@ -312,7 +311,7 @@ export default function CoinsTab() {
                     className="icon-btn"
                     disabled={busySymbol === s.symbol}
                     onClick={() => unblacklistSymbol(s.symbol)}
-                    title="Убрать из чёрного списка"
+                    title={t("remove_blacklist")}
                   >
                     <RotateCcw size={15} />
                   </button>

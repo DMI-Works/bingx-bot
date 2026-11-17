@@ -81,6 +81,8 @@ class UserSession:
                 event_bus=self.event_bus,
                 gateway=telegram_gateway,
                 exchange_client=self.exchange,
+                # self.user оновлює SessionManager.refresh_user (зокрема після зміни мови)
+                lang_provider=lambda: self.user.get('lang'),
             )
 
     # ---------- життєвий цикл ----------

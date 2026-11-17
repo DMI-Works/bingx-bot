@@ -3,12 +3,16 @@
 // app.state.exchange_client are wired to the bot's real instances there).
 // ---------------------------------------------------------------------------
 
+import { getLang } from "../i18n";
+
 export const tg = typeof window !== "undefined" ? window.Telegram?.WebApp : null;
 
 async function request(method, path, body) {
   const headers = {
     // Бэкенд валидирует эту строку через HMAC с bot token — см. backend/auth.py
     "X-Telegram-Init-Data": tg?.initData || "",
+    // язык текстов ошибок в ответах (webapp/backend/i18n.py)
+    "X-Lang": getLang(),
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
 

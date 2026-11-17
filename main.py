@@ -190,6 +190,7 @@ async def run_bot(config: ConfigLoader) -> None:
             session_lookup=lambda user_id: sessions.get(user_id),
             admin_chat_id=admin_id,
             shared_event_bus=shared_bus,
+            users=users,
         )
 
     sessions = SessionManager(
@@ -211,6 +212,7 @@ async def run_bot(config: ConfigLoader) -> None:
             selector.held_symbols_provider = sessions.held_symbols
 
     if telegram_gateway is not None:
+        telegram_gateway.on_user_changed = sessions.refresh_user
         await telegram_gateway.start()
         logger.info("[OK] Telegram gateway started")
 

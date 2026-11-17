@@ -116,7 +116,7 @@ class TestKeyPermissions(unittest.TestCase):
     def test_withdraw_code_rejected(self):
         with self.assertRaises(self.exc) as ctx:
             self.check({"permissions": [1, 2, 3, 5]})
-        self.assertIn("вывод", ctx.exception.detail.lower())
+        self.assertIn("withdraw", ctx.exception.detail.lower())
 
     def test_withdraw_flag_rejected(self):
         with self.assertRaises(self.exc):
@@ -125,7 +125,7 @@ class TestKeyPermissions(unittest.TestCase):
     def test_no_futures_rejected(self):
         with self.assertRaises(self.exc) as ctx:
             self.check({"permissions": [1, 2], "enableFutures": False})
-        self.assertIn("фьючерс", ctx.exception.detail.lower())
+        self.assertIn("futures", ctx.exception.detail.lower())
 
 
 if __name__ == "__main__":
