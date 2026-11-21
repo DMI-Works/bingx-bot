@@ -7,11 +7,6 @@ trail_meta сигналу). Усе — у % ROI від маржі (рух цін
 SL рухається ТІЛЬКИ в бік прибутку і не частіше, ніж раз на step_roi
 покращення (щоб не смикати біржу на кожен тік).
 
-Варіант unit='atr' (TsMomentum з 17.11): рівні задані в кратних денного ATR
-на момент входу (lock_trigger_atr, lock_stop_atr, trail_start_atr,
-trail_gap_atr + atr) — плече в кожного користувача своє, тож у ROI їх
-переводимо тут, за плечем конкретної позиції (atr_meta_to_roi).
-
 На відміну від ROI-лестниці WallBreakout (рівень 6% -> SL на 5.5%, тобто
 впритул до ціни) тут між ціною і стопом лишається запас gap_roi: дневна
 позиція не вилітає на звичайному шумі, а прибуток усе одно фіксується.
@@ -47,25 +42,6 @@ def is_roi_gap_mode(position: dict) -> bool:
     return isinstance(meta, dict) and meta.get('mode') == ROI_GAP_MODE
 
 
-def atr_meta_to_roi(meta: dict, entry_price: float, leverage: float) -> dict:
-    """trail_meta в одиницях ATR -> еквівалент у % ROI для цієї позиції.
-    Без atr/entry повертає мету з нулями (фіксація вимкнена)."""
-    atr = meta.get('atr')
-    k = (float(atr) / entry_price * leverage * 100.0) if atr and entry_price and leverage else 0.0
-    out = {
-        'mode': ROI_GAP_MODE,
-        'breakeven_roi': float(meta.get('lock_trigger_atr') or 0) * k,
-        'breakeven_stop_roi': float(meta.get('lock_stop_atr') or 0) * k,
-        'start_roi': float(meta.get('trail_start_atr') or 0) * k,
-        'gap_roi': float(meta.get('trail_gap_atr') or 0) * k,
-        # мінімальний крок перестановки — 0.5 ATR, а не фіксовані 5% ROI
-        'min_step_roi': 0.5 * k,
-    }
-    if k <= 0:
-        out['breakeven_roi'] = out['start_roi'] = 0.0
-    return out
-
-
 def roi_gap_target(meta: dict, peak_roi: float, breakeven_sl_roi: float):
     """Цільовий SL у % ROI для досягнутого піку або None (ще рано).
     breakeven_sl_roi — ROI стопу «безубиток + комісії + запас»."""
@@ -92,8 +68,6 @@ class RoiGapTrailMixin:
         meta = position['trail_meta']
         entry_price = position['entry_price']
         side = position['side']
-        if meta.get('unit') == 'atr':
-            meta = atr_meta_to_roi(meta, entry_price, leverage)
 
         roi_now = roi_percent(entry_price, side, price, leverage)
         if state.peak_roi_percent is None or roi_now > state.peak_roi_percent:
@@ -118,8 +92,7 @@ class RoiGapTrailMixin:
         )
         if current_roi is not None:
             # стоп ще нижче безубитку — переносимо одразу; уже на ньому — лише кроком
-            step_roi = float(meta.get('min_step_roi') or _MIN_STEP_ROI)
-            min_step = step_roi if current_roi >= breakeven_sl_roi - _ROI_EPS else 0.0
+            min_step = _MIN_STEP_ROI if current_roi >= breakeven_sl_roi - _ROI_EPS else 0.0
             if target_roi <= current_roi + max(min_step, _ROI_EPS):
                 return
 

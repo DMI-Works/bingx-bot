@@ -464,8 +464,7 @@ class FakeSizingRisk:
     async def can_open_position(self, symbol, risk_amount=0.0):
         return True, None
 
-    async def compute_risk_based_quantity(self, entry_price, stop_loss_price, risk_percent=None, leverage=None,
-                                          margin_cap=True):
+    async def compute_risk_based_quantity(self, entry_price, stop_loss_price, risk_percent=None, leverage=None):
         self.calls.append((entry_price, stop_loss_price, risk_percent, leverage))
         return self.quantity
 
