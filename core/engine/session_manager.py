@@ -50,7 +50,6 @@ class SessionManager:
         self.sessions: Dict[str, UserSession] = {}
         # остання ціна угоди по символу (@trade) — для живих цифр у Mini App без REST
         self.last_prices: Dict[str, float] = {}
-        self._trail_levels = None
         self._lock = asyncio.Lock()
 
         shared_bus.subscribe(EventType.SIGNAL_GENERATED, self._on_signal)
@@ -92,8 +91,6 @@ class SessionManager:
                 self.strategy_settings, telegram_gateway=self.telegram_gateway,
                 market_context_provider=self.market_context_provider,
             )
-            if self._trail_levels is not None:
-                session.trailing.set_levels(self._trail_levels)
             try:
                 await session.start()
             except Exception as e:
@@ -131,12 +128,6 @@ class SessionManager:
         for session in self.sessions.values():
             held |= session.held_symbols()
         return held
-
-    def set_trail_levels(self, levels) -> None:
-        """ROI-лестниця WallBreakout — спільний параметр, застосовується всім."""
-        self._trail_levels = levels
-        for session in self.sessions.values():
-            session.trailing.set_levels(levels)
 
     # ---------- маршрутизація ----------
 

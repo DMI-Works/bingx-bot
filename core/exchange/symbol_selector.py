@@ -72,12 +72,10 @@ class SymbolSelector:
         # (зберігається в БД, керується користувачем в реальному часі)
         # об'єднується з blacklist_symbols із config.yaml при кожному select().
         self.settings_manager = settings_manager
-        # trade_only=True — цей селектор веде ОКРЕМИЙ пул (напр. для
-        # TrendSupertrendStrategy) і підписує символи ЛИШЕ на @trade
-        # (PRICE_UPDATED), без @depth20. Так OrderBookAnalyzer їх не бачить і
-        # WallBreakout по них не торгує — повна ізоляція пулів (див. main.py).
+        # trade_only=True — підписка ЛИШЕ на @trade (PRICE_UPDATED), без
+        # @depth20 (так зараз працює єдиний пул TsMomentum, див. main.py).
         self.trade_only = trade_only
-        # мітка для логів/SYMBOLS_ROTATED, щоб розрізняти пули ("SYMBOLS" vs "TREND-SYMBOLS")
+        # мітка для логів/SYMBOLS_ROTATED, щоб розрізняти пули (якщо пулів кілька)
         self.pool_label = pool_label
         # повертає набір символів ІНШОГО пулу (+ held у нього): @trade-підписку
         # такого символу цей селектор НЕ знімає, бо вона потрібна іншому пулу.
@@ -184,8 +182,8 @@ class SymbolSelector:
         protected = set(whitelist) | set(held)
 
         # ВЛАСНИЙ пул цього селектора, а не глобальний exchange.subscribed_symbols:
-        # останній тепер є об'єднанням обох пулів (wall + trend), і трендовий
-        # селектор не повинен вважати wall-символи "своїми" підписками (і навпаки).
+        # якщо пулів кілька, він є їх об'єднанням, і селектор не повинен
+        # вважати символи іншого пулу "своїми" підписками.
         currently_subscribed = set(self.current_symbols)
         quiet_unheld: Set[str] = set()
 
@@ -305,12 +303,9 @@ class SymbolSelector:
         """Обчислює актуальний список символів, підписує нові, відписує зайві.
 
         Два режими:
-        - Основний (wall) пул, trade_only=False: кожен символ у `selected`
-          отримує ОБИДВІ підписки — @trade (стратегії/TrailingStop/Excursion)
-          і @depth20 (OrderBookAnalyzer).
-        - Трендовий пул, trade_only=True: ЛИШЕ @trade. @depth20 не чіпає взагалі
-          (ним володіє тільки основний пул) — тож OrderBookAnalyzer не бачить ці
-          монети і WallBreakout по них не торгує.
+        - trade_only=False: кожен символ у `selected` отримує ОБИДВІ
+          підписки — @trade (стратегії/TrailingStop/Excursion) і @depth20.
+        - trade_only=True (поточний єдиний пул): ЛИШЕ @trade, @depth20 не чіпає.
 
         Координація пулів (модель володіння):
         - @depth20 — виключно основний пул.

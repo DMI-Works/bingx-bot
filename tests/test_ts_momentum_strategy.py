@@ -477,15 +477,16 @@ class TestRoiGapTrailing(unittest.IsolatedAsyncioTestCase):
         from core.common.position_math import position_key
         tsm = TrailingStopManager.__new__(TrailingStopManager)
         tsm.enabled = True
-        tsm.trail_levels_percent = [6.0]
         tsm.trader = mock.MagicMock()
         tsm.trader.open_positions = {
             position_key('BTC-USDT', 'SHORT'): {'symbol': 'BTC-USDT', 'side': 'SHORT', 'trail_meta': {'mode': 'none'}},
-            position_key('BTC-USDT', 'LONG'): {'symbol': 'BTC-USDT', 'side': 'LONG', 'trail_meta': None},
+            position_key('BTC-USDT', 'LONG'): {'symbol': 'BTC-USDT', 'side': 'LONG', 'trail_meta': {'mode': 'roi_gap'}},
+            position_key('ETH-USDT', 'LONG'): {'symbol': 'ETH-USDT', 'side': 'LONG', 'trail_meta': None},
         }
         tsm._process_position = mock.AsyncMock()
         await tsm._on_price_update(Event(type=EventType.PRICE_UPDATED, data={'s': 'BTC-USDT', 'p': '100'}))
-        # обробляється лише LONG (звичайна лестница), SHORT з mode=none — ні
+        await tsm._on_price_update(Event(type=EventType.PRICE_UPDATED, data={'s': 'ETH-USDT', 'p': '100'}))
+        # обробляється лише roi_gap; mode=none і позиція без trail_meta — ні
         self.assertEqual(tsm._process_position.await_count, 1)
         self.assertEqual(tsm._process_position.call_args.args[0], position_key('BTC-USDT', 'LONG'))
 

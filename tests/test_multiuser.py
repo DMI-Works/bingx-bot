@@ -295,7 +295,9 @@ class TestStrategiesAdminOnly(unittest.TestCase):
         store = mock.MagicMock()
         store.is_modified.return_value = False
         store.list_strategies.return_value = [
-            {"strategy_name": "S", "enabled": False, "updated_at": None, "params": {"leverage": 10}},
+            {"strategy_name": "TsMomentumStrategy", "enabled": False, "updated_at": None, "params": {"leverage": 10}},
+            # стратегію видалили з коду, а рядок у БД лишився — не показуємо
+            {"strategy_name": "WallBreakoutStrategy", "enabled": True, "updated_at": None, "params": {}},
         ]
         with mock.patch.object(routes, "require_strategy_settings", return_value=store):
             return routes.get_settings(mock.MagicMock(), session)
@@ -308,6 +310,7 @@ class TestStrategiesAdminOnly(unittest.TestCase):
     def test_admin_gets_one_shared_flag(self):
         data = self._settings_for("admin")
         self.assertTrue(data["is_admin"])
+        self.assertEqual([x["name"] for x in data["strategies"]], ["TsMomentumStrategy"])
         strategy = data["strategies"][0]
         self.assertFalse(strategy["enabled"])
         self.assertNotIn("global_enabled", strategy)

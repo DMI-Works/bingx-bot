@@ -3,7 +3,7 @@
 Export -> CSV). Лише stdlib, БД і біржа не потрібні:
 
     python scripts/trade_report.py trading_bot_testnet.trade_analytics.csv
-    python scripts/trade_report.py export.csv --strategy WallBreakoutStrategy
+    python scripts/trade_report.py export.csv --strategy TsMomentumStrategy
 
 Що показує:
   1. Підсумок по стратегіях: WR, profit factor, очікування на угоду, частка комісій.
@@ -252,7 +252,7 @@ def report(rows: List[dict]) -> List[str]:
 def main(argv: Optional[Iterable[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Розбір угод з CSV-експорту trade_analytics")
     parser.add_argument('csv_path')
-    parser.add_argument('--strategy', help="лише одна стратегія (напр. WallBreakoutStrategy)")
+    parser.add_argument('--strategy', help="лише одна стратегія (напр. TsMomentumStrategy)")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     rows = load_closed(args.csv_path, args.strategy)

@@ -56,7 +56,7 @@ def new_bot_position(
         'sl_client_order_id': None,
         'tp_client_order_ids': [],
         'strategy': strategy,
-        # параметри супроводу стопу від стратегії (напр. atr_3step)
+        # параметри супроводу стопу від стратегії (напр. roi_gap)
         'trail_meta': trail_meta,
         **_empty_accounting(),
         'remaining_quantity': quantity,

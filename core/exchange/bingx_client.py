@@ -320,7 +320,7 @@ class BingXClient:
         working_type: 'MARK_PRICE' | 'CONTRACT_PRICE' | 'INDEX_PRICE' — за якою
         ціною тригериться STOP_MARKET/TAKE_PROFIT_MARKET. Не задано — дефолт
         біржі (MARK_PRICE). Явний 'MARK_PRICE' потрібен там, де стоп не повинно
-        вибивати тіньовим сквізом last-price (TrailingStopManager, atr_3step).
+        вибивати тіньовим сквізом last-price (TrailingStopManager).
 
         close_position: True — позиція закривається ПОВНІСТЮ по факту
         спрацювання (лише STOP_MARKET / TAKE_PROFIT_MARKET).

@@ -25,7 +25,6 @@ from core.exchange import BingXClient
 from core.exchange import SymbolSelector
 from core.state import SettingsManager
 from core.strategies import StrategyManager, SignalActivityTracker
-from core.strategies.orderbook_analyzer import OrderBookAnalyzer
 from core.telegram import TelegramGateway
 from core.users import UsersRepository, admin_telegram_id
 from core.users.migration import GLOBAL_SCOPE, migrate_legacy
@@ -93,8 +92,7 @@ async def main():
 async def run_bot(config: ConfigLoader) -> None:
     """Багатокористувацький бот в одному event loop:
 
-    MarketEngine (один): ринкові дані BingX (live), пули монет, OrderBookAnalyzer,
-        стратегії — сигнали рахуються ОДИН раз і йдуть у спільну шину.
+    MarketEngine (один): ринкові дані BingX (live), пул монет, стратегії — сигнали рахуються ОДИН раз і йдуть у спільну шину.
     SessionManager: торговий контур кожного користувача (власні ключі, режим
         testnet/live, трейдер, ризик, трейлінг, сповіщення) — див. core/engine.
     """
@@ -137,47 +135,20 @@ async def run_bot(config: ConfigLoader) -> None:
             settings_manager=global_settings, **kwargs,
         )
 
-    filters_config = config.get('trading.filters', {})
-    refresh_interval = config.get('trading.filters.rotation_interval_seconds', 1800)
-    symbol_selector = make_selector(filters_config)
-    trend_filters_config = config.get('trading.trend_filters', {}) or {}
-    trend_symbol_selector = (
-        make_selector(trend_filters_config, trade_only=True, pool_label="TREND-SYMBOLS")
-        if trend_filters_config else None
-    )
-    tsmom_filters_config = config.get('trading.tsmom_filters', {}) or {}
-    tsmom_symbol_selector = (
-        make_selector(tsmom_filters_config, trade_only=True, pool_label="TSMOM-SYMBOLS")
-        if tsmom_filters_config else None
-    )
+    # Один стабільний пул монет (trading.filters) для TsMomentum: підписка лише
+    # на @trade, ротація рідка — позиція тримається тижнями і символ не має
+    # випасти з підписки, поки вона відкрита.
+    filters_config = config.get('trading.filters', {}) or {}
+    refresh_interval = filters_config.get('rotation_interval_seconds', 86400)
+    symbol_selector = make_selector(filters_config, trade_only=True)
 
-    def _others_union(*selectors):
-        def provider():
-            union = set()
-            for sel in selectors:
-                if sel is not None:
-                    union |= set(sel.current_symbols)
-            return union
-        return provider
-
-    symbol_selector.reserved_symbols_provider = _others_union(trend_symbol_selector, tsmom_symbol_selector)
-    if trend_symbol_selector is not None:
-        trend_symbol_selector.reserved_symbols_provider = _others_union(symbol_selector, tsmom_symbol_selector)
-    if tsmom_symbol_selector is not None:
-        tsmom_symbol_selector.reserved_symbols_provider = _others_union(symbol_selector, trend_symbol_selector)
-
-    OrderBookAnalyzer(shared_bus, config.get('trading.orderbook', {}))
     strategy_manager = StrategyManager(shared_bus, config, logger, strategy_settings, bingx_client=market)
     strategies = strategy_manager.setup()
     logger.info(f"[OK] Strategy Manager initialized ({len(strategies)} strategies)")
 
-    if trend_symbol_selector is not None:
-        trend_strategy = strategy_manager.get('TrendSupertrendStrategy')
-        if trend_strategy is not None and hasattr(trend_strategy, 'set_symbol_pool_provider'):
-            trend_strategy.set_symbol_pool_provider(lambda: trend_symbol_selector.current_symbols)
     tsmom_strategy = strategy_manager.get('TsMomentumStrategy')
-    if tsmom_symbol_selector is not None and tsmom_strategy is not None:
-        tsmom_strategy.set_symbol_pool_provider(lambda: tsmom_symbol_selector.current_symbols)
+    if tsmom_strategy is not None:
+        tsmom_strategy.set_symbol_pool_provider(lambda: symbol_selector.current_symbols)
 
     # --- Telegram: один бот на всіх, сповіщення — кожному в свій чат ---
     telegram_gateway = None
@@ -203,13 +174,7 @@ async def run_bot(config: ConfigLoader) -> None:
         market_context_provider=symbol_selector.market_context,
         targets_provider=(tsmom_strategy.current_targets if tsmom_strategy is not None else None),
     )
-    strategy_manager.subscribe_params(
-        'WallBreakoutStrategy',
-        lambda params: sessions.set_trail_levels(params.get('trail_levels_percent')),
-    )
-    for selector in (symbol_selector, trend_symbol_selector, tsmom_symbol_selector):
-        if selector is not None:
-            selector.held_symbols_provider = sessions.held_symbols
+    symbol_selector.held_symbols_provider = sessions.held_symbols
 
     if telegram_gateway is not None:
         telegram_gateway.on_user_changed = sessions.refresh_user
@@ -231,12 +196,6 @@ async def run_bot(config: ConfigLoader) -> None:
         selected = await symbol_selector.apply()
         logger.info(f"[OK] Initial symbol selection: {sorted(selected)}")
         await symbol_selector.start_refresh_loop(refresh_interval)
-        if trend_symbol_selector is not None:
-            await trend_symbol_selector.apply()
-            await trend_symbol_selector.start_refresh_loop(trend_filters_config.get('rotation_interval_seconds', 3600))
-        if tsmom_symbol_selector is not None:
-            await tsmom_symbol_selector.apply()
-            await tsmom_symbol_selector.start_refresh_loop(tsmom_filters_config.get('rotation_interval_seconds', 86400))
 
     # --- Mini App ---
     webapp_server = None
@@ -280,9 +239,7 @@ async def run_bot(config: ConfigLoader) -> None:
     if webapp_server:
         webapp_server.should_exit = True
         await webapp_task
-    for selector in (symbol_selector, trend_symbol_selector, tsmom_symbol_selector):
-        if selector is not None:
-            await selector.stop_refresh_loop()
+    await symbol_selector.stop_refresh_loop()
     await billing.stop()
     await sessions.stop_all()
     if telegram_gateway is not None:

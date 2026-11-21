@@ -1,12 +1,10 @@
 """
-Юніт-тести ізоляції окремого (трендового) пулу символів:
+Юніт-тести пулів символів (SymbolSelector):
   - SymbolSelector(trade_only=True) підписує монети ЛИШЕ на @trade, без @depth20;
   - координація двох пулів через reserved_symbols_provider: @trade спільного
-    символу не знімається, поки його тримає інший пул;
-  - TrendSupertrendStrategy, прив'язана до пулу через set_symbol_pool_provider,
-    ігнорує тики символів поза пулом (жодних REST-запитів за свічками).
+    символу не знімається, поки його тримає інший пул.
 
-Запуск: python -m unittest tests.test_trend_symbol_pool -v
+Запуск: python -m unittest tests.test_symbol_pool -v
 Усі зовнішні залежності — фейки; мережа не використовується. MONGO_URI
 потрібен лише для імпорту core.* (див. tests/test_pnl_accounting.py).
 """
@@ -15,9 +13,7 @@ import unittest
 
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
 
-from core.events import EventBus  # noqa: E402
 from core.exchange.symbol_selector import SymbolSelector  # noqa: E402
-from core.strategies.trend_supertrend_strategy import TrendSupertrendStrategy  # noqa: E402
 
 
 class FakeExchange:
@@ -138,30 +134,6 @@ class TestPoolCoordination(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn('BTC-USDT', selector.current_symbols)
         self.assertEqual(calls, [])  # дубль-підписку не слали
-
-
-class TestStrategyPoolGate(unittest.IsolatedAsyncioTestCase):
-    def _strategy(self):
-        config = TrendSupertrendStrategy.build_config(None)
-        # bingx_client=None: якщо гейт пропустить символ, стратегія спробує піти
-        # за свічками і впаде на warning -> нам достатньо перевірити ранній вихід
-        return TrendSupertrendStrategy(EventBus(), config, bingx_client=object())
-
-    async def test_symbol_outside_pool_is_ignored(self):
-        strategy = self._strategy()
-        strategy.set_symbol_pool_provider(lambda: {'ETH-USDT'})
-
-        # BTC-USDT не в пулі -> жодної роботи (бакети не чіпаються)
-        self.assertIsNone(await strategy.analyze('BTC-USDT', 100.0))
-        self.assertNotIn('BTC-USDT', strategy._last_bucket)
-
-    async def test_symbol_in_pool_primes_bucket(self):
-        strategy = self._strategy()
-        strategy.set_symbol_pool_provider(lambda: {'BTC-USDT'})
-
-        # у пулі -> перший тік лише запам'ятовує bucket (previous_bucket None)
-        self.assertIsNone(await strategy.analyze('BTC-USDT', 100.0))
-        self.assertIn('BTC-USDT', strategy._last_bucket)
 
 
 if __name__ == '__main__':

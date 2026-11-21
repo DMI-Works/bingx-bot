@@ -39,7 +39,7 @@ trading:
     # открытые позиции продолжают сопровождаться). Любое закрытие не по
     # стопу в минус (стоп в плюс, TP, ручное) серию обрывает. 0 = выключено.
     # Стеля маржі однієї угоди (% від equity) для угод із risk_percent зі
-    # стратегії (TrendSupertrendStrategy). Без неї тісний стоп роздуває
+    # стратегії (TsMomentumStrategy). Без неї тісний стоп роздуває
     # позицію до майже всього депозиту. 0 = вимкнено.
     max_margin_percent_per_trade: 5.0
     # Комісія taker однієї сторони: у risk-sizing закладається round-trip
@@ -53,93 +53,13 @@ trading:
     stop_loss_streak_window_hours: 24
     stop_loss_block_hours: 2
 
-  # Filters — відбір монет для торгівлі, не залежить від стратегії.
-  # СПІЛЬНИЙ пул для стратегій, TrailingStop І OrderBookAnalyzer
-  # (свідоме архітектурне рішення з ТЗ на OrderBook-модуль — один список
-  # символів замість двох незалежних пулів з різними лімітами).
+  # Filters — ЄДИНИЙ пул монет (main.py читає config.get('trading.filters')),
+  # з якого торгує TsMomentumStrategy і який показує вкладка «Монети» мініаппу
+  # (whitelist/blacklist звідти доповнюють списки нижче). Підписка лише на
+  # @trade (trade_only), ротація РІДКА: денний моментум тримає позицію тижнями,
+  # і символ не має вийти з підписки, поки вона відкрита (відкриті позиції
+  # пул і так захищає). Тому universe задається whitelist'ом ліквідних монет.
   filters:
-    whitelist_symbols: []
-    blacklist_symbols: []
-    # ліміт з ТЗ на OrderBook-модуль (не більше 20 активних підписок).
-    # На одному WS-з'єднанні це max_symbols трейд-підписок + max_symbols
-    # depth-підписок = до 40 сумарно — з великим запасом нижче будь-якого
-    # відомого ліміту BingX (офіційно задокументовано лише для spot: 200/з'єднання).
-    max_symbols: 20
-    min_price: {}
-    max_price: {}
-    # Було 1 000 000: на тонких монетах (CLAUS, CYBERLEEK, W, ...) стоп-маркет
-    # прослизав на 0.5-3.7% замість 1% стопу (-74% і -94% ROE на W-USDT), а
-    # стопи вибивало за 3-7 секунд. 20M — як у TrendSupertrendStrategy.
-    # Аналіз 302 угод (scripts/wb_liquidity.py, 10-28.10): 20M усе ще мало —
-    # проскальзування стопу давало -72 з -83 USDT збитку WallBreakout, і майже
-    # все воно на монетах з обігом < 50M та глибиною книги < 5k. Поріг 50M
-    # прибирає ~90% збитку (PnL -83 -> -7.5, WR 56% -> 62%, 85 угод лишається).
-    min_volume_24h: 50000000
-    # Було 0.5: для ліквідних монет, що лишаються після фільтра обігу, це надто
-    # широко — збитки концентруються при спреді на сигналі > 0.1%. Звужено до 0.2.
-    max_spread_percent: 0.2
-    # Префікси не-крипто контрактів BingX (NCFX — форекс, NCCO — сировина,
-    # NCSK — акції, NCSI — індекси): торгуються не цілодобово й займали 5 з 20
-    # слотів пулу. Whitelist цей фільтр обходить.
-    excluded_symbol_prefixes: "NCFX,NCCO,NCSK,NCSI"
-    # Порядок відбору в пул серед монет, що пройшли фільтри:
-    # volatility — за 24h діапазоном (high-low)/low: "живі" монети, де частіше
-    # бувають пробої; volume — за 24h оборотом (стара поведінка).
-    rank_by: volatility
-    # Монета, яку прибрали як "тиху" (без сигналу rotation_interval_seconds),
-    # стільки секунд стоїть у кінці черги — ротація пробує нові монети, а не
-    # гойдається між тими самими (повертається, лише якщо інших не вистачає).
-    quiet_cooldown_seconds: 7200
-    # ОДНЕ значення на дві ролі одразу (раніше було 2 окремих: refresh_interval_seconds
-    # і no_signal_replace_after_seconds — не збігалися між собою: рефреш раз на
-    # годину, а поріг "тиші" — 30 хв, тобто тиха монета фактично чекала заміни
-    # до 90 хв замість заявлених 30). Тепер один інтервал:
-    # - раз на стільки секунд SymbolSelector перераховує список символів
-    # - і він же — поріг "без сигналу X секунд" для визначення "тихої" монети
-    rotation_interval_seconds: 1800
-
-  # ОКРЕМИЙ пул символів для TrendSupertrendStrategy (main.py читає як
-  # config.get('trading.trend_filters')). Технічно той самий SymbolSelector,
-  # але з trade_only=True: ці монети підписуються ЛИШЕ на @trade, без @depth20,
-  # тому OrderBookAnalyzer їх не бачить і WallBreakout по них не торгує — пули
-  # повністю ізольовані. Якщо блок відсутній/порожній — трендовий пул не
-  # піднімається, і стратегія (якщо увімкнена) працює на спільному filters-пулі.
-  trend_filters:
-    # Тренд чистіше йде на ліквідних мейджорах, а не на топі за волатильністю
-    # (той дає "пилу", де Supertrend постійно розвертається проти EMA200).
-    rank_by: volume
-    # Костяк мейджорів завжди в пулі (whitelist обходить фільтри обігу/спреду).
-    whitelist_symbols:
-      - "BTC-USDT"
-      - "ETH-USDT"
-      - "SOL-USDT"
-      - "BNB-USDT"
-      - "XRP-USDT"
-      - "DOGE-USDT"
-    blacklist_symbols: []
-    max_symbols: 15
-    min_price: {}
-    max_price: {}
-    min_volume_24h: 50000000
-    max_spread_percent: 0.2
-    excluded_symbol_prefixes: "NCFX,NCCO,NCSK,NCSI"
-    # Рідша ротація, ніж у wall-пулу (30 хв): тренд повільний, а стратегії
-    # потрібно, щоб символ дожив у пулі до закриття 15m-свічки (перехід
-    # previous_bucket -> bucket на живому символі, trend_supertrend_strategy.py).
-    quiet_cooldown_seconds: 7200
-    rotation_interval_seconds: 3600
-
-  # ОКРЕМИЙ СТАБІЛЬНИЙ пул для TsMomentumStrategy (main.py читає як
-  # config.get('trading.tsmom_filters')). Технічно той самий SymbolSelector з
-  # trade_only=True (підписка лише на @trade, без @depth20 — ізоляція від
-  # OrderBookAnalyzer/WallBreakout), АЛЕ з довгою ротацією: денний моментум
-  # тримає позицію тижнями, тому пул НЕ має ротуватись — інакше символ вийде з
-  # підписки, і стратегія не зможе закрити позицію по розвороту сигналу.
-  # Через це universe задається whitelist'ом ліквідних монет, а не ранжуванням.
-  # Якщо блок відсутній/порожній — пул не піднімається, стратегія (якщо
-  # увімкнена) працює на спільному filters-пулі.
-  tsmom_filters:
-    # Денний моментум чистіший на ліквідних монетах; whitelist обходить фільтри.
     rank_by: volume
     whitelist_symbols:
       - "BTC-USDT"
@@ -162,35 +82,13 @@ trading:
     max_price: {}
     min_volume_24h: 50000000
     max_spread_percent: 0.3
+    # Префікси не-крипто контрактів BingX (NCFX — форекс, NCCO — сировина,
+    # NCSK — акції, NCSI — індекси). Whitelist цей фільтр обходить.
     excluded_symbol_prefixes: "NCFX,NCCO,NCSK,NCSI"
-    # Ротація РІДКА (раз на добу) — пул має бути стабільним (див. коментар вище).
+    # Раз на стільки секунд пул перераховується; монета без сигналу стільки ж
+    # вважається "тихою" і йде в кінець черги на quiet_cooldown_seconds.
     quiet_cooldown_seconds: 86400
     rotation_interval_seconds: 86400
-
-  # OrderBookAnalyzer (core/orderbook_analyzer.py) — детект "стін" і їх
-  # пробою по partial book depth (@depth20). Сам по собі лише детектить +
-  # логує + публікує WALL_DETECTED/WALL_BREAKOUT в EventBus (TelegramBot
-  # завжди шле сповіщення). Чи призведе це до реальної угоди — залежить
-  # від того, чи увімкнена WallBreakoutStrategy (див. нижче) через
-  # Telegram /settings; сам OrderBookAnalyzer угод не відкриває.
-  orderbook:
-    enabled: true
-    # рівень книги вважається "стіною", якщо його обсяг у wall_multiplier
-    # разів більший за середній обсяг рівня в тому ж боці книги
-    wall_multiplier: 5.0
-    # додатковий абсолютний поріг обсягу (0 — вимкнено), щоб відсіяти
-    # "стіни" на мікрооб'ємах у неліквідних інструментах
-    min_wall_quantity: 0.0
-    # наскільки близько (%) ціна має підійти до стіни, щоб почати
-    # перевірку на пробій
-    approach_threshold_pct: 0.5
-    # скільки % початкового обсягу стіни має "з'їстись", щоб перетин
-    # рівня рахувався пробоєм, а не шумом
-    breakout_consumption_pct: 30.0
-    # через скільки секунд неактуальна стіна прибирається зі стану,
-    # якщо пробою так і не відбулось
-    wall_stale_seconds: 300.0
-
   # ВАЖНО: main.py читает этот блок как config.get('trading.trailing_stop'),
   # поэтому он ОБЯЗАН быть вложен под trading: (а не на верхнем уровне, как
   # было раньше — из-за этого TrailingStopManager получал config={} и всегда
@@ -201,15 +99,9 @@ trading:
   # min_move_percent, min_seconds_between_moves) в коде НЕ используются нигде.
   trailing_stop:
     enabled: true
-    # Пороги перестановки SL (trail_levels_percent) тут больше НЕ задаются:
-    # они — параметр стратегии (DEFAULT_PARAMS в wall_breakout_strategy.py),
-    # меняются из мини-аппа (Настройки -> стратегия).
-    # буфер (в %ROI) — насколько SL отстаёт от достигнутого уровня
-    dynamic_stop_buffer_percent: 0.5
-    # буфер не может съедать больше этой доли расстояния до уровня
-    max_buffer_fraction_of_level: 0.8
-    # Режим atr_3step (TrendSupertrendStrategy): комиссия одной стороны
-    # (taker). Безубыток = entry ± 2 * taker_fee_rate * entry (вход + выход).
+    # Пороги переноса SL задаёт стратегия в trail_meta позиции (TsMomentum:
+    # trail_* параметры в мини-аппе). Комиссия одной стороны (taker) — для
+    # безубытка roi_gap, если стратегия не задала breakeven_stop_roi.
     taker_fee_rate: 0.0005
 
 # Logging Configuration

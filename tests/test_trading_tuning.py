@@ -1,4 +1,4 @@
-"""Відбір монет, пауза WallBreakout після закриття, траєкторія угоди і
+"""Відбір монет, траєкторія угоди і
 симуляція виходів у scripts/trade_report.py. Без БД і біржі."""
 
 import asyncio
@@ -12,9 +12,7 @@ os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.analytics.excursion_tracker import ExcursionTracker  # noqa: E402
-from core.events import Event, EventType  # noqa: E402
 from core.exchange.symbol_selector import SymbolSelector  # noqa: E402
-from core.strategies.wall_breakout_strategy import WallBreakoutStrategy  # noqa: E402
 from scripts.trade_report import simulate_mfe_tp, simulate_path  # noqa: E402
 
 
@@ -122,57 +120,6 @@ class TestSymbolSelector(unittest.TestCase):
         self.assertAlmostEqual(ctx['range_24h_pct'], 20.0)
         self.assertEqual(ctx['quote_volume_24h'], 1e8)
         self.assertIsNone(selector.market_context('MISSING-USDT'))
-
-
-class TestWallBreakoutReentry(unittest.TestCase):
-    def _breakout(self, symbol='KAIA-USDT', side='ask'):
-        return Event(type=EventType.WALL_BREAKOUT, data={
-            'symbol': symbol, 'side': side, 'wall_price': 1.0, 'current_price': 1.01,
-            'consumed_pct': 50.0, 'context': {'wall_multiple': 7.5},
-        })
-
-    def test_cooldown_after_close_and_context(self):
-        bus = FakeBus()
-        strategy = WallBreakoutStrategy(bus, dict(WallBreakoutStrategy.DEFAULT_PARAMS, cooldown_seconds=0))
-        strategy.enabled = True
-
-        asyncio.run(strategy._on_wall_breakout(self._breakout()))
-        self.assertEqual(len(bus.published), 1)
-        context = bus.published[0].data['analytics_context']
-        self.assertEqual(context['wall_multiple'], 7.5)
-        self.assertEqual(context['consumed_pct'], 50.0)
-
-        # пауза після закриття тепер у трейдера кожного користувача: сигнал лише несе її
-        self.assertEqual(
-            bus.published[0].data['reentry_cooldown_seconds'], strategy.reentry_cooldown_seconds
-        )
-
-
-class TestOrderBookBreakoutContext(unittest.TestCase):
-    def test_breakout_event_carries_context(self):
-        from core.strategies.orderbook_analyzer import OrderBookAnalyzer
-
-        bus = FakeBus()
-        analyzer = OrderBookAnalyzer(bus, {'wall_multiplier': 3.0, 'breakout_consumption_pct': 30.0})
-        asks = [[1.000, 1], [1.001, 1], [1.002, 50], [1.003, 1], [1.004, 1]]
-        bids = [[0.999, 1], [0.998, 1], [0.997, 1]]
-
-        async def run():
-            await analyzer._on_orderbook_update(Event(EventType.ORDERBOOK_UPDATED, {
-                'symbol': 'X-USDT', 'bids': bids, 'asks': asks}))
-            asks[2] = [1.002, 10]  # стіну з'їли на 80%
-            await analyzer._on_orderbook_update(Event(EventType.ORDERBOOK_UPDATED, {
-                'symbol': 'X-USDT', 'bids': bids, 'asks': asks}))
-            await analyzer._on_price_update(Event(EventType.PRICE_UPDATED, {'s': 'X-USDT', 'p': '1.0025'}))
-
-        asyncio.run(run())
-        breakouts = [e for e in bus.published if e.type == EventType.WALL_BREAKOUT]
-        self.assertEqual(len(breakouts), 1)
-        context = breakouts[0].data['context']
-        self.assertEqual(context['wall_side'], 'ask')
-        self.assertAlmostEqual(context['wall_notional_usdt'], 50 * 1.002)
-        self.assertGreater(context['wall_multiple'], 3.0)
-        self.assertIsNone(context['price_change_300s_pct'])  # історії ще немає
 
 
 class TestExcursionPath(unittest.TestCase):

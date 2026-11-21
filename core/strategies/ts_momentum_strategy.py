@@ -25,7 +25,7 @@ vol-target дало +16%/год, Sharpe 0.64, плюс во всех трёх т
      ∝ 1/волатильность = vol-target. Дизастер-стоп широкий — только страховка от
      гэпа, не рабочий выход. TP нет.
 
-Как и TrendSupertrendStrategy: analyze() возвращает None, а работа идёт в фоновой
+analyze() возвращает None, а работа идёт в фоновой
 задаче (REST за свечами нельзя делать синхронно в обработчике шины). За
 символами ходим только по СВОЕМУ стабильному пулу (set_symbol_pool_provider) —
 пул НЕ должен ротироваться, иначе символ уедет из подписки и позицией нельзя
@@ -74,7 +74,7 @@ class TsMomentumStrategy(BaseStrategy):
         # дизастер-стоп (× ATR) — страховка от гэпа, НЕ рабочий выход; он же
         # задаёт дистанцию для риск-сайзинга, т.е. vol-target размер позиции
         'disaster_stop_atr': 4.0,
-        # фильтры монеты (как в TrendSupertrendStrategy)
+        # фильтры монеты
         'min_quote_volume_24h_usdt': 20_000_000,
         'excluded_symbol_prefixes': 'NCFX,NCCO,NCSK,NCSI',
         # --- фиксация прибыли (TrailingStopManager, режим roi_gap), всё в % ROI

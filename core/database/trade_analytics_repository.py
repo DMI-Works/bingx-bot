@@ -113,7 +113,7 @@ class TradeAnalyticsRepository:
     ) -> None:
         """
         Рядок на КОЖНЕ успішне перенесення SL. trigger — що саме спрацювало
-        (напр. "level_2pct_roi", "atr_3step_step_2", "fallback:last_positive");
+        (напр. "roi_gap_step_1", "fallback:last_positive");
         reason відрізняє штатний trail від аварійного fallback. Якщо запису
         trade_analytics немає (угода старша за колекцію) — update нічого не робить.
         """

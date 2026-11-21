@@ -6,11 +6,11 @@
 
 - Event-driven архитектура: все компоненты общаются через общий `EventBus` в одном asyncio event loop.
 - Рыночные данные и события аккаунта (исполнения, SL/TP, PnL) приходят по WebSocket BingX.
-- Встроенные стратегии: **WallBreakoutStrategy** (пробой «стен» в стакане), **TrendSupertrendStrategy** (EMA-тренд + Supertrend + объём + ATR) и **TsMomentumStrategy** (дневной time-series momentum с vol-target и выходом по развороту сигнала).
+- Встроенная стратегия **TsMomentumStrategy** (дневной time-series momentum с vol-target и выходом по развороту сигнала).
 - Stop Loss и несколько уровней Take Profit на каждую позицию; SL/TP пересчитываются под фактическую цену входа.
-- Трейлинг-стоп в двух режимах: лестница по ROI или `atr_3step` (безубыток с учётом комиссий → шаги по ATR → swing-стоп).
+- Трейлинг-стоп `roi_gap`: перенос в безубыток по ROI, затем стоп тянется за пиком ROI с отступом; пороги задаёт стратегия.
 - Риск-менеджмент на уровне аккаунта: лимиты позиций, сайзинг от риска с потолком маржи, блокировка входов после серии стопов, чёрный список монеты после серии убытков.
-- Автоматическая ротация пула монет (до 20) с белым и чёрным списками.
+- Стабильный пул монет (whitelist ликвидных монет) с белым и чёрным списками из Mini App.
 - Аналитика сделок: MFE/MAE, история перестановок SL, снимок параметров стратегии на момент входа.
 - **MongoDB** для хранения состояния; testnet и live используют разные базы, записи разделены по `user_id`.
 - Telegram Mini App: статистика, позиции, аналитика, управление монетами, стратегиями и настройками без перезапуска.
@@ -28,9 +28,9 @@ BotBingx/
 │   ├── diagnostics/           # Генерация карточек PnL и статистики
 │   ├── events/                # EventBus, EventType, publish_error
 │   ├── exchange/              # BingXClient (REST + WS + user data stream), ошибки BingX, SL/TP-ордера, SymbolSelector
-│   ├── risk/                  # RiskManager, TrailingStopManager (+ режим atr_3step и аварийный fallback SL)
+│   ├── risk/                  # RiskManager, TrailingStopManager (режим roi_gap и аварийный fallback SL)
 │   ├── state/                 # SettingsManager (runtime-настройки, kill switch)
-│   ├── strategies/            # Стратегии, реестр, индикаторы, OrderBookAnalyzer, StrategyManager
+│   ├── strategies/            # Стратегии, реестр, индикаторы, StrategyManager
 │   ├── telegram/              # TelegramBot и тексты сообщений — уведомления и аварийная остановка
 │   └── trading/               # SimpleTrader — открытие и закрытие позиций, SL/TP, учёт PnL
 ├── webapp/
@@ -146,13 +146,11 @@ npm run build   # сборка в webapp/backend/static, FastAPI отдаёт е
 
 - `exchange` — `testnet`, `websocket.enabled`.
 - `trading.risk` — лимиты позиций и риска (см. ниже).
-- `trading.filters` — белый и чёрный списки, `max_symbols`, минимальный объём за 24 ч, максимальный спред, `rotation_interval_seconds`. Кроме того:
+- `trading.filters` — **единственный** пул монет, из которого торгует TsMomentum и который показывает вкладка «Монеты» (её белый и чёрный списки дополняют списки из YAML): `whitelist_symbols`, `max_symbols`, минимальный объём за 24 ч, максимальный спред, `rotation_interval_seconds`. Пул подписывается только на `@trade` и ротируется редко (раз в сутки): дневная позиция держится неделями, и монета не должна выпасть из подписки. Кроме того:
   - `excluded_symbol_prefixes` — не-крипто контракты BingX (форекс, сырьё, акции, индексы), которые не попадают в пул;
-  - `rank_by` — порядок отбора: `volatility` (по 24h-диапазону, по умолчанию) или `volume`;
-  - `quiet_cooldown_seconds` — монета, убранная из пула за отсутствие сигналов, на это время уходит в конец очереди, и ротация пробует другие монеты.
-- `trading.trend_filters` — **отдельный** пул символов для `TrendSupertrendStrategy` (те же ключи, что у `trading.filters`). Технически это второй `SymbolSelector`, который подписывает монеты только на `@trade` (без `@depth20`), поэтому `OrderBookAnalyzer` их не видит и `WallBreakoutStrategy` по ним не торгует — пулы полностью изолированы. По умолчанию ранжирование по `volume`, реже ротация и whitelist мейджоров (BTC/ETH/SOL/…), т.к. тренд чище идёт на ликвидных монетах, а не на топе по волатильности. Если блок пуст или отсутствует — трендовый пул не поднимается, и стратегия (если включена) работает на общем пуле `trading.filters`.
-- `trading.orderbook` — параметры детекта стен (`wall_multiplier`, `approach_threshold_pct`, `breakout_consumption_pct` и др.).
-- `trading.trailing_stop` — буферы трейлинга и `taker_fee_rate` для режима `atr_3step`. Блок должен быть вложен в `trading:`.
+  - `rank_by` — порядок отбора сверх whitelist: `volume` (по умолчанию в конфиге) или `volatility`;
+  - `quiet_cooldown_seconds` — монета, убранная из пула за отсутствие сигналов, на это время уходит в конец очереди.
+- `trading.trailing_stop` — `enabled` и `taker_fee_rate` (безубыток `roi_gap`, если стратегия не задала свой стоп безубытка). Блок должен быть вложен в `trading:`.
 - `logging`, `telegram`, `webapp`, `analytics` (`path_step_pct` и `path_max_points` — детализация траектории сделки).
 
 **Параметры стратегий в YAML не хранятся.** Значения по умолчанию берутся из `DEFAULT_PARAMS` каждой стратегии и при первом запуске записываются в MongoDB (коллекция `strategy_settings`). Дальше их меняют через Mini App, перезапуск не нужен.
@@ -161,9 +159,7 @@ npm run build   # сборка в webapp/backend/static, FastAPI отдаёт е
 
 ## Стратегии
 
-- **WallBreakoutStrategy** — торгует пробои стен, которые находит `OrderBookAnalyzer` по стакану `@depth20`. Сам анализатор сделок не открывает, а только публикует `WALL_DETECTED` и `WALL_BREAKOUT`. Уровни трейлинга по ROI (`trail_levels_percent`) задаются параметрами этой стратегии. `reentry_cooldown_seconds` (по умолчанию 900) запрещает новый вход в монету после закрытия сделки по ней: повторные входы в «пилу» дали большую часть убытка на тестнете.
-- **TrendSupertrendStrategy** — фильтр тренда по EMA, вход по Supertrend с подтверждением объёмом, стоп по ATR, размер позиции от `risk_percent`. Использует трейлинг `atr_3step`. Работает на собственном пуле символов (`trading.trend_filters`), изолированном от пула WallBreakout.
-- **TsMomentumStrategy** — дневной **time-series momentum** (академически устойчивый эффект, сильнее кросс-секционного). На закрытии дневной свечи и повторно каждые `recheck_interval_minutes` (по умолчанию 60; стоп безубытка ставится на `trail_breakeven_stop_roi`, по умолчанию +5% ROI; после закрытия в минус или по безубытку монета у этого пользователя ждёт `reentry_pause_minutes`, по умолчанию 30): знак доходности за `lookback_days` (по умолчанию 60) задаёт направление (LONG при росте, SHORT при падении — режим `long_short`; либо `long_flat` без шортов). Позиция держится **до разворота сигнала** (не по ценовому стопу): при смене знака позиция закрывается рыночным reduce-only ордером (`SimpleTrader.close_position`), противоположная открывается на следующей дневной сверке. Размер — **vol-target** (через риск-сайзинг: дистанция стопа ∝ ATR → размер ∝ 1/волатильность), плечо ограничено потолком (по умолчанию 10x). Тейк-профита нет; широкий дизастер-стоп (`disaster_stop_atr`·ATR) — только страховка от гэпа. Свой **стабильный** (почти не ротирующийся) пул `trading.tsmom_filters`.
+- **TsMomentumStrategy** — дневной **time-series momentum** (академически устойчивый эффект, сильнее кросс-секционного). На закрытии дневной свечи и повторно каждые `recheck_interval_minutes` (по умолчанию 60; стоп безубытка ставится на `trail_breakeven_stop_roi`, по умолчанию +5% ROI; после закрытия в минус или по безубытку монета у этого пользователя ждёт `reentry_pause_minutes`, по умолчанию 30): знак доходности за `lookback_days` (по умолчанию 60) задаёт направление (LONG при росте, SHORT при падении — режим `long_short`; либо `long_flat` без шортов). Позиция держится **до разворота сигнала** (не по ценовому стопу): при смене знака позиция закрывается рыночным reduce-only ордером (`SimpleTrader.close_position`), противоположная открывается на следующей дневной сверке. Размер — **vol-target** (через риск-сайзинг: дистанция стопа ∝ ATR → размер ∝ 1/волатильность), плечо ограничено потолком (по умолчанию 10x). Тейк-профита нет; широкий дизастер-стоп (`disaster_stop_atr`·ATR) — только страховка от гэпа. Торгует из **стабильного** (почти не ротирующегося) пула `trading.filters`.
   - Проверено бэктестом на наших данных (`scripts/tsmom_backtest.py`, 1d, ~2.7 года): L=60 long/short, vol-target → +16%/год, Sharpe 0.64, положительно во всех трёх третях истории. **Ожидание умеренное** (Sharpe ~0.6), доходность по третям затухает (компрессия трендов с 2024) — это риск-премия, не «грааль». По умолчанию выключена; обкатывать на testnet. Источники: [SSRN 4675565 (momentum under realistic assumptions)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4675565), [SSRN 4825389 (volume-weighted TSMOM)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4825389).
 
 Все зарегистрированные стратегии создаются при запуске; выключенные просто игнорируют тики. Стратегии не имеют доступа к торговле на бирже: они только генерируют сигналы, а позиции открывает `SimpleTrader`.
@@ -193,7 +189,7 @@ return {
     'reference_price': price,        # SL/TP пересчитаются к фактической цене входа
     # необязательно:
     'risk_percent': 0.5,             # сайзинг от риска (с учётом max_margin_percent_per_trade)
-    'trail_meta': {'mode': 'atr_3step', ...},
+    'trail_meta': {'mode': 'roi_gap', ...},
     'analytics_context': {...},      # попадёт в trade_analytics
 }
 ```
@@ -232,7 +228,7 @@ MongoDB, коллекции:
 
 ```bash
 python scripts/trade_report.py trading_bot_testnet.trade_analytics.csv
-python scripts/trade_report.py export.csv --strategy WallBreakoutStrategy
+python scripts/trade_report.py export.csv --strategy TsMomentumStrategy
 ```
 
 Скрипт показывает винрейт, profit factor и средний результат по стратегиям, срезы (LONG/SHORT, повторный вход, проскальзывание стопа, худшие монеты) и симуляцию выходов: дополнительный тейк по MFE и сетку SL/TP/безубытка по траектории `excursion.path`. Рядом с каждым вариантом указан винрейт, нужный для выхода в ноль: высокий винрейт сам по себе не означает прибыль.
@@ -241,8 +237,8 @@ python scripts/trade_report.py export.csv --strategy WallBreakoutStrategy
 
 ```bash
 python -m unittest discover tests -v
-python -m unittest tests.test_trend_supertrend -v
-python -m unittest tests.test_trend_supertrend.TestIndicators.test_atr_wilder -v
+python -m unittest tests.test_trading_core -v
+python -m unittest tests.test_trading_core.TestIndicators.test_atr_wilder -v
 ```
 
 Тесты не подключаются к реальной базе, но `MONGO_URI` должна быть задана: тесты сами выставляют фиктивное значение через `os.environ.setdefault`.

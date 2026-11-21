@@ -50,10 +50,8 @@ class EventType(Enum):
     # убытков подряд по ней.
     SYMBOL_PAUSED = "symbol_paused"
 
-    # OrderBook Events
+    # OrderBook Events (@depth20; зараз жоден пул його не підписує)
     ORDERBOOK_UPDATED = "orderbook_updated"
-    WALL_DETECTED = "wall_detected"
-    WALL_BREAKOUT = "wall_breakout"
 
     # Recovery Events
     # RECOVERY_STARTED = "recovery_started"

@@ -69,7 +69,8 @@ def _strategy_response(store, name: str) -> Dict[str, Any]:
 
 
 def _require_known_strategy(store, name: str) -> Dict[str, Any]:
-    params = store.get_params(name)
+    # рядки видалених із коду стратегій лишаються в БД — їх не показуємо і не міняємо
+    params = store.get_params(name) if name in STRATEGY_REGISTRY else None
     if params is None:
         raise HTTPException(status_code=404, detail=f"Unknown strategy '{name}'")
     return params
@@ -104,7 +105,10 @@ def get_settings(request: Request, session=Depends(require_session)):
         "max_open_positions": session.risk_manager.effective_max_open_positions(),
         "testnet": session.testnet,
         "is_admin": admin,
-        "strategies": [_serialize_strategy(entry, store) for entry in store.list_strategies()] if admin else [],
+        "strategies": [
+            _serialize_strategy(entry, store) for entry in store.list_strategies()
+            if entry["strategy_name"] in STRATEGY_REGISTRY
+        ] if admin else [],
     }
 
 
